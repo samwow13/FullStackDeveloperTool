@@ -45,7 +45,7 @@ The scope is the launcher. Preserve its service controls, database explorer, pro
 
 ## 2. Read first and reconcile existing conventions
 
-- Read the CRM root `AGENTS.md`, `FullStackLauncher/AGENTS.md`, and the launcher's existing `README.md`.
+- Read `AGENTS.md` and `README.md` at the root of this standalone launcher repository.
 - The repository defers automated testing. Do not create, modify, build, or run test projects, test harnesses, UI automation scripts, or test infrastructure. Use a focused application build and appropriate manual verification during implementation. This documentation-only handoff requires neither.
 - The current monitor must keep its access to Codex metadata read-only. Do not write Codex SQLite databases, edit its stored sessions directly, inspect credentials, call private agent tools, or start/stop/reconfigure the existing Codex daemon.
 - The requested queue is a new, explicit execution feature. Implement it through a separate adapter to a documented Codex interface. A hidden, application-owned Codex child process for an enabled queue is distinct from managing the existing desktop daemon. Keep passive monitoring and active execution separate.
@@ -247,7 +247,7 @@ Do not use `ServiceRunner` as the Codex runner. It assumes a local HTTP service 
 
 ## 9. Existing code map
 
-Paths are relative to `FullStackLauncher`:
+Paths are relative to this repository's root:
 
 | File | Relevant existing behavior |
 | --- | --- |
@@ -263,6 +263,6 @@ Paths are relative to `FullStackLauncher`:
 | `CodexMonitor/ChatProgressWindow.xaml` / `.xaml.cs` | Floating tracker rendering, transparent appearance, bounds, visibility, and Clear. |
 | `CodexMonitor/ReminderState.cs` | Project-wide audio reminders; never use repeated sound events to schedule tasks. |
 | `CodexMonitor/MonitorPreferences.cs` | Separate monitor settings and minimal persisted completion identifiers. |
-| `FullStackLauncher.csproj` / `publish.ps1` | Application-only build and single-file publishing with embedded initial settings. |
+| `FullStackLauncher.csproj` / `publish.ps1` | Application-only build and single-file publishing; new users start with an empty library, with no embedded personal settings. |
 
 Resume from the current progress section. Complete the live Step 1 integration checks before introducing automatic execution; keep the existing notes and queue editor usable throughout the next stages.

@@ -10,6 +10,8 @@ Each project also shows its current **Git branch** in the sidebar and beneath th
 
 ## Run from source
 
+The launcher source lives at the root of the standalone `FullStackDeveloperTool` repository. Run the commands below from the folder containing `FullStackLauncher.csproj`.
+
 Double-click **launch.cmd**. It builds the launcher in Release mode and opens its window. Building requires Windows and the .NET 10 SDK or a newer compatible SDK.
 
 You can also run:
@@ -18,7 +20,7 @@ You can also run:
 dotnet run --project .\FullStackLauncher.csproj
 ```
 
-The launcher needs the same tools your projects normally use on `PATH`. This CRM needs its backend's .NET SDK, plus a Node.js/npm version supported by the Angular project. The default single-file build includes the launcher's .NET runtime; it does not install SDKs, Node, npm, dependencies, or databases for your projects.
+The launcher needs the same tools your projects normally use on `PATH`. For example, an ASP.NET Core and Angular project needs its backend's .NET SDK, plus a Node.js/npm version supported by its Angular frontend. The default single-file build includes the launcher's .NET runtime; it does not install SDKs, Node, npm, dependencies, or databases for your projects.
 
 ## Start with your own projects
 
