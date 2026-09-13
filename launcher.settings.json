@@ -1,0 +1,15 @@
+{
+  "version": 1,
+  "selectedProjectId": null,
+  "projects": [],
+  "developerTools": [],
+  "layout": {
+    "projectsVisible": true,
+    "toolsVisible": true,
+    "servicesVisible": true,
+    "consoleVisible": true,
+    "databaseVisible": true,
+    "consoleShare": 0.47,
+    "servicesHeightShare": 0.35
+  }
+}

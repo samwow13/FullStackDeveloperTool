@@ -1,0 +1,27 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <UseWPF>true</UseWPF>
+    <UseWindowsForms>true</UseWindowsForms>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <AssemblyName>FullStackLauncher</AssemblyName>
+    <RootNamespace>FullStackLauncher</RootNamespace>
+    <ApplicationIcon>Assets\launcher.ico</ApplicationIcon>
+    <!-- Local data must never become implicit compile, resource, or content items. -->
+    <DefaultItemExcludes>$(DefaultItemExcludes);Tests\**;artifacts\**;portable\**;publish\**;**\bin\**;**\obj\**;**\TestResults\**;**\node_modules\**;**\.git\**;**\.vs\**;**\monitor-runtime\**;**\api-runtime\**</DefaultItemExcludes>
+    <DefaultItemExcludes>$(DefaultItemExcludes);**\.env;**\.env.*;**\secrets.json*;**\appsettings.Local.json*;**\appsettings.*.Local.json*;**\database-connections\**;**\database-connections*.dat*;**\api-secrets\**;**\api-secrets*.dat*;**\*.pfx;**\*.p12;**\*.key;**\*.pem</DefaultItemExcludes>
+    <DefaultItemExcludes>$(DefaultItemExcludes);**\launcher*.json*;**\*.settings.json*;**\*.local.json*;**\*.settings.local.json;**\*.local.settings.json;**\*.json.bak;**\*.json.*.bak;**\*.json.*.tmp;**\codex-monitor.settings.json*;**\project-tasks.json*;**\*.project-tasks.json*</DefaultItemExcludes>
+  </PropertyGroup>
+  <ItemGroup>
+    <Using Remove="System.Windows.Forms" />
+    <Using Remove="System.Drawing" />
+    <PackageReference Include="Npgsql" Version="10.0.3" />
+    <Compile Remove="Tests\**\*.cs" />
+    <None Remove="Assets\launcher.ico" />
+    <Resource Include="Assets\launcher.ico" />
+    <None Update="CodexAlerts.cmd" CopyToOutputDirectory="Never" CopyToPublishDirectory="Never" />
+    <None Include="launcher.settings.json" CopyToOutputDirectory="Never" CopyToPublishDirectory="Never" />
+  </ItemGroup>
+</Project>

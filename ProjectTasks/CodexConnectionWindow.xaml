@@ -1,0 +1,92 @@
+<Window x:Class="FullStackLauncher.ProjectTasks.CodexConnectionWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="Codex connection" Width="860" Height="830" MinWidth="650" MinHeight="540"
+        Background="{StaticResource BackgroundBrush}" Foreground="{StaticResource TextBrush}"
+        Icon="pack://application:,,,/Assets/launcher.ico" WindowStartupLocation="CenterOwner">
+    <Window.Resources>
+        <Style x:Key="Caption" TargetType="TextBlock">
+            <Setter Property="TextWrapping" Value="Wrap"/>
+            <Setter Property="Foreground" Value="{StaticResource MutedBrush}"/>
+            <Setter Property="FontSize" Value="12"/>
+        </Style>
+        <Style x:Key="Readout" TargetType="TextBox" BasedOn="{StaticResource {x:Type TextBox}}">
+            <Setter Property="IsReadOnly" Value="True"/>
+            <Setter Property="TextWrapping" Value="Wrap"/>
+            <Setter Property="VerticalScrollBarVisibility" Value="Auto"/>
+            <Setter Property="MaxHeight" Value="150"/>
+            <Setter Property="Margin" Value="0,5,0,9"/>
+        </Style>
+    </Window.Resources>
+    <Grid Margin="22">
+        <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="*"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
+        <StackPanel Margin="0,0,0,14">
+            <TextBlock Text="CODEX CONNECTION" FontSize="11" FontWeight="Bold" Foreground="{StaticResource AccentBrush}"/>
+            <TextBlock Text="{Binding ProjectName}" FontSize="23" FontWeight="SemiBold" Margin="0,5,0,4" TextWrapping="Wrap"/>
+            <TextBlock Text="{Binding Folder}" Style="{StaticResource Caption}"/>
+        </StackPanel>
+        <ScrollViewer Grid.Row="1" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
+            <StackPanel Margin="0,0,10,0">
+                <TextBlock Text="{Binding HoldMessage}" TextWrapping="Wrap" Margin="0,0,0,12"/>
+                <TextBlock Text="Connection checks may appear in Codex's general Tasks list. This build cannot assign them to a desktop project." Style="{StaticResource Caption}" Margin="0,0,0,12"/>
+                <Grid>
+                    <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="14"/><ColumnDefinition Width="180"/></Grid.ColumnDefinitions>
+                    <StackPanel>
+                        <Label Content="_Model" Target="{Binding ElementName=ModelChoice}" Foreground="{StaticResource MutedBrush}" Padding="0,0,0,5"/>
+                        <ComboBox x:Name="ModelChoice" ItemsSource="{Binding Models}" SelectedItem="{Binding SelectedModel}" DisplayMemberPath="DisplayName" IsEnabled="{Binding CanConfigure}"/>
+                    </StackPanel>
+                    <StackPanel Grid.Column="2">
+                        <Label Content="_Thinking level" Target="{Binding ElementName=EffortChoice}" Foreground="{StaticResource MutedBrush}" Padding="0,0,0,5"/>
+                        <ComboBox x:Name="EffortChoice" ItemsSource="{Binding Efforts}" SelectedItem="{Binding SelectedEffort}" DisplayMemberPath="Id" ToolTip="{Binding SelectedEffort.Description}" IsEnabled="{Binding CanConfigure}"/>
+                    </StackPanel>
+                </Grid>
+                <WrapPanel Margin="0,12,0,9">
+                    <Button Content="Refresh models" Command="{Binding RefreshModelsCommand}" Margin="0,0,8,6"/>
+                    <Button Content="_Run connection check" Command="{Binding RunCommand}" Style="{StaticResource PrimaryButton}" Margin="0,0,8,6"/>
+                    <Button Content="_Stop check" Command="{Binding StopCommand}" Margin="0,0,0,6"/>
+                </WrapPanel>
+                <TextBlock Text="The check requests a short response with no tools and uses a read-only sandbox. Its work limit is 90 seconds, followed by up to 7 seconds for interruption and cleanup. Stop requests interruption of its exact turn. A lost connection leaves an unresolved attempt for review." Style="{StaticResource Caption}"/>
+                <Expander Header="Fixed connection prompt" Foreground="{StaticResource TextBrush}" Margin="0,10,0,14">
+                    <TextBox Text="{Binding Prompt, Mode=OneWay}" Style="{StaticResource Readout}" AutomationProperties.Name="Fixed connection prompt"/>
+                </Expander>
+                <Border Background="{StaticResource SurfaceBrush}" BorderBrush="{StaticResource BorderBrush}" BorderThickness="1" CornerRadius="8" Padding="14">
+                    <StackPanel>
+                        <DockPanel Margin="0,0,0,10">
+                            <Button DockPanel.Dock="Right" Content="Reload history" Command="{Binding ReloadCommand}"/>
+                            <TextBlock Text="Saved connection checks" FontSize="16" FontWeight="SemiBold" VerticalAlignment="Center"/>
+                        </DockPanel>
+                        <ComboBox ItemsSource="{Binding History}" SelectedItem="{Binding SelectedReceipt}" DisplayMemberPath="Label" IsEnabled="{Binding CanConfigure}" AutomationProperties.Name="Saved connection check"/>
+                        <TextBlock Text="{Binding SelectedReceipt.Requested}" Style="{StaticResource Caption}" Margin="0,10,0,4"/>
+                        <TextBox Text="{Binding SelectedReceipt.Identity, Mode=OneWay}" Style="{StaticResource Readout}" AutomationProperties.Name="Recorded task and turn identities"/>
+                        <TextBlock Text="{Binding SelectedReceipt.Receipt.ResultSummary}" TextWrapping="Wrap" Foreground="{StaticResource AccentBrush}" Margin="0,0,0,8"/>
+                        <TextBlock Text="{Binding SelectedReceipt.Association}" TextWrapping="Wrap" FontWeight="SemiBold"/>
+                        <TextBlock Text="Find the exact task ID above in Codex and check its project location. Matching a working folder alone does not establish desktop sidebar placement." Style="{StaticResource Caption}" Margin="0,5,0,8"/>
+                        <WrapPanel>
+                            <Button Content="Found in intended project" Command="{Binding ConfirmAssociationCommand}" Margin="0,0,8,6"/>
+                            <Button Content="Could not find task" Command="{Binding NotVisibleCommand}" Margin="0,0,0,6"/>
+                        </WrapPanel>
+                        <Expander Header="Protocol evidence" Foreground="{StaticResource TextBrush}" Margin="0,8,0,0">
+                            <StackPanel>
+                                <TextBlock Text="{Binding SelectedReceipt.Evidence}" Style="{StaticResource Caption}" Margin="0,8,0,8"/>
+                                <TextBox Text="{Binding SelectedReceipt.Receipt.ConnectionDetails, Mode=OneWay}" Style="{StaticResource Readout}" AutomationProperties.Name="Resolved connection settings"/>
+                            </StackPanel>
+                        </Expander>
+                        <StackPanel IsEnabled="{Binding CanReview}" Margin="0,12,0,0">
+                            <CheckBox IsChecked="{Binding ReviewConfirmed}" Foreground="{StaticResource TextBrush}">
+                                <TextBlock Text="I checked this attempt in Codex and confirmed it is no longer running." TextWrapping="Wrap"/>
+                            </CheckBox>
+                            <Button Content="Record review and release check hold" Command="{Binding RecordReviewCommand}" HorizontalAlignment="Left" Margin="0,8,0,0"/>
+                        </StackPanel>
+                    </StackPanel>
+                </Border>
+            </StackPanel>
+        </ScrollViewer>
+        <Border Grid.Row="2" BorderBrush="{StaticResource BorderBrush}" BorderThickness="0,1,0,0" Padding="0,12,0,0" Margin="0,14,0,0">
+            <Grid>
+                <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+                <TextBlock Text="{Binding Status}" TextWrapping="Wrap" Foreground="{StaticResource AccentBrush}" AutomationProperties.LiveSetting="Polite"/>
+                <Button Grid.Column="1" Content="Close" Click="Close_Click" Margin="16,0,0,0" VerticalAlignment="Top"/>
+            </Grid>
+        </Border>
+    </Grid>
+</Window>

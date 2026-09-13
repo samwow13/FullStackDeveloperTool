@@ -1,0 +1,44 @@
+# Build outputs and local working data (also when this folder is its own repository).
+**/bin/
+**/obj/
+**/TestResults/
+**/node_modules/
+**/.vs/
+**/portable/
+**/publish/
+**/artifacts/
+*.user
+*.suo
+*.log
+
+# Keep only the empty root example; actual settings and recovery copies stay local.
+**/launcher*.json*
+**/*.settings.json*
+**/*.local.json*
+!/launcher.settings.json
+**/*.settings.local.json
+**/*.local.settings.json
+**/*.json.bak
+**/*.json.*.bak
+**/*.json.*.tmp
+**/codex-monitor.settings.json*
+**/project-tasks.json*
+**/*.project-tasks.json*
+**/monitor-runtime/
+**/api-runtime/
+
+# Credentials, environment overrides, and private certificate material.
+**/.env
+**/.env.*
+!**/.env.example
+**/secrets.json*
+**/appsettings.Local.json*
+**/appsettings.*.Local.json*
+**/database-connections/
+**/database-connections*.dat*
+**/api-secrets/
+**/api-secrets*.dat*
+**/*.pfx
+**/*.p12
+**/*.key
+**/*.pem

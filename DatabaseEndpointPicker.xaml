@@ -1,0 +1,23 @@
+<UserControl x:Class="FullStackLauncher.DatabaseEndpointPicker"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             Foreground="{StaticResource TextBrush}">
+    <Border Background="{StaticResource SurfaceBrush}" BorderBrush="{StaticResource BorderBrush}" BorderThickness="1" CornerRadius="8" Padding="14">
+        <StackPanel>
+            <TextBlock x:Name="Heading" Foreground="{StaticResource TextBrush}" FontWeight="SemiBold" FontSize="15" Margin="0,0,0,10"/>
+            <Grid>
+                <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+                <ComboBox x:Name="SourcePicker" DisplayMemberPath="Label" SelectionChanged="Source_Changed" AutomationProperties.Name="Connection source"/>
+                <Button Grid.Column="1" Content="Add connection…" Click="Add_Click" Margin="8,0,0,0" Padding="9,5" ToolTip="Connect and save a connection securely for future use"/>
+            </Grid>
+            <TextBlock x:Name="ServerLabel" Foreground="{StaticResource MutedBrush}" TextTrimming="CharacterEllipsis" Margin="0,5,0,7"/>
+            <Grid>
+                <Grid.ColumnDefinitions><ColumnDefinition Width="Auto"/><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+                <Label Content="Database" Target="{Binding ElementName=DatabasePicker}" Foreground="{StaticResource MutedBrush}" VerticalAlignment="Center"/>
+                <ComboBox Grid.Column="1" x:Name="DatabasePicker" IsEditable="True" IsTextSearchEnabled="False" AutomationProperties.Name="Database name"/>
+                <Button x:Name="LoadButton" Grid.Column="2" Content="List databases" Click="Load_Click" Margin="8,0,0,0" Padding="9,5"/>
+            </Grid>
+            <TextBlock x:Name="Notice" Foreground="{StaticResource MutedBrush}" TextWrapping="Wrap" FontSize="12" Margin="0,8,0,0"/>
+        </StackPanel>
+    </Border>
+</UserControl>

@@ -1,0 +1,25 @@
+<Window x:Class="FullStackLauncher.DatabaseConnectionWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="Saved PostgreSQL connection" Width="620" Height="470" MinWidth="500" MinHeight="350"
+        Background="{StaticResource BackgroundBrush}" Foreground="{StaticResource TextBrush}"
+        FontFamily="Segoe UI" FontSize="13" UseLayoutRounding="True"
+        WindowStartupLocation="CenterOwner" Icon="/Assets/launcher.ico">
+    <ScrollViewer VerticalScrollBarVisibility="Auto">
+        <StackPanel Margin="20">
+            <TextBlock Text="Add a PostgreSQL connection" FontSize="20" FontWeight="SemiBold"/>
+            <TextBlock Text="Connect once to save this connection for the database explorer, comparison, and account tools. Credentials are encrypted for your Windows user and stay separate from launcher settings." Foreground="{StaticResource MutedBrush}" TextWrapping="Wrap" Margin="0,8,0,14"/>
+            <Label Content="_Label" Target="{Binding ElementName=ConnectionLabel}" Foreground="{StaticResource TextBrush}"/>
+            <TextBox x:Name="ConnectionLabel" Text="Production" MaxLength="100"/>
+            <Label Content="PostgreSQL _connection string" Target="{Binding ElementName=ConnectionString}" Foreground="{StaticResource TextBrush}"/>
+            <PasswordBox x:Name="ConnectionString" Padding="10,8" Foreground="{StaticResource TextBrush}" Background="#111923" BorderBrush="{StaticResource BorderBrush}"/>
+            <TextBlock Text="Npgsql format: Host=…;Port=5432;Database=…;Username=…;Password=…;SSL Mode=VerifyFull" TextWrapping="Wrap" Foreground="{StaticResource MutedBrush}" FontSize="12" Margin="0,6,0,0"/>
+            <TextBlock Text="Remote connections always use VerifyFull, including existing saved connections. The server certificate and hostname must match a trusted CA; set Root Certificate if your server uses a private CA. Only explicit loopback development connections may use weaker TLS settings." TextWrapping="Wrap" Foreground="{StaticResource MutedBrush}" FontSize="12" Margin="0,8,0,0"/>
+            <TextBlock x:Name="Notice" TextWrapping="Wrap" Foreground="#FFACA9" Margin="0,8,0,0"/>
+            <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,12,0,0">
+                <Button x:Name="CancelButton" Content="Cancel" Click="Cancel_Click" Margin="0,0,8,0"/>
+                <Button x:Name="SaveButton" Content="Connect &amp; save" Click="Add_Click" IsDefault="True" Style="{StaticResource PrimaryButton}"/>
+            </StackPanel>
+        </StackPanel>
+    </ScrollViewer>
+</Window>

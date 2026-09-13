@@ -1,0 +1,77 @@
+<Window x:Class="FullStackLauncher.CodexMonitor.ChatProgressWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="Codex chat progress" Icon="pack://application:,,,/Assets/launcher.ico"
+        Width="420" Height="440" MinWidth="300" MinHeight="80" MaxWidth="800" MaxHeight="900"
+        WindowStyle="None" ResizeMode="NoResize" AllowsTransparency="True" WindowStartupLocation="Manual"
+        ShowInTaskbar="False" ShowActivated="False" Topmost="True"
+        Foreground="#172331" Background="Transparent"
+        Closing="Window_Closing" LocationChanged="Window_BoundsChanged" SizeChanged="Window_BoundsChanged">
+    <Window.Resources>
+        <Style x:Key="ClearButton" TargetType="Button">
+            <Setter Property="Foreground" Value="#263443"/>
+            <Setter Property="Background" Value="#B8F7FAFC"/>
+            <Setter Property="BorderBrush" Value="#55FFFFFF"/>
+            <Setter Property="BorderThickness" Value="1"/>
+            <Setter Property="Padding" Value="10,4"/>
+            <Setter Property="FontSize" Value="11"/>
+            <Setter Property="Cursor" Value="Hand"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="Button">
+                        <Border x:Name="Frame" Background="{TemplateBinding Background}" BorderBrush="{TemplateBinding BorderBrush}" BorderThickness="{TemplateBinding BorderThickness}" CornerRadius="5" Padding="{TemplateBinding Padding}">
+                            <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center" TextElement.Foreground="{TemplateBinding Foreground}"/>
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsMouseOver" Value="True"><Setter TargetName="Frame" Property="Background" Value="#E5FFFFFF"/></Trigger>
+                            <Trigger Property="IsPressed" Value="True"><Setter TargetName="Frame" Property="Background" Value="#F0E2EAF1"/></Trigger>
+                            <Trigger Property="IsKeyboardFocused" Value="True"><Setter TargetName="Frame" Property="BorderBrush" Value="#47677F"/></Trigger>
+                            <Trigger Property="IsEnabled" Value="False">
+                                <Setter Property="Foreground" Value="#65707C"/>
+                                <Setter Property="Cursor" Value="Arrow"/>
+                                <Setter TargetName="Frame" Property="Background" Value="#80F7FAFC"/>
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+    </Window.Resources>
+    <Grid Margin="4">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
+        </Grid.RowDefinitions>
+        <Button x:Name="ClearAllButton" Content="Clear" Style="{StaticResource ClearButton}" HorizontalAlignment="Right" Margin="0,0,0,7" IsEnabled="False" Click="ClearAll_Click" ToolTip="Clear all finished chats" AutomationProperties.Name="Clear all finished chats"/>
+        <ScrollViewer Grid.Row="1" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled" Padding="0,0,3,0" Margin="0,0,0,14" Background="{x:Null}">
+            <ItemsControl x:Name="ChatList" Foreground="#172331" AutomationProperties.Name="Codex chat progress">
+                <ItemsControl.ItemTemplate>
+                    <DataTemplate>
+                        <Border HorizontalAlignment="Stretch" Background="#B8F7FAFC" CornerRadius="6" Padding="9,6" Margin="0,0,0,6" MouseLeftButtonDown="Chat_MouseLeftButtonDown">
+                            <Grid>
+                                <Grid.ColumnDefinitions><ColumnDefinition Width="18"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+                                <Ellipse Width="9" Height="9" Fill="{Binding DotColor}" Stroke="#50263343" StrokeThickness="0.5" HorizontalAlignment="Left" VerticalAlignment="Top" Margin="0,4,0,0" AutomationProperties.Name="{Binding Status}"/>
+                                <StackPanel Grid.Column="1">
+                                    <Grid Margin="0,0,0,3"><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+                                        <TextBlock Text="{Binding ProjectName}" Foreground="#415469" FontSize="10" TextTrimming="CharacterEllipsis" ToolTip="{Binding ProjectPath}" Margin="0,0,10,0"/>
+                                        <TextBlock Grid.Column="1" Text="{Binding EstimateText}" Foreground="#263443" FontSize="10" FontWeight="SemiBold" ToolTip="{Binding EstimateDetail}"/>
+                                    </Grid>
+                                    <TextBlock Text="{Binding Title}" Foreground="#172331" FontSize="12" FontWeight="SemiBold" TextWrapping="Wrap" TextTrimming="CharacterEllipsis" MaxHeight="54" LineHeight="18" LineStackingStrategy="BlockLineHeight" ToolTip="{Binding Title}"/>
+                                </StackPanel>
+                            </Grid>
+                        </Border>
+                    </DataTemplate>
+                </ItemsControl.ItemTemplate>
+            </ItemsControl>
+        </ScrollViewer>
+        <Thumb Grid.Row="1" Width="14" Height="14" HorizontalAlignment="Right" VerticalAlignment="Bottom" Cursor="SizeNWSE" DragDelta="ResizeGrip_DragDelta" AutomationProperties.Name="Resize chat progress">
+            <Thumb.Template>
+                <ControlTemplate TargetType="Thumb">
+                    <Grid Background="Transparent">
+                        <Path Data="M 4,12 L 12,4 M 9,12 L 12,9" Stroke="#66808A96" StrokeThickness="1.5"/>
+                    </Grid>
+                </ControlTemplate>
+            </Thumb.Template>
+        </Thumb>
+    </Grid>
+</Window>
