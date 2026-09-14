@@ -9,6 +9,7 @@ using FullStackLauncher.Models;
 namespace FullStackLauncher.Services;
 
 public sealed record DeveloperToolTarget(string FileName, bool IsWebsite, string Description);
+public sealed record ServiceEditorTarget(string Name, string FileName);
 
 /// <summary>
 /// Opens user-configured desktop tools and websites. Developer tools are never adopted by the
@@ -88,6 +89,126 @@ public static class DeveloperToolLauncher
             UseShellExecute = true,
             WorkingDirectory = Path.GetDirectoryName(executable)!
         });
+    }
+
+    /// <summary>
+    /// Finds supported folder-opening editors using known install locations and executable names
+    /// on PATH. Discovery never starts applications or changes the saved developer-tool library.
+    /// </summary>
+    public static IReadOnlyList<ServiceEditorTarget> FindInstalledEditors()
+    {
+        (string Name, string Executable, string[] InstallFolders)[] editors =
+        [
+            ("Visual Studio Code", "Code.exe", ["Microsoft VS Code"]),
+            ("Visual Studio Code Insiders", "Code - Insiders.exe", ["Microsoft VS Code Insiders"]),
+            ("Cursor", "Cursor.exe", ["Cursor"]),
+            ("Windsurf", "Windsurf.exe", ["Windsurf"]),
+            ("Sublime Text", "sublime_text.exe", ["Sublime Text", "Sublime Text 4", "Sublime Text 3"])
+        ];
+        var installed = new List<ServiceEditorTarget>();
+        var foundPaths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var installRoots = EditorInstallRoots().ToArray();
+        var pathDirectories = EditorPathDirectories().ToArray();
+        foreach (var editor in editors)
+        {
+            foreach (var candidate in EditorCandidates(editor.Executable, editor.InstallFolders, installRoots, pathDirectories)
+                .Distinct(StringComparer.OrdinalIgnoreCase))
+            {
+                try
+                {
+                    var executable = ResolveApplicationPath(candidate, AppContext.BaseDirectory);
+                    if (!File.Exists(executable)) continue;
+                    if (foundPaths.Add(executable)) installed.Add(new(editor.Name, executable));
+                    break;
+                }
+                catch (Exception ex) when (ex is ArgumentException or SecurityException) { }
+            }
+        }
+        return installed;
+    }
+
+    /// <summary>
+    /// Opens a service folder in an explicitly selected application. Send the folder even when
+    /// the editor is already running so its normal instance handling opens the requested folder.
+    /// </summary>
+    public static void OpenFolder(DeveloperToolTarget target, string folder)
+    {
+        ArgumentNullException.ThrowIfNull(target);
+        if (target.IsWebsite)
+            throw new ArgumentException("Choose an installed application to open the service folder.", nameof(target));
+        var executable = ResolveApplicationPath(target.FileName, AppContext.BaseDirectory);
+        if (Path.GetFileName(executable).Equals("dotnet.exe", StringComparison.OrdinalIgnoreCase)
+            || Path.GetFileName(executable).Equals("node.exe", StringComparison.OrdinalIgnoreCase))
+            throw new ArgumentException("Choose the editor's executable directly, rather than a service runtime.", nameof(target));
+        if (!File.Exists(executable))
+            throw new FileNotFoundException("The selected application was not found. Choose its installed .exe file again.", executable);
+        if (string.IsNullOrWhiteSpace(folder) || ContainsControlCharacters(folder))
+            throw new ArgumentException("The service needs a valid folder before it can be opened in an application.", nameof(folder));
+
+        string resolvedFolder;
+        try
+        {
+            resolvedFolder = Path.GetFullPath(folder);
+        }
+        catch (Exception ex) when (ex is ArgumentException or NotSupportedException or PathTooLongException)
+        {
+            throw new ArgumentException("The service folder path is invalid. Check its configured folder.", nameof(folder), ex);
+        }
+        if (!Directory.Exists(resolvedFolder))
+            throw new DirectoryNotFoundException("The service folder was not found. Check its configured folder.");
+
+        var startInfo = new ProcessStartInfo(executable)
+        {
+            UseShellExecute = false,
+            WorkingDirectory = resolvedFolder
+        };
+        startInfo.ArgumentList.Add(resolvedFolder);
+        using var application = Process.Start(startInfo)
+            ?? throw new InvalidOperationException("The selected application could not be started.");
+    }
+
+    private static IEnumerable<string> EditorInstallRoots()
+    {
+        var local = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
+        if (!string.IsNullOrWhiteSpace(local)) yield return Path.Combine(local, "Programs");
+        var roots = new[]
+        {
+            Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles),
+            Environment.GetFolderPath(Environment.SpecialFolder.ProgramFilesX86),
+            Environment.GetEnvironmentVariable("ProgramW6432")
+        };
+        foreach (var root in roots.Where(root => !string.IsNullOrWhiteSpace(root)).Distinct(StringComparer.OrdinalIgnoreCase))
+            yield return root!;
+    }
+
+    private static IEnumerable<string> EditorPathDirectories()
+    {
+        // Bound discovery to explicit PATH entries. Do not search the working directory, expand
+        // arbitrary descendants, or run command-script shims such as code.cmd.
+        foreach (var entry in (Environment.GetEnvironmentVariable("PATH") ?? "").Split(Path.PathSeparator).Take(128))
+        {
+            var directory = Environment.ExpandEnvironmentVariables(entry.Trim().Trim('"'));
+            if (string.IsNullOrWhiteSpace(directory) || ContainsControlCharacters(directory)
+                || directory.IndexOfAny(Path.GetInvalidPathChars()) >= 0 || directory.Contains('"')
+                || !Path.IsPathFullyQualified(directory)) continue;
+            yield return directory;
+        }
+    }
+
+    private static IEnumerable<string> EditorCandidates(string executable, string[] installFolders,
+        string[] installRoots, string[] pathDirectories)
+    {
+        foreach (var root in installRoots)
+            foreach (var folder in installFolders)
+                yield return Path.Combine(root, folder, executable);
+
+        foreach (var directory in pathDirectories)
+        {
+            yield return Path.Combine(directory, executable);
+            // Electron editors commonly place their CLI shim in an installation's bin folder.
+            if (Path.GetFileName(Path.TrimEndingDirectorySeparator(directory)).Equals("bin", StringComparison.OrdinalIgnoreCase))
+                yield return Path.Combine(directory, "..", executable);
+        }
     }
 
     private static Uri ValidateWebsite(string? value)

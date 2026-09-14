@@ -1,4 +1,5 @@
 using System.Collections.ObjectModel;
+using System.Diagnostics;
 using System.Threading.Channels;
 using System.Windows;
 using System.Windows.Threading;
@@ -29,9 +30,15 @@ public partial class MainWindow
 
     private void FlushConsoleOutput()
     {
+        if (_closeRequested || _closing) return;
         // A busy build must not enqueue one dispatcher operation for every output line.
+        // Bound time as well as count so long lines cannot monopolize input/painting.
+        var started = Stopwatch.GetTimestamp();
         for (var count = 0; count < 120 && _pendingLogs.Reader.TryRead(out var entry); count++)
+        {
             AppendLog(entry.ProjectId, entry.Source, entry.Log);
+            if (Stopwatch.GetElapsedTime(started).TotalMilliseconds >= 8) break;
+        }
     }
 
     private void AppendLog(string projectId, string source, ServiceLog log)

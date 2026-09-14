@@ -16,7 +16,7 @@ public partial class MainWindow
     // Each project refreshes independently of process/HTTP checks and other projects.
     private async Task RefreshProjectBranchesAsync()
     {
-        if (_closing || _closed) return;
+        if (_closeRequested || _closing || _closed) return;
         await Task.WhenAll(ProjectItems.ToArray().Select(RefreshProjectBranchAsync));
     }
 
@@ -30,7 +30,7 @@ public partial class MainWindow
                 (Folder: folder, Snapshot: await ReadBranchFolderAsync(folder.Directory))));
 
             // Profile replacement/removal or an inline rename can happen while reading.
-            if (_closing || _closed || !ProjectItems.Contains(project) || !folders.SequenceEqual(BranchFolders(project))) return;
+            if (_closeRequested || _closing || _closed || !ProjectItems.Contains(project) || !folders.SequenceEqual(BranchFolders(project))) return;
 
             if (results.All(result => result.Snapshot.State == GitBranchState.NotRepository))
             {
@@ -63,7 +63,7 @@ public partial class MainWindow
         catch (OperationCanceledException) when (_branchLifetime.IsCancellationRequested) { }
         catch (Exception)
         {
-            if (!_closing && !_closed && ProjectItems.Contains(project))
+            if (!_closeRequested && !_closing && !_closed && ProjectItems.Contains(project))
                 project.UpdateBranches([new("Branch unavailable", "The configured folders could not be read. Check their paths and access permissions, then refresh.")]);
         }
         finally { _refreshingBranchProjects.Remove(project); }

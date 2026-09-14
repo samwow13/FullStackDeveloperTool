@@ -16,22 +16,26 @@ public abstract class ObservableObject : INotifyPropertyChanged
 public sealed class ServiceViewModel(ServiceRunner runner) : ObservableObject
 {
     private ServiceSnapshot _snapshot = runner.Snapshot;
+    private readonly Dictionary<string, object?> _notifiedValues = new(StringComparer.Ordinal);
+    private bool _hasDotnetProject;
+    private bool _refreshingApiProject;
+    private long _nextApiProjectRefresh;
     private bool _isBusy;
     private bool _isStopping;
     private bool _areCommandsBlocked;
-    public bool AreCommandsBlocked { get => _areCommandsBlocked; set { _areCommandsBlocked = value; Update(); } }
+    public bool AreCommandsBlocked { get => _areCommandsBlocked; set { if (_areCommandsBlocked == value) return; _areCommandsBlocked = value; Update(); } }
     private bool _isConsoleVisible;
     public ObservableCollection<ConsoleLine> ConsoleLines { get; } = [];
-    public bool IsConsoleVisible { get => _isConsoleVisible; set { _isConsoleVisible = value; Changed(); } }
+    public bool IsConsoleVisible { get => _isConsoleVisible; set { if (_isConsoleVisible == value) return; _isConsoleVisible = value; Changed(); } }
     private bool _isEditing;
     private bool _isSavingEdits;
     private string _draftName = "";
     private string _draftPort = "";
     private string? _portEditUnavailableReason;
     public bool IsEditing => _isEditing;
-    public bool IsSavingEdits { get => _isSavingEdits; set { _isSavingEdits = value; Update(); } }
-    public string DraftName { get => _draftName; set { _draftName = value; Changed(); } }
-    public string DraftPort { get => _draftPort; set { _draftPort = value; Changed(); } }
+    public bool IsSavingEdits { get => _isSavingEdits; set { if (_isSavingEdits == value) return; _isSavingEdits = value; Update(); } }
+    public string DraftName { get => _draftName; set { if (_draftName == value) return; _draftName = value; Changed(); } }
+    public string DraftPort { get => _draftPort; set { if (_draftPort == value) return; _draftPort = value; Changed(); } }
     public bool IsConsoleApp => Profile.IsConsole;
     public bool HasWebEndpoint => !IsConsoleApp;
     public string StartButtonLabel => IsConsoleApp ? "▶ Run" : "▶ Start";
@@ -65,11 +69,33 @@ public sealed class ServiceViewModel(ServiceRunner runner) : ObservableObject
     public string Directory => Runner.WorkingDirectory;
     public string Command => Profile.ApiConfiguration is null ? Profile.StartCommand
         : $"dotnet run --no-launch-profile · {Profile.ApiConfiguration.Environment} configuration";
-    public bool HasApiConfiguration => !IsConsoleApp && (Profile.ApiConfiguration is not null || HasDotnetProject());
-    private bool HasDotnetProject()
+    public bool HasApiConfiguration => !IsConsoleApp && (Profile.ApiConfiguration is not null || _hasDotnetProject);
+
+    // Bindings must not touch the filesystem: project folders may live on OneDrive or a slow drive.
+    // Periodic background discovery still notices project files created/removed outside the launcher.
+    public async Task RefreshApiProjectAvailabilityAsync()
     {
-        try { return System.IO.Directory.Exists(Directory) && System.IO.Directory.EnumerateFiles(Directory, "*.csproj").Any(); }
-        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { return false; }
+        if (IsConsoleApp || Profile.ApiConfiguration is not null || _refreshingApiProject ||
+            Environment.TickCount64 < _nextApiProjectRefresh) return;
+        _refreshingApiProject = true;
+        try
+        {
+            var hasProject = await Task.Run(() =>
+            {
+                try { return System.IO.Directory.EnumerateFiles(Directory, "*.csproj", SearchOption.TopDirectoryOnly).Any(); }
+                catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or System.Security.SecurityException)
+                { return false; }
+            });
+            _hasDotnetProject = hasProject;
+            NotifyIfChanged(HasApiConfiguration, nameof(HasApiConfiguration));
+            NotifyIfChanged(CanConfigureApi, nameof(CanConfigureApi));
+            NotifyIfChanged(CanSwitchConfiguration, nameof(CanSwitchConfiguration));
+        }
+        finally
+        {
+            _nextApiProjectRefresh = Environment.TickCount64 + 15_000;
+            _refreshingApiProject = false;
+        }
     }
     public bool CanConfigureApi => !AreCommandsBlocked && !IsEditing && HasApiConfiguration && !IsBusy && !IsStopping;
     public bool CanSwitchConfiguration => CanConfigureApi && !HasConflict;
@@ -101,8 +127,8 @@ public sealed class ServiceViewModel(ServiceRunner runner) : ObservableObject
     }
     public string LocalButtonLabel => "Use Local & restart";
     public string ProdButtonLabel => "Use Prod & restart";
-    public bool IsBusy { get => _isBusy; set { _isBusy = value; Update(); } }
-    public bool IsStopping { get => _isStopping; set { _isStopping = value; Update(); } }
+    public bool IsBusy { get => _isBusy; set { if (_isBusy == value) return; _isBusy = value; Update(); } }
+    public bool IsStopping { get => _isStopping; set { if (_isStopping == value) return; _isStopping = value; Update(); } }
     public string Status => IsStopping ? "STOPPING" : IsBusy ? "WORKING" : _snapshot.State.ToString().ToUpperInvariant();
     public string Detail => _snapshot.Detail;
     public string StateColor => IsStopping || IsBusy ? "#F6CF7D" : _snapshot.State switch
@@ -130,10 +156,60 @@ public sealed class ServiceViewModel(ServiceRunner runner) : ObservableObject
     public void Update()
     {
         _snapshot = Runner.Snapshot;
-        foreach (var name in new[] { nameof(Name), nameof(IsConsoleApp), nameof(HasWebEndpoint), nameof(StartButtonLabel), nameof(ShowClean), nameof(ShowSetup), nameof(ActionColumnCount), nameof(CanStopForPortEdit), nameof(DesiredPortLabel), nameof(ExpectedUrl), nameof(IsEditing), nameof(IsSavingEdits), nameof(CanEditPort), nameof(PortEditHint),
-                     nameof(IsBusy), nameof(Status), nameof(Detail), nameof(StateColor), nameof(ProcessLabel),
-                     nameof(Url), nameof(UrlCaption), nameof(CanOpen), nameof(CanStart), nameof(CanRestart), nameof(HasConflict), nameof(CanResolveConflict), nameof(CanClean), nameof(CanSetup), nameof(CanStop), nameof(IsRunning),
-                     nameof(Command), nameof(CanForceStop), nameof(HasApiConfiguration), nameof(CanConfigureApi), nameof(CanSwitchConfiguration), nameof(SelectedConfiguration), nameof(ProductionWarning), nameof(ConfigurationColor),
-                     nameof(ConfigurationBackground), nameof(ConfigurationBorder), nameof(ConfigurationStatus) }) Changed(name);
+        // The same VM appears in the sidebar and the service card. Re-notifying every property
+        // for an unchanged poll unnecessarily invalidates both visual trees and their layout.
+        NotifyIfChanged(Name, nameof(Name));
+        NotifyIfChanged(Kind, nameof(Kind));
+        NotifyIfChanged(IsConsoleApp, nameof(IsConsoleApp));
+        NotifyIfChanged(HasWebEndpoint, nameof(HasWebEndpoint));
+        NotifyIfChanged(StartButtonLabel, nameof(StartButtonLabel));
+        NotifyIfChanged(ShowClean, nameof(ShowClean));
+        NotifyIfChanged(ShowSetup, nameof(ShowSetup));
+        NotifyIfChanged(ActionColumnCount, nameof(ActionColumnCount));
+        NotifyIfChanged(CanStopForPortEdit, nameof(CanStopForPortEdit));
+        NotifyIfChanged(DesiredPortLabel, nameof(DesiredPortLabel));
+        NotifyIfChanged(ExpectedUrl, nameof(ExpectedUrl));
+        NotifyIfChanged(IsEditing, nameof(IsEditing));
+        NotifyIfChanged(IsSavingEdits, nameof(IsSavingEdits));
+        NotifyIfChanged(IsStoppedForPortEdit, nameof(IsStoppedForPortEdit));
+        NotifyIfChanged(CanEditPort, nameof(CanEditPort));
+        NotifyIfChanged(PortEditHint, nameof(PortEditHint));
+        NotifyIfChanged(AreCommandsBlocked, nameof(AreCommandsBlocked));
+        NotifyIfChanged(IsBusy, nameof(IsBusy));
+        NotifyIfChanged(IsStopping, nameof(IsStopping));
+        NotifyIfChanged(Status, nameof(Status));
+        NotifyIfChanged(Detail, nameof(Detail));
+        NotifyIfChanged(StateColor, nameof(StateColor));
+        NotifyIfChanged(ProcessLabel, nameof(ProcessLabel));
+        NotifyIfChanged(Url, nameof(Url));
+        NotifyIfChanged(UrlCaption, nameof(UrlCaption));
+        NotifyIfChanged(CanOpen, nameof(CanOpen));
+        NotifyIfChanged(CanStart, nameof(CanStart));
+        NotifyIfChanged(CanRestart, nameof(CanRestart));
+        NotifyIfChanged(HasConflict, nameof(HasConflict));
+        NotifyIfChanged(CanResolveConflict, nameof(CanResolveConflict));
+        NotifyIfChanged(CanMaintain, nameof(CanMaintain));
+        NotifyIfChanged(CanClean, nameof(CanClean));
+        NotifyIfChanged(CanSetup, nameof(CanSetup));
+        NotifyIfChanged(CanStop, nameof(CanStop));
+        NotifyIfChanged(IsRunning, nameof(IsRunning));
+        NotifyIfChanged(Command, nameof(Command));
+        NotifyIfChanged(CanForceStop, nameof(CanForceStop));
+        NotifyIfChanged(HasApiConfiguration, nameof(HasApiConfiguration));
+        NotifyIfChanged(CanConfigureApi, nameof(CanConfigureApi));
+        NotifyIfChanged(CanSwitchConfiguration, nameof(CanSwitchConfiguration));
+        NotifyIfChanged(SelectedConfiguration, nameof(SelectedConfiguration));
+        NotifyIfChanged(ProductionWarning, nameof(ProductionWarning));
+        NotifyIfChanged(ConfigurationColor, nameof(ConfigurationColor));
+        NotifyIfChanged(ConfigurationBackground, nameof(ConfigurationBackground));
+        NotifyIfChanged(ConfigurationBorder, nameof(ConfigurationBorder));
+        NotifyIfChanged(ConfigurationStatus, nameof(ConfigurationStatus));
+    }
+
+    private void NotifyIfChanged(object? value, string name)
+    {
+        if (_notifiedValues.TryGetValue(name, out var previous) && Equals(previous, value)) return;
+        _notifiedValues[name] = value;
+        Changed(name);
     }
 }

@@ -8,6 +8,34 @@ The Projects sidebar shows each configured app or service by name with a live st
 
 Each project also shows its current **Git branch** in the sidebar and beneath the selected project's folder path. Branch information refreshes every three seconds, when the dashboard regains focus, and with **Refresh**. The launcher checks the project root and each configured service folder, using their nearest Git repository; shared repositories appear once, while separate repositories get labeled rows. Hover for full branch names and folder details. Detached checkouts show a short commit ID; folders outside Git, missing folders and unreadable metadata have explicit status labels. Branches are read directly from local Git metadata, including linked worktrees and submodules, without requiring Git on PATH. This is the folder's current checkout, not necessarily the branch used to build an already-running service. Branch information stays in memory and never changes a checkout or saved settings.
 
+## Long Running Task
+
+The **Long Running Task** checkbox in the Sections bar keeps the computer and display awake while the dashboard is open, including when minimized. It also sends a tiny pointer nudge and return after about one minute without keyboard or mouse input. Nudges wait while keys or buttons are held and pause when the dashboard's input desktop is unavailable, including the lock screen. No clicks or keystrokes are sent, and no windows are focused.
+
+The choice is saved with your launcher preferences and defaults to off. Uncheck it or close the dashboard to stop; leaving the separate Codex watcher running does not retain this mode. Canceling dashboard closure keeps it active. If saving fails, the current session still uses your choice and the dashboard reports that it could not be remembered. Explicit sleep and Windows policies still apply. This is separate from future queue execution/keep-awake coordination.
+
+Teams determines its own presence, so this feature cannot guarantee an **Active/Available** status. See [Microsoft's Teams status guidance](https://support.microsoft.com/en-us/teams/notifications-settings/change-your-status-in-microsoft-teams). Sleep prevention uses the Windows [SetThreadExecutionState API](https://learn.microsoft.com/en-us/windows/win32/api/winbase/nf-winbase-setthreadexecutionstate).
+
+## Git workspace
+
+Choose **Git…** beside the selected project's controls. Pick the project or service folder and check the displayed **Repository** path: actions use that folder's nearest repository, which can be a containing folder. Separate service repositories remain independently selectable. The workspace requires Git for Windows on `PATH`; the existing passive sidebar branch display still reads local metadata without Git or network access.
+
+The workspace shows changed files and tracked-text lines **added / removed** against the same-named branch on the selected remote. Totals include local commits and current tracked-file edits; untracked files contribute to the file count and are excluded from line totals. Uncommitted files and commits ahead/behind are shown underneath. Comparisons use **last fetched** history. Missing or unreadable remote history shows an unavailable comparison, while local change counts remain available. There is no file-by-file viewer.
+
+- **Commit all & push…** prompts for a commit message, stages all additions, edits and deletions from the displayed repository root, commits them, then pushes the current branch to the same-named branch on the selected remote and sets its upstream. Ignored untracked files stay ignored. If the commit succeeds but the push fails, the commit remains local; use **Push** to retry sharing it.
+- **Push** shares existing local commits to the selected remote without staging or creating a commit.
+- **Fetch** refreshes the selected remote's cached branches and removes stale tracking references.
+- **Pull** brings in the selected remote's same-named branch with a clean working tree and fast-forward only. It never rebases or stashes edits.
+- **Merge** combines a selected local or last fetched remote branch into the current branch. It requires a clean working tree, fast-forwards when possible and creates a merge commit when needed. Resolve any conflicts with Git or your editor. Merging does not push.
+
+**Refresh local status** rereads local data. Use **Fetch** to update remote comparisons. Review canceled or interrupted operations before retrying; their outcome can be uncertain.
+
+**Branches** holds branch creation, switching and explicit remote branch checks. **Repository setup** holds initialization and remote connections. Initialization is available only outside an existing repository. Remote URLs must be credential-free HTTPS or SSH addresses; authentication uses your existing command-line Git setup.
+
+Azure DevOps lookup and empty-repository creation remain in **Repository setup**. They require [Azure CLI with the azure-devops extension](https://learn.microsoft.com/en-us/cli/azure/repos?view=azure-cli-latest), an existing command-line sign-in and the appropriate repository permissions. Creating a hosted repository does not push your work.
+
+Commit-message and setup drafts, plus **Activity** output, stay in memory outside launcher settings and published defaults. Git credentials are never saved in launcher settings. Opening or refreshing the workspace never stages, commits or pushes work.
+
 ## Run from source
 
 The launcher source lives at the root of the standalone `FullStackDeveloperTool` repository. Run the commands below from the folder containing `FullStackLauncher.csproj`.
@@ -99,6 +127,10 @@ The developer-tools panel keeps added **pgAdmin 4**, desktop applications, and w
 The pgAdmin shortcut automatically finds the installed desktop application and opens its own desktop/login UI. It does not rely on a fixed localhost port. Leave the executable override blank for automatic discovery, or browse to `pgAdmin4.exe` for a custom installation. If you use pgAdmin hosted on a server, add a **Website** shortcut with that server's login URL instead. Sign in through pgAdmin as usual; that shortcut is independent of the database explorer's project connections.
 
 Desktop shortcuts accept an existing `.exe` path, relative to the settings folder or using environment variables such as `%LOCALAPPDATA%` and `%ProgramFiles%`. Website shortcuts accept `http://` or `https://` URLs and open in your default browser.
+
+Each service card also has **Open in… ▾**, available while its details are collapsed. Choose Visual Studio Code or another detected editor to open that service's working folder. Discovery checks usual installation folders and PATH for VS Code, VS Code Insiders, Cursor, Windsurf, and Sublime Text. Saved **Application** shortcuts appear in the same menu; **Choose another application…** browses to an installed `.exe` that accepts a folder argument. Use **Manage saved tools…** to keep a custom application in the menu. Discovered editors and one-time choices are not added to your saved shortcuts automatically.
+
+The selected folder is passed directly to the application, including when the editor is already open. Choose applications installed outside all configured service folders, so the launcher's existing service process detection does not treat a tool as one of your apps. Opening an editor does not start or restart the service.
 
 ## Project notes and queue preparation
 
@@ -243,7 +275,7 @@ Verification for this addition: launcher Release compilation passed with zero wa
 
 ## Status and process ownership
 
-The **Sections** bar independently shows or hides Projects, Tools, Services, Console, and Database. Hiding a section gives its space to the remaining panels; the Sections bar remains available to restore it. **Reset layout** restores the default panels and split sizes. Visibility and split proportions are saved in your local launcher settings. Individual service cards can also collapse to their name and status.
+The **Sections** bar independently shows or hides Projects, Tools, Services, Console, and Database. Hiding a section gives its space to the remaining panels; the Sections bar remains available to restore it. **Reset layout** restores the default panels and split sizes. Visibility and split proportions are saved in your local launcher settings. Individual service cards start collapsed when loaded, showing their name, port or console type, status, and API environment label. Click a card's heading to expand its details. **Console output** and **Open in… ▾** stay available while collapsed.
 
 Every service has a console beneath its card, separate from the collapsible service details. Start, Restart, Clean, Setup, Local/Prod switching, conflict recovery, and Stop open the affected service's console automatically. **Start all** opens a console for each service it starts. New errors reopen that service's output. The combined console respects your saved visibility choice: service actions (including batch actions), command output, and errors do not open it automatically. Use **Sections → Console** to show or hide it. **Console output** on each card hides or restores that service's output without stopping capture.
 

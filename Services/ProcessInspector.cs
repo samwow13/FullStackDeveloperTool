@@ -32,14 +32,18 @@ internal static class ProcessInspector
         {
             if (!includePorts)
             {
-                if (fresh || _processesCached is null || DateTime.UtcNow - _processesCacheAt > TimeSpan.FromSeconds(1))
+                if (fresh || _processesCached is null || (_processesCached.IsCompleted
+                    && DateTime.UtcNow - _processesCacheAt > TimeSpan.FromSeconds(1)))
                 {
                     _processesCacheAt = DateTime.UtcNow;
                     _processesCached = Task.Run(() => Read(includePorts: false));
                 }
                 return _processesCached;
             }
-            if (fresh || _cached is null || DateTime.UtcNow - _cacheAt > TimeSpan.FromSeconds(1))
+            // Slow passive reads remain shared. Explicit operation checks still request a new
+            // snapshot, so a pre-start/pre-stop inventory can never stand in for verification.
+            if (fresh || _cached is null || (_cached.IsCompleted
+                && DateTime.UtcNow - _cacheAt > TimeSpan.FromSeconds(1)))
             {
                 _cacheAt = DateTime.UtcNow;
                 _cached = Task.Run(() => Read(includePorts: true));
@@ -145,6 +149,9 @@ internal static class ProcessInspector
         try
         {
             var entry = new ProcessEntry32 { Size = (uint)Marshal.SizeOf<ProcessEntry32>() };
+            // One reusable native path buffer avoids allocating about 64 KB per process on
+            // every status poll. Only the resulting executable strings belong to the snapshot.
+            var path = new StringBuilder(32768);
             if (Process32First(snapshot, ref entry))
             {
                 do
@@ -157,7 +164,7 @@ internal static class ProcessInspector
                         long started;
                         try { started = DateTime.FromFileTimeUtc(created).Ticks; }
                         catch (ArgumentOutOfRangeException) { continue; }
-                        var path = new StringBuilder(32768);
+                        path.Clear();
                         var length = path.Capacity;
                         var executable = QueryFullProcessImageName(handle, 0, path, ref length) ? path.ToString() : "";
                         var name = entry.ExeFile ?? "";

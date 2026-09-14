@@ -52,6 +52,37 @@
                 </ControlTemplate>
             </Setter.Value></Setter>
         </Style>
+        <Style x:Key="LongRunningTaskCheckBox" TargetType="CheckBox">
+            <Setter Property="Foreground" Value="{StaticResource TextBrush}"/>
+            <Setter Property="FontSize" Value="11"/>
+            <Setter Property="Cursor" Value="Hand"/>
+            <Setter Property="Padding" Value="6,5"/>
+            <Setter Property="VerticalContentAlignment" Value="Center"/>
+            <Setter Property="SnapsToDevicePixels" Value="True"/>
+            <Setter Property="Template"><Setter.Value>
+                <ControlTemplate TargetType="CheckBox">
+                    <Border x:Name="Frame" Background="Transparent" BorderBrush="Transparent" BorderThickness="1" CornerRadius="5" Padding="{TemplateBinding Padding}">
+                        <Grid>
+                            <Grid.ColumnDefinitions><ColumnDefinition Width="18"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+                            <Border x:Name="CheckBoxFrame" Width="18" Height="18" VerticalAlignment="Center" Background="#111923" BorderBrush="#8295AF" BorderThickness="1" CornerRadius="3">
+                                <Path x:Name="CheckMark" Data="M 3,8 L 6,11 L 13,4" Stroke="#0C2925" StrokeThickness="2" StrokeStartLineCap="Round" StrokeEndLineCap="Round" StrokeLineJoin="Round" Visibility="Collapsed"/>
+                            </Border>
+                            <ContentPresenter Grid.Column="1" Margin="8,0,0,0" VerticalAlignment="{TemplateBinding VerticalContentAlignment}" RecognizesAccessKey="True" TextElement.Foreground="{TemplateBinding Foreground}"/>
+                        </Grid>
+                    </Border>
+                    <ControlTemplate.Triggers>
+                        <Trigger Property="IsChecked" Value="True">
+                            <Setter TargetName="CheckBoxFrame" Property="Background" Value="{StaticResource AccentBrush}"/>
+                            <Setter TargetName="CheckBoxFrame" Property="BorderBrush" Value="{StaticResource AccentBrush}"/>
+                            <Setter TargetName="CheckMark" Property="Visibility" Value="Visible"/>
+                        </Trigger>
+                        <Trigger Property="IsMouseOver" Value="True"><Setter TargetName="Frame" Property="Background" Value="#243444"/></Trigger>
+                        <Trigger Property="IsKeyboardFocused" Value="True"><Setter TargetName="Frame" Property="BorderBrush" Value="White"/></Trigger>
+                        <Trigger Property="IsEnabled" Value="False"><Setter Property="Foreground" Value="{StaticResource MutedBrush}"/><Setter Property="Cursor" Value="Arrow"/></Trigger>
+                    </ControlTemplate.Triggers>
+                </ControlTemplate>
+            </Setter.Value></Setter>
+        </Style>
         <Style x:Key="HideSectionButton" TargetType="Button" BasedOn="{StaticResource {x:Type Button}}">
             <Setter Property="Content" Value="− Hide"/>
             <Setter Property="Padding" Value="7,4"/>
@@ -62,7 +93,7 @@
         </Style>
         <Style x:Key="ServiceCardExpander" TargetType="Expander">
             <Setter Property="Foreground" Value="{StaticResource TextBrush}"/>
-            <Setter Property="IsExpanded" Value="True"/>
+            <Setter Property="IsExpanded" Value="False"/>
             <Setter Property="HorizontalContentAlignment" Value="Stretch"/>
             <Setter Property="Template"><Setter.Value>
                 <ControlTemplate TargetType="Expander">
@@ -86,6 +117,21 @@
                         <ContentPresenter x:Name="Details" Grid.Row="1" ContentSource="Content" TextElement.Foreground="{TemplateBinding Foreground}" Visibility="Collapsed"/>
                     </Grid>
                     <ControlTemplate.Triggers><Trigger Property="IsExpanded" Value="True"><Setter TargetName="Details" Property="Visibility" Value="Visible"/></Trigger></ControlTemplate.Triggers>
+                </ControlTemplate>
+            </Setter.Value></Setter>
+        </Style>
+        <Style x:Key="ServiceToolMenuItem" TargetType="MenuItem">
+            <Setter Property="Foreground" Value="{StaticResource TextBrush}"/>
+            <Setter Property="Padding" Value="12,8"/>
+            <Setter Property="Template"><Setter.Value>
+                <ControlTemplate TargetType="MenuItem">
+                    <Border x:Name="ItemFrame" Background="Transparent" CornerRadius="4" Padding="{TemplateBinding Padding}">
+                        <ContentPresenter ContentSource="Header" TextElement.Foreground="{TemplateBinding Foreground}"/>
+                    </Border>
+                    <ControlTemplate.Triggers>
+                        <Trigger Property="IsHighlighted" Value="True"><Setter TargetName="ItemFrame" Property="Background" Value="#293F50"/></Trigger>
+                        <Trigger Property="IsEnabled" Value="False"><Setter Property="Foreground" Value="{StaticResource MutedBrush}"/></Trigger>
+                    </ControlTemplate.Triggers>
                 </ControlTemplate>
             </Setter.Value></Setter>
         </Style>
@@ -220,8 +266,20 @@
                 <ToggleButton x:Name="ServicesToggle" Content="Services" Style="{StaticResource SectionToggle}" IsChecked="{Binding ServicesVisible, Mode=TwoWay}" AutomationProperties.Name="Show services" ToolTip="Show or hide services and batch controls"/>
                 <ToggleButton x:Name="ConsoleToggle" Content="Console" Style="{StaticResource SectionToggle}" IsChecked="{Binding ConsoleVisible, Mode=TwoWay}" AutomationProperties.Name="Show console" ToolTip="Show or hide live console output"/>
                 <ToggleButton x:Name="DatabaseToggle" Content="Database" Style="{StaticResource SectionToggle}" IsChecked="{Binding DatabaseVisible, Mode=TwoWay}" AutomationProperties.Name="Show database" ToolTip="Show or hide the database explorer"/>
+                <Button Content="Git…" Click="GitWorkspace_Click" Padding="10,7" FontSize="11" Margin="0,0,6,5" ToolTip="Open repository setup, remotes, branches and the working tree">
+                    <Button.Style><Style TargetType="Button" BasedOn="{StaticResource {x:Type Button}}"><Style.Triggers>
+                        <DataTrigger Binding="{Binding SelectedProject}" Value="{x:Null}"><Setter Property="IsEnabled" Value="False"/></DataTrigger>
+                        <DataTrigger Binding="{Binding IsEditing}" Value="True"><Setter Property="IsEnabled" Value="False"/></DataTrigger>
+                    </Style.Triggers></Style></Button.Style>
+                </Button>
                 <Button Content="Notes &amp; queue ↗" Click="ProjectTasks_Click" Padding="10,7" FontSize="11" Margin="0,0,6,5" ToolTip="Open notes and the prepared task queue for the selected project"/>
                 <Button Content="Reset layout" Click="ResetLayout_Click" Background="Transparent" Foreground="{StaticResource MutedBrush}" Padding="9,7" FontSize="11" Margin="2,0,0,5" ToolTip="Show every section and restore the default panel sizes"/>
+                <CheckBox Content="Long Running Task" IsChecked="{Binding LongRunningTaskEnabled, Mode=OneWay}" Click="LongRunningTask_Click"
+                          Style="{StaticResource LongRunningTaskCheckBox}" Margin="12,0,6,5"
+                          ToolTipService.ShowDuration="30000"
+                          AutomationProperties.Name="Long Running Task" AutomationProperties.HelpText="{Binding LongRunningTaskDescription}">
+                    <CheckBox.ToolTip><ToolTip MaxWidth="440"><TextBlock Text="{Binding LongRunningTaskDescription}" TextWrapping="Wrap" Foreground="{StaticResource TextBrush}"/></ToolTip></CheckBox.ToolTip>
+                </CheckBox>
             </WrapPanel>
             <Border x:Name="BatchControlsPanel" Grid.Row="2" Background="{StaticResource SurfaceBrush}" CornerRadius="9" Padding="14,10" Margin="0,0,0,12" BorderBrush="{StaticResource BorderBrush}" BorderThickness="1">
                 <Grid>
@@ -338,9 +396,15 @@
                                         <TextBlock Text="{Binding ProcessLabel}" Foreground="{StaticResource MutedBrush}" FontSize="9" TextTrimming="CharacterEllipsis" ToolTip="{Binding Directory}" Margin="0,6,0,0"/>
                                     </StackPanel>
                                     </Expander>
-                                    <ToggleButton Content="Console output" Style="{StaticResource SectionToggle}"
-                                                  IsChecked="{Binding IsConsoleVisible, Mode=TwoWay}" Margin="0,10,0,0"
-                                                  HorizontalAlignment="Left" AutomationProperties.Name="{Binding Name, StringFormat=Show console for {0}}"/>
+                                    <WrapPanel Margin="0,10,0,0">
+                                        <ToggleButton Content="Console output" Style="{StaticResource SectionToggle}"
+                                                      IsChecked="{Binding IsConsoleVisible, Mode=TwoWay}" Margin="0,0,8,0"
+                                                      AutomationProperties.Name="{Binding Name, StringFormat=Show console for {0}}"/>
+                                        <Button Content="Open in… ▾" Click="OpenServiceTool_Click" Padding="10,7" FontSize="11"
+                                                Background="Transparent" Foreground="{StaticResource MutedBrush}"
+                                                ToolTip="{Binding Directory, StringFormat=Open this service folder in an installed editor or application: {0}}"
+                                                AutomationProperties.Name="{Binding Name, StringFormat=Open {0} in an editor}"/>
+                                    </WrapPanel>
                                     <controls:ConsoleOutput ItemsSource="{Binding ConsoleLines}" ShowSource="False" Height="250" Margin="0,8,0,0"
                                                             Visibility="{Binding IsConsoleVisible, Converter={StaticResource BoolToVisibility}}"
                                                             ClearRequested="ClearServiceConsole" AutomationProperties.Name="{Binding Name, StringFormat=Console for {0}}"/>

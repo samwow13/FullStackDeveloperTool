@@ -84,7 +84,7 @@ public sealed class ServiceRunner : IDisposable
         CancelMaintenance();
         await WithGateAsync(async () =>
         {
-            var configuration = PrepareConfiguration();
+            var configuration = await Task.Run(PrepareConfiguration);
             if (await StopCoreAsync(includeExternal: true)) await StartCoreAsync(configuration);
         });
     }
@@ -126,8 +126,8 @@ public sealed class ServiceRunner : IDisposable
         return WithGateAsync(async () =>
         {
             if (revision != Volatile.Read(ref _stopRevision)) return;
-            ValidateCommand(Profile.StartCommand, "Start");
-            var configuration = PrepareConfiguration();
+            await Task.Run(() => ValidateCommand(Profile.StartCommand, "Start"));
+            var configuration = await Task.Run(PrepareConfiguration);
             var inspection = await InspectAsync(fresh: true);
             if (inspection.Inventory.InspectionError is not null)
                 throw new InvalidOperationException(inspection.Inventory.InspectionError);
@@ -212,7 +212,7 @@ public sealed class ServiceRunner : IDisposable
         finally { _gate.Release(); }
     }
 
-    private Task StartCoreAsync() => StartCoreAsync(PrepareConfiguration());
+    private async Task StartCoreAsync() => await StartCoreAsync(await Task.Run(PrepareConfiguration));
 
     private async Task StartCoreAsync(ApiLaunchConfiguration? configuration)
     {
@@ -233,7 +233,7 @@ public sealed class ServiceRunner : IDisposable
             Log(Snapshot.Detail + " Start skipped.", true);
             return;
         }
-        if (configuration is null) ValidateCommand(Profile.StartCommand, "Start");
+        if (configuration is null) await Task.Run(() => ValidateCommand(Profile.StartCommand, "Start"));
         var previousSession = _consoleSession;
         _consoleSession = null;
         _lastError = null;
@@ -243,10 +243,10 @@ public sealed class ServiceRunner : IDisposable
         if (previousSession is not null)
         {
             await DrainConsoleOutputAsync(previousSession);
-            previousSession.Dispose();
+            await Task.Run(previousSession.Dispose);
         }
         _startProcess?.Dispose();
-        _startProcess = StartCommand(Profile.StartCommand, detectUrl: true, configuration);
+        _startProcess = await Task.Run(() => StartCommand(Profile.StartCommand, detectUrl: true, configuration));
         ConfigurationNeedsRestart = false;
         Publish(ServiceState.Starting, Profile.IsConsole ? "Starting console command" : "Starting; waiting for the local HTTP endpoint",
             [_startProcess.Id], BuildUiUrl());
@@ -258,7 +258,7 @@ public sealed class ServiceRunner : IDisposable
     private async Task RunMaintenanceAsync(string command, string label, int stopRevision)
     {
         if (stopRevision != Volatile.Read(ref _stopRevision)) return;
-        ValidateCommand(command, label);
+        await Task.Run(() => ValidateCommand(command, label));
         var inspection = await InspectAsync(fresh: true);
         if (inspection.Inventory.InspectionError is not null)
             throw new InvalidOperationException(inspection.Inventory.InspectionError + $" {label} was skipped.");
@@ -277,21 +277,21 @@ public sealed class ServiceRunner : IDisposable
             Interlocked.CompareExchange(ref _operationCancellation, null, cancellation);
             return;
         }
-        using var process = StartCommand(command, detectUrl: false);
+        using var process = await Task.Run(() => StartCommand(command, detectUrl: false));
         var maintenanceSession = _maintenanceSession;
         Publish(ServiceState.Busy, $"{label} in progress", [process.Id], BuildUiUrl());
         try
         {
             await process.WaitForExitAsync(cancellation.Token);
             if (maintenanceSession is not null)
-                while (maintenanceSession.ReadProcesses().Count > 0)
+                while ((await Task.Run(maintenanceSession.ReadProcesses)).Count > 0)
                     await Task.Delay(150, cancellation.Token);
             if (process.ExitCode != 0) throw new InvalidOperationException($"{label} exited with code {process.ExitCode}. See the output log.");
             Log($"{label} completed successfully.", kind: ServiceLogKind.Success);
         }
         catch (OperationCanceledException)
         {
-            maintenanceSession?.Stop();
+            if (maintenanceSession is not null) await Task.Run(maintenanceSession.Stop);
             await KillProcessesAsync(ProcessInspector.Descendants((await ProcessInspector.ReadAsync(true, includePorts: !Profile.IsConsole)).Processes,
                 [new ProcessIdentity(process.Id, process.StartTime.ToUniversalTime().Ticks)]));
             Log($"{label} stopped.");
@@ -306,13 +306,13 @@ public sealed class ServiceRunner : IDisposable
                     // A canceled/failed maintenance command must not leave descendants or output readers behind.
                     try
                     {
-                        maintenanceSession.Stop();
+                        await Task.Run(maintenanceSession.Stop);
                         await DrainConsoleOutputAsync(maintenanceSession);
                     }
                     finally
                     {
                         _maintenanceSession = null;
-                        maintenanceSession.Dispose();
+                        await Task.Run(maintenanceSession.Dispose);
                     }
                 }
             }
@@ -445,9 +445,12 @@ public sealed class ServiceRunner : IDisposable
     private sealed record Inspection(ProcessInventory Inventory, IReadOnlyList<InspectedProcess> All,
         IReadOnlyList<InspectedProcess> Owned, IReadOnlyList<ListeningPort> ReportedListeners);
 
-    private async Task<Inspection> InspectAsync(bool fresh = false)
+    // The inventory cache may already be complete. Dispatch the whole inspection, including
+    // native identity/job checks and ownership traversal, instead of resuming that work on WPF.
+    // The caller holds _gate until this task finishes, preserving the operation's ownership scope.
+    private Task<Inspection> InspectAsync(bool fresh = false) => Task.Run(async () =>
     {
-        var inventory = await ProcessInspector.ReadAsync(fresh, includePorts: !Profile.IsConsole);
+        var inventory = await ProcessInspector.ReadAsync(fresh, includePorts: !Profile.IsConsole).ConfigureAwait(false);
         var consoleMembers = new List<InspectedProcess>();
         var consoleInspectionFailed = false;
         foreach (var session in new[] { _consoleSession, _maintenanceSession }.OfType<ConsoleProcessSession>())
@@ -492,8 +495,8 @@ public sealed class ServiceRunner : IDisposable
         var all = ProcessInspector.Descendants(inventory.Processes,
             external.Select(p => p.Identity).Concat(owned.Select(p => p.Identity)))
             .Where(p => !ancestors.Contains(p.Id) && ProcessInspector.IsSameProcess(p.Identity)).ToArray();
-        return new(inventory, all, owned, reportedListeners);
-    }
+        return new Inspection(inventory, all, owned, reportedListeners);
+    });
 
     private async Task RefreshCoreAsync(Inspection? inspection = null)
     {
@@ -622,7 +625,7 @@ public sealed class ServiceRunner : IDisposable
             {
                 _consoleWasStopped = true;
                 // Job membership covers children created between snapshots, with no path or PID-name guess.
-                session.Stop();
+                await Task.Run(session.Stop);
                 inspection = await InspectAsync(fresh: true);
             }
             var conflictIdentities = conflictApproval?.Targets.Select(p => p.Identity).ToHashSet() ?? [];
@@ -693,7 +696,7 @@ public sealed class ServiceRunner : IDisposable
         finally { _intentionalStop = false; }
     }
 
-    private static async Task<List<string>> KillProcessesAsync(IReadOnlyList<InspectedProcess> targets)
+    private static Task<List<string>> KillProcessesAsync(IReadOnlyList<InspectedProcess> targets) => Task.Run(async () =>
     {
         var errors = new List<string>();
         // Children are newer than parents; check identity immediately before every individual kill.
@@ -714,7 +717,7 @@ public sealed class ServiceRunner : IDisposable
             catch (System.ComponentModel.Win32Exception ex) { errors.Add($"Could not stop PID {target.Id}: {ex.Message}"); }
         }
         return errors;
-    }
+    });
 
     private void ValidateCommand(string command, string operation)
     {
@@ -782,7 +785,7 @@ public sealed class ServiceRunner : IDisposable
 
     private async Task PumpLogsAsync()
     {
-        await foreach (var log in _logs.Reader.ReadAllAsync())
+        await foreach (var log in _logs.Reader.ReadAllAsync().ConfigureAwait(false))
         {
             try { LogReceived?.Invoke(log); }
             catch (Exception) { /* A UI subscriber must never break process supervision. */ }

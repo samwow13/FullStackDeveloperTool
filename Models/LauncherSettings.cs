@@ -4,6 +4,7 @@ public sealed class LauncherSettings
 {
     public int Version { get; set; } = 1;
     public string? SelectedProjectId { get; set; }
+    public bool LongRunningTaskEnabled { get; set; }
     public List<ProjectProfile> Projects { get; set; } = [];
     public List<DeveloperTool> DeveloperTools { get; set; } = [];
     public WorkspaceLayout Layout { get; set; } = new();

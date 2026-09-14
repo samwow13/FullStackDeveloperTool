@@ -1,5 +1,6 @@
 using System.Collections;
 using System.Collections.Specialized;
+using System.Diagnostics;
 using System.Runtime.InteropServices;
 using System.Windows;
 using System.Windows.Controls;
@@ -29,8 +30,13 @@ public partial class ConsoleOutput : UserControl
     private bool _updating;
     private bool _scrollPending;
     private bool _rebuildPending;
+    private bool _resetDocument;
 
-    public ConsoleOutput() => InitializeComponent();
+    public ConsoleOutput()
+    {
+        InitializeComponent();
+        IsVisibleChanged += (_, _) => { if (IsVisible) QueueRebuild(); };
+    }
 
     public IEnumerable? ItemsSource { get => (IEnumerable?)GetValue(ItemsSourceProperty); set => SetValue(ItemsSourceProperty, value); }
     public bool ShowSource { get => (bool)GetValue(ShowSourceProperty); set => SetValue(ShowSourceProperty, value); }
@@ -72,56 +78,76 @@ public partial class ConsoleOutput : UserControl
             return;
         }
         if (!ReferenceEquals(sender, _subscribed)) return;
-        _updating = true;
-        try
-        {
-            if (e.Action == NotifyCollectionChangedAction.Add && e.NewItems is not null && e.NewStartingIndex >= 0)
-            {
-                var index = e.NewStartingIndex;
-                foreach (var item in e.NewItems)
-                    if (item is ConsoleLine line) Insert(index++, line);
-            }
-            else if (e.Action == NotifyCollectionChangedAction.Remove && e.OldItems is not null && e.OldStartingIndex >= 0)
-            {
-                for (var count = 0; count < e.OldItems.Count && e.OldStartingIndex < _displayed.Count; count++)
-                {
-                    OutputText.Document.Blocks.Remove(_displayed[e.OldStartingIndex].Paragraph);
-                    _displayed.RemoveAt(e.OldStartingIndex);
-                }
-            }
-            else
-            {
-                Rebuild();
-                return;
-            }
-        }
-        finally { _updating = false; }
-        UpdateStatus();
-        FollowLatest();
+        // A timer drain can add/trim hundreds of lines in both consoles. Coalesce them
+        // into one document transaction, and do no rich-text work for hidden panels.
+        QueueRebuild();
     }
 
     private void QueueRebuild()
     {
-        if (_rebuildPending) return;
+        if (_rebuildPending || !IsLoaded || !IsVisible) return;
         _rebuildPending = true;
-        Dispatcher.BeginInvoke(DispatcherPriority.Background, new Action(() => { _rebuildPending = false; Rebuild(); }));
+        Dispatcher.BeginInvoke(DispatcherPriority.Background, new Action(() =>
+        {
+            _rebuildPending = false;
+            if (IsLoaded && IsVisible) SynchronizeDocument();
+        }));
     }
 
     private void Rebuild()
     {
-        if (OutputText is null) return;
+        _resetDocument = true;
+        QueueRebuild();
+    }
+
+    private ConsoleLine[] RetainedLines() => ItemsSource?.OfType<ConsoleLine>().ToArray() ?? [];
+
+    private void SynchronizeDocument()
+    {
+        var lines = RetainedLines();
+        var started = Stopwatch.GetTimestamp();
         _updating = true;
+        OutputText.BeginChange();
         try
         {
-            OutputText.Document.Blocks.Clear();
-            _displayed.Clear();
-            if (ItemsSource is not null)
-                foreach (var item in ItemsSource)
-                    if (item is ConsoleLine line) Insert(_displayed.Count, line);
+            // Keep existing paragraphs (and text selection) for the retained overlap.
+            // Normal capture only appends at the end and trims the oldest entries.
+            var first = lines.Length == 0 ? -1 : _displayed.FindIndex(item => ReferenceEquals(item.Line, lines[0]));
+            var overlap = first < 0 ? 0 : Math.Min(_displayed.Count - first, lines.Length);
+            var canRetain = !_resetDocument && first >= 0;
+            for (var index = 0; canRetain && index < overlap; index++)
+                canRetain = ReferenceEquals(_displayed[first + index].Line, lines[index]);
+            if (!canRetain)
+            {
+                OutputText.Document.Blocks.Clear();
+                _displayed.Clear();
+            }
+            else
+            {
+                for (var index = 0; index < first; index++)
+                    OutputText.Document.Blocks.Remove(_displayed[index].Paragraph);
+                _displayed.RemoveRange(0, first);
+                while (_displayed.Count > lines.Length)
+                {
+                    OutputText.Document.Blocks.Remove(_displayed[^1].Paragraph);
+                    _displayed.RemoveAt(_displayed.Count - 1);
+                }
+            }
+            _resetDocument = false;
+            for (var count = 0; _displayed.Count < lines.Length && count < 40; count++)
+            {
+                Insert(_displayed.Count, lines[_displayed.Count]);
+                if (Stopwatch.GetElapsedTime(started).TotalMilliseconds >= 8) break;
+            }
         }
-        finally { _updating = false; }
+        finally
+        {
+            OutputText.EndChange();
+            _updating = false;
+        }
         UpdateStatus();
         FollowLatest();
+        if (_displayed.Count < lines.Length) QueueRebuild();
     }
 
     private void Insert(int index, ConsoleLine line)
@@ -169,11 +195,11 @@ public partial class ConsoleOutput : UserControl
 
     private void FollowLatest()
     {
-        if (FollowToggle?.IsChecked != true || _scrollPending) return;
+        if (!IsVisible || FollowToggle?.IsChecked != true || _scrollPending) return;
         _scrollPending = true;
         Dispatcher.BeginInvoke(DispatcherPriority.Background, new Action(() =>
         {
-            try { if (FollowToggle.IsChecked == true) OutputText.ScrollToEnd(); }
+            try { if (IsLoaded && IsVisible && FollowToggle.IsChecked == true) OutputText.ScrollToEnd(); }
             finally { _scrollPending = false; }
         }));
     }
@@ -189,11 +215,12 @@ public partial class ConsoleOutput : UserControl
 
     private void CopyAllClick(object sender, RoutedEventArgs e)
     {
-        if (_displayed.Count == 0) return;
+        var lines = RetainedLines();
+        if (lines.Length == 0) return;
         try
         {
-            Clipboard.SetText(string.Join(Environment.NewLine, _displayed.Select(item => item.Line.PlainText)));
-            UpdateStatus($"Copied {_displayed.Count:N0} lines.");
+            Clipboard.SetText(string.Join(Environment.NewLine, lines.Select(line => line.PlainText)));
+            UpdateStatus($"Copied {lines.Length:N0} lines.");
         }
         catch (ExternalException) { UpdateStatus("Clipboard is busy. Select text and try Ctrl+C, or try Copy all again."); }
     }

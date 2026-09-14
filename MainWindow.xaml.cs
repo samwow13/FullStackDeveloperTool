@@ -82,6 +82,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         _layoutReady = true;
         ApplyLayout();
         DataContext = this;
+        InitializeLongRunningTaskMode();
         DatabasePanel.DatabaseSelected += SaveDatabaseSelection;
         DatabasePanel.HideRequested += (_, _) =>
         {
@@ -183,19 +184,25 @@ public partial class MainWindow : Window, INotifyPropertyChanged
 
     private async Task RefreshAsync()
     {
-        if (_refreshing || _closing) return;
+        if (_refreshing || _closeRequested || _closing) return;
         _refreshing = true;
         try
         {
             var services = _runners.Values.SelectMany(x => x).ToArray();
             await Task.WhenAll(services.Select(async service =>
             {
+                if (_closeRequested || _closing) return;
                 service.Update();
+                // Folder discovery is independent of process polling; a slow drive must
+                // not hold the global status refresh or a service command on the UI thread.
+                _ = service.RefreshApiProjectAvailabilityAsync();
                 if (service.IsBusy || service.IsStopping) return;
                 try { await service.Runner.RefreshAsync(); }
-                catch (Exception ex) { Notice = $"Status check: {ex.Message}"; }
+                catch (Exception ex) { if (!_closeRequested && !_closing) Notice = $"Status check: {ex.Message}"; }
+                if (_closeRequested || _closing) return;
                 service.Update();
             }));
+            if (_closeRequested || _closing) return;
             LastChecked = $"Checked {DateTime.Now:HH:mm:ss}";
             UpdateActions();
         }
@@ -665,63 +672,6 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     {
         RememberPanelSizes();
         SaveLayout();
-    }
-
-    private async void Window_Closing(object? sender, CancelEventArgs e)
-    {
-        if (_closed) return;
-        e.Cancel = true;
-        if (_closing) return;
-        if (_restartingMonitor)
-        {
-            Notice = "The Codex watcher is restarting. Close the launcher again when it finishes.";
-            return;
-        }
-        if (_savingProjectEdits || !await ResolveProjectEditsForCloseAsync()) return;
-        if (_projectTasksWindow?.PrepareToClose() == false) return;
-        var runners = _runners.Values.SelectMany(x => x).Select(x => x.Runner).ToArray();
-        if (runners.Any(x => x.HasManagedProcess) && MessageBox.Show(this,
-                "Close the launcher and stop the commands it started? Services started elsewhere will keep running.",
-                "Close launcher", MessageBoxButton.OKCancel, MessageBoxImage.Question) != MessageBoxResult.OK) return;
-        var closeWatcher = false;
-        if (CodexMonitor.MonitorLifetime.IsRunning())
-        {
-            var choice = MessageBox.Show(this,
-                "Also close the Codex watcher and its chat progress overlay?\n\nYes: close the watcher too.\nNo: leave it running in the tray.\nCancel: keep the launcher open.\n\nYour saved watches and settings are kept. The Codex app and its tasks are unaffected.",
-                "Close Codex watcher too?", MessageBoxButton.YesNoCancel, MessageBoxImage.Question, MessageBoxResult.No);
-            if (choice == MessageBoxResult.Cancel) return;
-            closeWatcher = choice == MessageBoxResult.Yes;
-        }
-        _closing = true;
-        IsEnabled = false;
-        if (_projectTasksWindow != null) _projectTasksWindow.IsEnabled = false;
-        _timer.Stop();
-        _consoleTimer.Stop();
-        DatabasePanel.CancelPending();
-        Notice = "Stopping launcher-owned commands…";
-        try
-        {
-            await Task.WhenAll(runners.Select(x => x.StopManagedAsync()));
-            if (closeWatcher)
-            {
-                Notice = "Closing the Codex watcher…";
-                await CodexMonitor.MonitorLifetime.StopAsync();
-            }
-            foreach (var runner in runners) runner.Dispose();
-            _closed = true;
-            Close();
-        }
-        catch (Exception ex)
-        {
-            _closing = false;
-            IsEnabled = true;
-            if (_projectTasksWindow != null) _projectTasksWindow.IsEnabled = true;
-            _timer.Start();
-            _consoleTimer.Start();
-            FlushConsoleOutput();
-            Notice = $"Closing could not finish: {ex.Message}";
-            MessageBox.Show(this, Notice, "Close incomplete", MessageBoxButton.OK, MessageBoxImage.Warning);
-        }
     }
 
     [DllImport("dwmapi.dll")]
