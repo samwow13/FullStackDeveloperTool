@@ -147,6 +147,13 @@
                                 <TextBlock Text="Example: http://localhost:5170 and /swagger. The launcher also detects local listening URLs from service output."
                                            Style="{StaticResource HelpText}" />
                             </StackPanel>
+                            <StackPanel x:Name="ApiTargetPanel" Visibility="Collapsed">
+                                <TextBlock Text="Development API target" Style="{StaticResource FieldLabel}" />
+                                <ComboBox x:Name="ApiTargetBox" MinHeight="34" AutomationProperties.Name="Development API target"
+                                          SelectionChanged="ApiTarget_SelectionChanged" />
+                                <TextBlock Text="Link to an API in this project once. Later API port changes update this Angular development proxy after both services stop. Stop existing project services before saving."
+                                           Style="{StaticResource HelpText}" />
+                            </StackPanel>
                         </StackPanel>
                     </ScrollViewer>
                 </Grid>

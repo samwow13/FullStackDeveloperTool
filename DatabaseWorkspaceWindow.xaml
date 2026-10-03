@@ -1,0 +1,21 @@
+<Window x:Class="FullStackLauncher.DatabaseWorkspaceWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:local="clr-namespace:FullStackLauncher"
+        Title="Database explorer" Width="1240" Height="840" MinWidth="900" MinHeight="600"
+        Background="{StaticResource BackgroundBrush}" Foreground="{StaticResource TextBrush}"
+        FontFamily="Segoe UI" FontSize="13" UseLayoutRounding="True"
+        WindowStartupLocation="CenterOwner" Icon="/Assets/launcher.ico"
+        Loaded="Window_Loaded" Closed="Window_Closed">
+    <Grid Margin="18">
+        <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="*"/></Grid.RowDefinitions>
+        <StackPanel Margin="0,0,0,12">
+            <TextBlock x:Name="ContextHeading" FontSize="20" FontWeight="SemiBold" TextWrapping="Wrap"/>
+            <TextBlock Text="Browse tables and rows, manage accounts and connections, or open comparison and migration tools."
+                       Foreground="{StaticResource MutedBrush}" TextWrapping="Wrap" Margin="0,5,0,0"/>
+        </StackPanel>
+        <TextBlock x:Name="SaveNotice" Grid.Row="1" Foreground="#FFD27A" TextWrapping="Wrap"
+                   Visibility="Collapsed" Margin="0,0,0,10" AutomationProperties.LiveSetting="Polite"/>
+        <local:DatabaseBrowser x:Name="Browser" Grid.Row="2"/>
+    </Grid>
+</Window>

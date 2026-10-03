@@ -20,7 +20,7 @@
                 <Button x:Name="CopyButton" Content="Copy all" Padding="9,4" Margin="0,0,6,3"
                         FontSize="11" Background="#12221F" BorderBrush="#315449" Foreground="#D4E9E2"
                         Click="CopyAllClick" ToolTip="Copy the retained output with timestamps and labels"/>
-                <Button Content="Clear" Padding="9,4" Margin="0,0,0,3"
+                <Button x:Name="ClearButton" Content="Clear" Padding="9,4" Margin="0,0,0,3"
                         FontSize="11" Background="#12221F" BorderBrush="#315449" Foreground="#D4E9E2"
                         Click="ClearClick" ToolTip="Clear this console's retained output"/>
             </WrapPanel>

@@ -24,6 +24,8 @@
 **/codex-monitor.settings.json*
 **/project-tasks.json*
 **/*.project-tasks.json*
+**/window-snip-targets.json*
+**/*.window-snip-targets.json*
 **/monitor-runtime/
 **/api-runtime/
 

@@ -92,7 +92,7 @@ internal sealed class LongRunningTaskMode : IDisposable
         var sent = SendInput((uint)inputs.Length, inputs, Marshal.SizeOf<Input>());
         SetStatus(sent == inputs.Length
             ? "On. Keeping the computer and display awake; idle pointer nudges are active."
-            : "On. Keeping awake; Windows blocked pointer activity. Teams presence is not guaranteed.");
+            : "On. Keeping awake; Windows blocked pointer activity.");
     }
 
     private static Input MouseMove(int dx) => new()

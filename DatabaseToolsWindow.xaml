@@ -109,7 +109,7 @@
             <TabItem Header="Schema _differences">
                 <Grid TextElement.FontWeight="Normal">
                     <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="*"/><RowDefinition Height="7"/><RowDefinition Height="*"/></Grid.RowDefinitions>
-                    <TextBlock x:Name="ComparisonSummary" Text="Choose any two PostgreSQL databases and click Compare schemas. Comparison does not change either database." TextWrapping="Wrap" Margin="0,0,0,8"/>
+                    <TextBlock x:Name="ComparisonSummary" Text="Choose two PostgreSQL databases or two SQL Server databases and click Compare schemas. Comparison does not change either database." TextWrapping="Wrap" Margin="0,0,0,8"/>
                     <DockPanel Grid.Row="1" Margin="0,0,0,10">
                         <ComboBox x:Name="ChangeFilter" DockPanel.Dock="Right" Width="190" SelectionChanged="Filter_Changed" Margin="8,0,0,0" SelectedIndex="0" AutomationProperties.Name="Filter change type">
                             <ComboBoxItem Content="All differences"/><ComboBoxItem Content="Only in source"/><ComboBoxItem Content="Only in target"/><ComboBoxItem Content="Definition changed"/>
@@ -148,7 +148,7 @@
                         <Button x:Name="PrepareButton" Grid.Row="1" Grid.Column="3" Content="Prepare migration plan" Click="Prepare_Click" Margin="8,0,0,0"/>
                     </Grid>
                     <TextBlock Grid.Row="1" Text="Preparation builds the selected project and generates forward migration SQL. Only Apply reviewed migrations changes the selected target." Foreground="{StaticResource MutedBrush}" TextWrapping="Wrap" Margin="0,10,0,6"/>
-                    <TextBlock Grid.Row="2" x:Name="MigrationSummary" Text="Compare databases to see EF history, or prepare a plan to check the target against repository migrations." TextWrapping="Wrap" Margin="0,4,0,7"/>
+                    <TextBlock Grid.Row="2" x:Name="MigrationSummary" Text="Compare either database type to see EF history. Migration preparation and application support PostgreSQL only." TextWrapping="Wrap" Margin="0,4,0,7"/>
                     <DataGrid Grid.Row="3" x:Name="MigrationGrid" AutomationProperties.Name="EF migration history">
                         <DataGrid.Columns><DataGridTextColumn Header="Migration" Binding="{Binding Id}" Width="*"/><DataGridTextColumn Header="Source / repository" Binding="{Binding SourceStatus}" Width="180"/><DataGridTextColumn Header="Target" Binding="{Binding TargetStatus}" Width="180"/></DataGrid.Columns>
                     </DataGrid>

@@ -1,9 +1,9 @@
+using System.Diagnostics;
 using System.IO;
 using System.Windows;
 using System.Windows.Automation;
 using System.Windows.Controls;
 using System.Windows.Controls.Primitives;
-using System.Windows.Media;
 using FullStackLauncher.Models;
 using FullStackLauncher.Services;
 using FullStackLauncher.ViewModels;
@@ -28,14 +28,16 @@ public partial class MainWindow
         {
             PlacementTarget = button,
             Placement = PlacementMode.Bottom,
-            Background = (Brush)FindResource("SurfaceBrush"),
-            Foreground = (Brush)FindResource("TextBrush"),
-            BorderBrush = (Brush)FindResource("BorderBrush"),
-            BorderThickness = new Thickness(1),
-            Padding = new Thickness(4)
+            Style = (Style)FindResource("ServiceToolContextMenu")
         };
+        var explorer = ServiceToolMenuItem("Open in File Explorer");
+        explorer.ToolTip = folder;
+        explorer.Click += async (_, _) => await OpenServiceFolderInExplorerAsync(service, folder);
+        menu.Items.Add(explorer);
+        menu.Items.Add(ServiceToolMenuSeparator());
+        var discoveryIndex = menu.Items.Count;
         menu.Items.Add(ServiceToolMenuItem("Finding installed editors…", enabled: false));
-        menu.Items.Add(new Separator());
+        menu.Items.Add(ServiceToolMenuSeparator());
         var browse = ServiceToolMenuItem("Choose another application…");
         browse.ToolTip = "Choose an installed .exe that accepts a folder to open.";
         browse.Click += (_, _) => BrowseServiceTool(service, folder);
@@ -70,8 +72,8 @@ public partial class MainWindow
                 return;
             }
 
-            menu.Items.RemoveAt(0);
-            var insertAt = 0;
+            menu.Items.RemoveAt(discoveryIndex);
+            var insertAt = discoveryIndex;
             var added = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             foreach (var (name, target) in choices)
             {
@@ -90,14 +92,19 @@ public partial class MainWindow
                 menu.Items.Insert(insertAt++, item);
             }
             if (choices.Count == 0)
-                menu.Items.Insert(0, ServiceToolMenuItem("No editors detected. Choose an application below.", enabled: false));
+                menu.Items.Insert(discoveryIndex, ServiceToolMenuItem("No editors detected. Choose an application below.", enabled: false));
         }
         catch
         {
             if (!menu.IsOpen || _closing) return;
-            menu.Items[0] = ServiceToolMenuItem("Editor discovery unavailable. Choose an application below.", enabled: false);
+            menu.Items[discoveryIndex] = ServiceToolMenuItem("Editor discovery unavailable. Choose an application below.", enabled: false);
         }
     }
+
+    private Separator ServiceToolMenuSeparator() => new()
+    {
+        Style = (Style)FindResource("ServiceToolMenuSeparator")
+    };
 
     private MenuItem ServiceToolMenuItem(string label, bool enabled = true)
     {
@@ -123,6 +130,36 @@ public partial class MainWindow
         };
         if (dialog.ShowDialog(this) != true) return;
         OpenServiceFolder(service, folder, new(dialog.FileName, false, Path.GetFileNameWithoutExtension(dialog.FileName)));
+    }
+
+    private async Task OpenServiceFolderInExplorerAsync(ServiceViewModel service, string folder)
+    {
+        if (_closing) return;
+        try
+        {
+            await Task.Run(() =>
+            {
+                var resolvedFolder = Path.GetFullPath(folder);
+                if (!Directory.Exists(resolvedFolder)) throw new DirectoryNotFoundException();
+                var windowsFolder = Environment.GetFolderPath(Environment.SpecialFolder.Windows);
+                if (string.IsNullOrWhiteSpace(windowsFolder)) throw new FileNotFoundException();
+                var explorerPath = Path.Combine(windowsFolder, "explorer.exe");
+                if (!File.Exists(explorerPath)) throw new FileNotFoundException();
+                var startInfo = new ProcessStartInfo(explorerPath) { UseShellExecute = false };
+                startInfo.ArgumentList.Add(resolvedFolder);
+                using var explorer = Process.Start(startInfo)
+                    ?? throw new InvalidOperationException("File Explorer did not start.");
+            });
+            if (_closing) return;
+            Notice = $"Opened {service.Name}'s folder in File Explorer.";
+        }
+        catch
+        {
+            if (_closing) return;
+            const string message = "The service folder could not be opened in File Explorer. Check that its configured working folder exists and File Explorer is available.";
+            Notice = message;
+            MessageBox.Show(this, message, "Open service folder", MessageBoxButton.OK, MessageBoxImage.Warning);
+        }
     }
 
     private void OpenServiceFolder(ServiceViewModel service, string folder, DeveloperToolTarget target)

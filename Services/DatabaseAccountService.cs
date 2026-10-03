@@ -21,6 +21,8 @@ public static partial class DatabaseAccountService
         timeout.CancelAfter(TimeSpan.FromMinutes(2));
         try
         {
+            if (source.Provider != DatabaseProvider.PostgreSql)
+                throw new DatabaseAccountException("Application account tools support recognized PostgreSQL schemas only. SQL Server connections support the database explorer and schema comparison.");
             if (request.Operation is not ("list" or "create" or "set-password" or "delete"))
                 throw new DatabaseAccountException("Choose a supported account operation.");
             if (string.IsNullOrWhiteSpace(database) || database.Contains('\0') || Encoding.UTF8.GetByteCount(database) > 63)

@@ -30,7 +30,28 @@ public partial class App : Application
             finally { _reportingUnexpectedError = false; }
         };
         base.OnStartup(e);
-        if (e.Args.Contains("--codex-monitor", StringComparer.OrdinalIgnoreCase))
+        if (e.Args.Contains("--agent-mcp", StringComparer.OrdinalIgnoreCase))
+        {
+            // This is a separate stdio bridge process. It connects to an already-running
+            // dashboard and never creates a service runner or reads the settings library.
+            ShutdownMode = ShutdownMode.OnExplicitShutdown;
+            try { Task.Run(AgentBridge.AgentMcpServer.RunAsync).GetAwaiter().GetResult(); }
+            catch (Exception)
+            {
+                // MCP stdio must not open a WPF error dialog or print service data.
+                try { Console.Error.WriteLine("Launcher MCP adapter could not start."); }
+                catch { }
+            }
+            finally { Shutdown(); }
+        }
+        else if (e.Args.Contains("--queue-owner", StringComparer.OrdinalIgnoreCase))
+        {
+            // A separate staged tray process owns queue recovery, dispatch, and
+            // exact Stop requests. Dashboard startup never runs a prepared note.
+            ShutdownMode = ShutdownMode.OnExplicitShutdown;
+            ProjectTasks.QueueOwnerHost.Open(e.Args);
+        }
+        else if (e.Args.Contains("--codex-monitor", StringComparer.OrdinalIgnoreCase))
         {
             ShutdownMode = ShutdownMode.OnExplicitShutdown;
             CodexMonitor.CodexMonitorWindow.Open(e.Args);
@@ -38,7 +59,24 @@ public partial class App : Application
         else
         {
             MainWindow = new MainWindow();
+            ((MainWindow)MainWindow).StartAgentBridge();
             MainWindow.Show();
+            RestoreQueueOwnerAfterStartup();
+        }
+    }
+
+    private async void RestoreQueueOwnerAfterStartup()
+    {
+        try { await ProjectTasks.QueueOwnerClient.StartIfSavedWorkAsync(); }
+        catch (Exception ex) when (ex is System.IO.IOException or UnauthorizedAccessException or InvalidOperationException)
+        {
+            var guidance = ex is System.IO.IOException &&
+                (ex.Message.StartsWith("An older queue owner", StringComparison.Ordinal) ||
+                 ex.Message.StartsWith("The queue owner is running", StringComparison.Ordinal))
+                ? ex.Message : "The queue owner could not start or finish recovery. Open Notes & queue to inspect its status.";
+            MessageBox.Show("Queue owner compatibility check failed. Saved task data was preserved. " +
+                "No new queue item will be submitted. " + guidance,
+                "Queue owner unavailable", MessageBoxButton.OK, MessageBoxImage.Warning);
         }
     }
 }

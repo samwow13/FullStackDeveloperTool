@@ -1,0 +1,94 @@
+<Window x:Class="FullStackLauncher.ProjectTasks.ProjectTaskHistoryWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="Task history — Full Stack Launcher" Width="880" Height="640"
+        MinWidth="650" MinHeight="470" WindowStartupLocation="CenterOwner"
+        Icon="pack://application:,,,/Assets/launcher.ico" Closed="Window_Closed"
+        Background="{StaticResource BackgroundBrush}" Foreground="{StaticResource TextBrush}">
+    <Window.Resources>
+        <Style x:Key="HistoryCaption" TargetType="TextBlock">
+            <Setter Property="Foreground" Value="{StaticResource MutedBrush}"/>
+            <Setter Property="TextWrapping" Value="Wrap"/>
+            <Setter Property="FontSize" Value="12"/>
+        </Style>
+    </Window.Resources>
+    <Grid Margin="20">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
+            <RowDefinition Height="Auto"/>
+        </Grid.RowDefinitions>
+
+        <Grid Margin="0,0,0,12">
+            <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+            <StackPanel>
+                <TextBlock Text="CODEX TASK HISTORY" FontSize="11" FontWeight="Bold" Foreground="{StaticResource AccentBrush}"/>
+                <TextBlock Text="History" FontSize="23" FontWeight="SemiBold" Margin="0,5,0,3"/>
+                <TextBlock Text="{Binding HistorySummary}" Style="{StaticResource HistoryCaption}"/>
+                <TextBlock Text="History belongs to the selected project. Saved execution receipts remain available in All attempts."
+                           Style="{StaticResource HistoryCaption}" Margin="0,5,12,0"/>
+            </StackPanel>
+            <Button Grid.Column="1" Content="Clear history…" Click="ClearHistory_Click"
+                    IsEnabled="{Binding CanClearHistory}" VerticalAlignment="Top" Margin="12,0,0,0"
+                    AutomationProperties.Name="Clear all task history for selected project"
+                    ToolTip="Remove all archived task activity for this project. Saved execution receipts stay in All attempts."/>
+        </Grid>
+
+        <Grid Grid.Row="1">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="0.95*" MinWidth="260"/>
+                <ColumnDefinition Width="12"/>
+                <ColumnDefinition Width="1.25*" MinWidth="330"/>
+            </Grid.ColumnDefinitions>
+            <Border Background="{StaticResource SurfaceBrush}" BorderBrush="{StaticResource BorderBrush}"
+                    BorderThickness="1" CornerRadius="8">
+                <Grid>
+                    <ListBox ItemsSource="{Binding HistoryItems}" SelectedItem="{Binding SelectedHistory, Mode=TwoWay}"
+                             AutomationProperties.Name="Task history" Padding="4">
+                        <ListBox.ItemTemplate>
+                            <DataTemplate>
+                                <StackPanel Margin="3,4">
+                                    <TextBlock Text="{Binding Name}" FontWeight="SemiBold" TextWrapping="Wrap"/>
+                                    <TextBlock Text="{Binding Status}" Foreground="{Binding StatusBrush}" FontSize="11" Margin="0,3,0,0"/>
+                                    <TextBlock Text="{Binding Detail}" Style="{StaticResource HistoryCaption}" Margin="0,3,0,0"/>
+                                </StackPanel>
+                            </DataTemplate>
+                        </ListBox.ItemTemplate>
+                    </ListBox>
+                    <TextBlock Text="No tasks in history." Style="{StaticResource HistoryCaption}"
+                               Visibility="{Binding EmptyVisibility}" HorizontalAlignment="Center" VerticalAlignment="Center"
+                               IsHitTestVisible="False" AutomationProperties.Name="No tasks in history"/>
+                </Grid>
+            </Border>
+            <Border Grid.Column="2" Background="{StaticResource SurfaceBrush}" BorderBrush="{StaticResource BorderBrush}"
+                    BorderThickness="1" CornerRadius="8" Padding="14">
+                <StackPanel>
+                    <TextBlock Text="Task details" FontSize="16" FontWeight="SemiBold"/>
+                    <TextBox Text="{Binding SelectedDetails, Mode=OneWay}" IsReadOnly="True" TextWrapping="Wrap"
+                             VerticalScrollBarVisibility="Auto" Margin="0,8,0,12" MaxHeight="240"
+                             AutomationProperties.Name="Selected task history details"/>
+                    <WrapPanel>
+                        <Button Content="View Chat" Click="ViewChat_Click" IsEnabled="{Binding CanViewChat}"
+                                Margin="0,0,8,7" AutomationProperties.Name="View selected task chat"/>
+                        <Button Content="Delete…" Click="DeleteSelected_Click" IsEnabled="{Binding CanDeleteSelected}"
+                                Margin="0,0,0,7" Foreground="#FFACA9"
+                                AutomationProperties.Name="Delete selected task from history"
+                                ToolTip="Remove this task from History. Saved execution receipt remains in All attempts."/>
+                    </WrapPanel>
+                    <TextBlock Text="Delete removes this task from History. The saved execution receipt and its outcome remain in All attempts."
+                               Style="{StaticResource HistoryCaption}" Margin="0,5,0,0"/>
+                </StackPanel>
+            </Border>
+        </Grid>
+
+        <Border Grid.Row="2" BorderBrush="{StaticResource BorderBrush}" BorderThickness="0,1,0,0"
+                Padding="0,12,0,0" Margin="0,12,0,0">
+            <Grid>
+                <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+                <TextBlock Text="{Binding StatusMessage}" TextWrapping="Wrap" Foreground="{StaticResource AccentBrush}"
+                           VerticalAlignment="Center" AutomationProperties.LiveSetting="Polite"/>
+                <Button Grid.Column="1" Content="Close" Click="Close_Click" Margin="16,0,0,0" VerticalAlignment="Top"/>
+            </Grid>
+        </Border>
+    </Grid>
+</Window>

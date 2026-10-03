@@ -14,8 +14,18 @@ public sealed record ChatProgressRow(
 {
     public string ProjectPath { get; init; } = "";
     public string ProjectName { get; init; } = "";
+    public string ProjectId { get; init; } = "";
     public string EstimateText { get; init; } = "—";
     public string EstimateDetail { get; init; } = "";
+    public string? ActivityLabel { get; init; }
+    public string ActivityTitle => $"{ActivityLabel ?? (State switch
+    {
+        AgentRunState.Running => "Running",
+        AgentRunState.Waiting => "Waiting for",
+        AgentRunState.Completed => "Recently completed",
+        AgentRunState.Failed => "Needs attention",
+        _ => "Status unavailable"
+    })}: {Title}";
 }
 
 // Persist only completion metadata. Display names are hydrated from live snapshots.

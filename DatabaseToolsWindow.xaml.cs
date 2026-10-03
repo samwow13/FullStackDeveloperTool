@@ -12,7 +12,7 @@ namespace FullStackLauncher;
 
 public partial class DatabaseToolsWindow : Window
 {
-    private const string ComparisonMeaning = "The source is your reference; the target is the database you may update. Only in source means the target lacks that object; only in target means the source lacks it. Changed means their catalog definitions differ. Renames appear as two separate objects.\n\nMatching EF migration IDs do not prove schemas match, and schema differences do not generate a migration automatically. The migration plan uses the selected repository's existing EF migrations. Row data, sequence counters, server configuration and cloud infrastructure are outside this comparison. Compare again after deployment to review remaining drift.\n\nEach database is read in its own consistent snapshot. The two captures are not an atomic cross-server snapshot. Catalog visibility and PostgreSQL versions can affect results. Definitions may include comments or routine bodies; exports are explicit and stay wherever you save them.";
+    private const string ComparisonMeaning = "The source is your reference; the target is the database you may update. Only in source means the target lacks that object; only in target means the source lacks it. Changed means their catalog definitions differ. Renames appear as two separate objects.\n\nMatching EF migration IDs do not prove schemas match, and schema differences do not generate a migration automatically. The migration plan uses the selected repository's existing EF migrations. Row data, sequence counters, server configuration and cloud infrastructure are outside this comparison. Compare again after deployment to review remaining drift.\n\nPostgreSQL uses a read-only repeatable-read snapshot. SQL Server captures use bounded catalog reads; concurrent schema changes can affect results. The captures are not an atomic cross-server snapshot. Catalog visibility and server versions can affect results. Definitions may include comments or routine bodies; exports are explicit and stay wherever you save them.";
     private readonly ProjectProfile? _project;
     private readonly ProjectProfile[] _projects;
     private readonly SettingsStore _store;
@@ -89,7 +89,9 @@ public partial class DatabaseToolsWindow : Window
         if (SourceEndpoint.Source is { } source) TargetEndpoint.AddSource(source);
         if (TargetEndpoint.Source is { } target) SourceEndpoint.AddSource(target);
         ClearComparison(); ClearPlan();
-        StatusText.Text = "Database selection changed. Compare or prepare a new migration plan.";
+        StatusText.Text = SourceEndpoint.Source is { } selectedSource && TargetEndpoint.Source is { } selectedTarget && selectedSource.Provider != selectedTarget.Provider
+            ? "Choose two databases of the same type: PostgreSQL with PostgreSQL, or SQL Server with SQL Server."
+            : "Database selection changed. Compare schemas. Migration preparation and application support PostgreSQL only.";
         UpdateControls();
     }
 
@@ -105,29 +107,31 @@ public partial class DatabaseToolsWindow : Window
     private async void Compare_Click(object sender, RoutedEventArgs e)
     {
         ClearComparison();
-        await RunAsync("Reading both schemas in read-only snapshots…", CompareCoreAsync);
+        await RunAsync("Reading both schemas without changing database data…", CompareCoreAsync);
     }
 
     private async Task CompareCoreAsync(CancellationToken token)
     {
         if (SourceEndpoint.Source is not { } source || TargetEndpoint.Source is not { } target) return;
-        var sourceTask = PostgresSchemaComparer.CaptureAsync(source, SourceEndpoint.Database, token);
-        var targetTask = PostgresSchemaComparer.CaptureAsync(target, TargetEndpoint.Database, token);
+        if (source.Provider != target.Provider)
+            throw new InvalidOperationException("Choose two databases of the same type. Cross-provider schema comparison is not supported.");
+        var sourceTask = DatabaseSchemaComparer.CaptureAsync(source, SourceEndpoint.Database, token);
+        var targetTask = DatabaseSchemaComparer.CaptureAsync(target, TargetEndpoint.Database, token);
         var snapshots = await Task.WhenAll(sourceTask, targetTask);
         token.ThrowIfCancellationRequested();
-        _comparison = PostgresSchemaComparer.Compare(snapshots[0], snapshots[1]);
+        _comparison = DatabaseSchemaComparer.Compare(snapshots[0], snapshots[1]);
         var comparison = _comparison;
         var sameEndpoint = string.Equals(source.Server, target.Server, StringComparison.OrdinalIgnoreCase) && SourceEndpoint.Database == TargetEndpoint.Database;
         var differences = comparison.Differences;
         ComparisonSummary.Text = $"{differences.Count} differences · {differences.Count(d => d.Change == DatabaseSchemaChange.SourceOnly)} only in source · {differences.Count(d => d.Change == DatabaseSchemaChange.TargetOnly)} only in target · {differences.Count(d => d.Change == DatabaseSchemaChange.Changed)} changed · {comparison.UnchangedCount} matching objects\nSource: {SourceEndpoint.Identity}  →  Target: {TargetEndpoint.Identity}";
         if (sameEndpoint) ComparisonSummary.Text += "\nBoth selections name the same host and database; this does not verify a separate production database.";
         if (comparison.Source.ServerVersion.Split('.')[0] != comparison.Target.ServerVersion.Split('.')[0])
-            ComparisonSummary.Text += "\nPostgreSQL major versions differ; some definitions may be formatted differently.";
+            ComparisonSummary.Text += "\nDatabase server major versions differ; some definitions may be formatted differently.";
         var warnings = comparison.Source.Warnings.Select(w => "Source: " + w).Concat(comparison.Target.Warnings.Select(w => "Target: " + w)).ToList();
         if (comparison.Source.MigrationHistory.Warning is { } sw) warnings.Add("Source history: " + sw);
         if (comparison.Target.MigrationHistory.Warning is { } tw) warnings.Add("Target history: " + tw);
         if (warnings.Count > 0) ComparisonSummary.Text += "\nCoverage notices are available in Coverage & results.";
-        CoverageText.Text = ComparisonMeaning + $"\n\nSource: PostgreSQL {comparison.Source.ServerVersion}, captured {comparison.Source.CapturedAtUtc.LocalDateTime:g}\nTarget: PostgreSQL {comparison.Target.ServerVersion}, captured {comparison.Target.CapturedAtUtc.LocalDateTime:g}\n\n" + string.Join("\n", comparison.Source.Coverage.Union(comparison.Target.Coverage)) + "\n\n" + string.Join("\n", warnings);
+        CoverageText.Text = ComparisonMeaning + $"\n\nSource: {source.ProviderLabel} {comparison.Source.ServerVersion}, captured {comparison.Source.CapturedAtUtc.LocalDateTime:g}\nTarget: {target.ProviderLabel} {comparison.Target.ServerVersion}, captured {comparison.Target.CapturedAtUtc.LocalDateTime:g}\n\n" + string.Join("\n", comparison.Source.Coverage.Union(comparison.Target.Coverage)) + "\n\n" + string.Join("\n", warnings);
         FilterDifferences(); UpdateHistory();
         StatusText.Text = differences.Count == 0
             ? "No differences found within the captured catalog coverage. Review migration history and coverage notices."
@@ -192,6 +196,8 @@ public partial class DatabaseToolsWindow : Window
                 : $"Database history: {comparison.MigrationIdsOnlyInSource.Count} IDs recorded only in source; {comparison.MigrationIdsOnlyInTarget.Count} only in target. Prepare a plan to verify the target against the repository.";
         }
         else { MigrationGrid.ItemsSource = null; MigrationSummary.Text = "Compare databases for their recorded history, or prepare a repository migration plan for the target."; }
+        if (TargetEndpoint.Source?.Provider == DatabaseProvider.SqlServer)
+            MigrationSummary.Text += "\nSQL Server history is available for comparison only. Migration preparation and application support PostgreSQL.";
     }
 
     private void HistorySide_Changed(object sender, SelectionChangedEventArgs e) => UpdateHistory();
@@ -199,6 +205,8 @@ public partial class DatabaseToolsWindow : Window
     private async void Prepare_Click(object sender, RoutedEventArgs e)
     {
         if (TargetEndpoint.Source is not { } target) return;
+        if (target.Provider != DatabaseProvider.PostgreSql)
+        { StatusText.Text = "Migration preparation and application support PostgreSQL only."; return; }
         var projectPath = ProjectPicker.Text.Trim();
         ClearPlan();
         WorkspaceTabs.SelectedItem = MigrationTab;
@@ -236,7 +244,7 @@ public partial class DatabaseToolsWindow : Window
                 try { await CompareCoreAsync(token); StatusText.Text = result.Message + " " + StatusText.Text; }
                 catch (Exception ex)
                 {
-                    StatusText.Text = result.Message + " Post-apply comparison did not finish. Compare again to verify remaining differences. " + PostgresSchemaReader.DescribeError(ex);
+                    StatusText.Text = result.Message + " Post-apply comparison did not finish. Compare again to verify remaining differences. " + DatabaseSchemaReader.DescribeError(ex);
                     Record(StatusText.Text);
                 }
             }
@@ -262,9 +270,9 @@ public partial class DatabaseToolsWindow : Window
         }
         catch (Exception ex)
         {
-            StatusText.Text = ex is InvalidOperationException
-                ? PostgresSchemaComparer.DescribeError(ex)
-                : DatabaseMigrationService.DescribeError(ex);
+            StatusText.Text = ex is DatabaseMigrationException
+                ? DatabaseMigrationService.DescribeError(ex)
+                : DatabaseSchemaComparer.DescribeError(ex);
             if (_applying) StatusText.Text += " Prepare a fresh plan and verify the target before retrying.";
             Record(StatusText.Text);
         }
@@ -275,8 +283,10 @@ public partial class DatabaseToolsWindow : Window
     {
         if (ApplyButton is null) return;
         Endpoints.IsEnabled = !_busy; MigrationInputs.IsEnabled = !_busy;
-        CompareButton.IsEnabled = !_busy && SourceEndpoint.IsReady && TargetEndpoint.IsReady;
-        PrepareButton.IsEnabled = !_busy && TargetEndpoint.IsReady && !string.IsNullOrWhiteSpace(ProjectPicker.Text);
+        CompareButton.IsEnabled = !_busy && SourceEndpoint.IsReady && TargetEndpoint.IsReady && SourceEndpoint.Source?.Provider == TargetEndpoint.Source?.Provider;
+        CompareButton.ToolTip = "Compare two databases using the same engine: PostgreSQL or SQL Server.";
+        PrepareButton.IsEnabled = !_busy && TargetEndpoint.IsReady && TargetEndpoint.Source?.Provider == DatabaseProvider.PostgreSql && !string.IsNullOrWhiteSpace(ProjectPicker.Text);
+        PrepareButton.ToolTip = "Migration preparation and application support the existing PostgreSQL workflow only.";
         ReloadButton.IsEnabled = !_busy; SwapButton.IsEnabled = !_busy;
         CancelButton.IsEnabled = _busy;
         ApplyButton.IsEnabled = !_busy && !_applying && _plan is { CanApply: true } && Confirmed();

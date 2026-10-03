@@ -11,14 +11,20 @@ namespace FullStackLauncher;
 
 public partial class ProfileEditorWindow : Window
 {
+    private enum ApiTargetMode { Legacy, Manual }
+
     private readonly string _settingsDirectory;
+    private readonly IReadOnlyList<ProjectProfile> _savedProjects;
     private readonly ObservableCollection<ServiceProfile> _services;
+    private bool _updatingApiTargetOptions;
     public ProjectProfile Result { get; private set; }
 
-    public ProfileEditorWindow(ProjectProfile profile, string settingsDirectory)
+    public ProfileEditorWindow(ProjectProfile profile, string settingsDirectory,
+        IReadOnlyList<ProjectProfile>? savedProjects = null)
     {
         InitializeComponent();
         _settingsDirectory = Path.GetFullPath(settingsDirectory);
+        _savedProjects = savedProjects ?? [];
         Result = Clone(profile);
         _services = new ObservableCollection<ServiceProfile>(Result.Services);
         ProjectNameBox.Text = Result.Name;
@@ -46,11 +52,62 @@ public partial class ProfileEditorWindow : Window
 
     private void UpdateServiceKindFields()
     {
-        if (WebSettingsPanel == null || ConsoleCommandHelp == null || OptionalCommandsExpander == null) return;
+        if (WebSettingsPanel == null || ConsoleCommandHelp == null || OptionalCommandsExpander == null || ApiTargetPanel == null) return;
         var isConsole = ServiceForm.DataContext is ServiceProfile { IsConsole: true };
         WebSettingsPanel.Visibility = isConsole ? Visibility.Collapsed : Visibility.Visible;
         ConsoleCommandHelp.Visibility = isConsole ? Visibility.Visible : Visibility.Collapsed;
         OptionalCommandsExpander.IsExpanded = !isConsole;
+        UpdateApiTargetOptions();
+    }
+
+    private void UpdateApiTargetOptions()
+    {
+        if (_services is null || ApiTargetBox == null || ApiTargetPanel == null) return;
+        var frontend = ServiceForm.DataContext as ServiceProfile;
+        ApiTargetPanel.Visibility = frontend is not null && frontend.Kind.Equals("Angular", StringComparison.OrdinalIgnoreCase)
+            ? Visibility.Visible : Visibility.Collapsed;
+        _updatingApiTargetOptions = true;
+        try
+        {
+            ApiTargetBox.Items.Clear();
+            var legacy = new ComboBoxItem { Content = "Automatic port matching (legacy)", Tag = ApiTargetMode.Legacy };
+            var manual = new ComboBoxItem { Content = "None (manage proxy manually)", Tag = ApiTargetMode.Manual };
+            ApiTargetBox.Items.Add(legacy);
+            ApiTargetBox.Items.Add(manual);
+            ComboBoxItem? selected = null;
+            if (frontend is not null)
+            {
+                foreach (var api in _services.Where(service => !ReferenceEquals(service, frontend) && SettingsStore.IsLinkableApiService(service)))
+                {
+                    var option = new ComboBoxItem { Content = api.Name, Tag = api.Id };
+                    ApiTargetBox.Items.Add(option);
+                    if (api.Id.Equals(frontend.ApiTargetServiceId, StringComparison.OrdinalIgnoreCase)) selected = option;
+                }
+                if (selected is null && !string.IsNullOrWhiteSpace(frontend.ApiTargetServiceId))
+                {
+                    selected = new ComboBoxItem { Content = "Unavailable API service (choose another)", Tag = frontend.ApiTargetServiceId };
+                    ApiTargetBox.Items.Add(selected);
+                }
+            }
+            ApiTargetBox.SelectedItem = selected ?? (frontend?.DisableLegacyApiPortSync == true ? manual : legacy);
+        }
+        finally { _updatingApiTargetOptions = false; }
+    }
+
+    private void ApiTarget_SelectionChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (_updatingApiTargetOptions || ServiceForm.DataContext is not ServiceProfile frontend ||
+            ApiTargetBox.SelectedItem is not ComboBoxItem option) return;
+        if (option.Tag is string targetId)
+        {
+            frontend.ApiTargetServiceId = targetId;
+            frontend.DisableLegacyApiPortSync = true;
+        }
+        else
+        {
+            frontend.ApiTargetServiceId = null;
+            frontend.DisableLegacyApiPortSync = option.Tag is ApiTargetMode.Manual;
+        }
     }
 
     private void ServiceName_LostFocus(object sender, RoutedEventArgs e) => ServicesList.Items.Refresh();
@@ -197,6 +254,8 @@ public partial class ProfileEditorWindow : Window
             Name = ProjectNameBox.Text.Trim(),
             RootPath = RootPathBox.Text.Trim(),
             IsArchived = Result.IsArchived,
+            AutoRestartAfterAgentsEnabled = Result.AutoRestartAfterAgentsEnabled,
+            AutoRestartWatchPath = Result.AutoRestartWatchPath,
             Database = Result.Database,
             Services = _services.Select(CloneService).ToList()
         };
@@ -210,6 +269,10 @@ public partial class ProfileEditorWindow : Window
             service.SetupCommand = service.SetupCommand.Trim();
             service.Url = service.Url.Trim().TrimEnd('/');
             service.UiPath = service.UiPath.Trim();
+            service.ApiTargetServiceId = service.Kind.Equals("Angular", StringComparison.OrdinalIgnoreCase)
+                ? service.ApiTargetServiceId?.Trim() : null;
+            if (!service.Kind.Equals("Angular", StringComparison.OrdinalIgnoreCase))
+                service.DisableLegacyApiPortSync = false;
             if (service.IsConsole) service.ApiConfiguration = null;
         }
         try
@@ -223,6 +286,15 @@ public partial class ProfileEditorWindow : Window
                 var folder = Path.GetFullPath(service.WorkingDirectory, root);
                 if (!Directory.Exists(folder))
                     throw new ArgumentException($"The working folder for '{service.Name}' does not exist:\n{folder}");
+                var conflicts = SettingsStore.FindServiceFolderConflicts(
+                    _savedProjects, _settingsDirectory, folder, candidate.Id);
+                if (conflicts.Count > 0)
+                {
+                    var conflict = conflicts[0];
+                    throw new ArgumentException($"The working folder for '{service.Name}' overlaps " +
+                        $"saved '{conflict.Project.Name}' / '{conflict.Service.Name}'. " +
+                        "Choose a different folder or open that saved project.");
+                }
             }
             Result = candidate;
             DialogResult = true;
@@ -238,6 +310,8 @@ public partial class ProfileEditorWindow : Window
     private static ProjectProfile Clone(ProjectProfile profile) => new()
     {
         Id = profile.Id, Name = profile.Name, RootPath = profile.RootPath, IsArchived = profile.IsArchived,
+        AutoRestartAfterAgentsEnabled = profile.AutoRestartAfterAgentsEnabled,
+        AutoRestartWatchPath = profile.AutoRestartWatchPath,
         Database = profile.Database is { } database
             ? new() { SourceId = database.SourceId, DatabaseName = database.DatabaseName } : null,
         Services = profile.Services.Select(CloneService).ToList()
@@ -248,7 +322,12 @@ public partial class ProfileEditorWindow : Window
         Id = service.Id, Name = service.Name, Kind = service.Kind,
         WorkingDirectory = service.WorkingDirectory, StartCommand = service.StartCommand,
         CleanCommand = service.CleanCommand, SetupCommand = service.SetupCommand,
-        Url = service.Url, UiPath = service.UiPath,
+        Url = service.Url, UiPath = service.UiPath, ApiTargetServiceId = service.ApiTargetServiceId,
+        OpenAfterBuild = service.OpenAfterBuild,
+        DisableLegacyApiPortSync = service.DisableLegacyApiPortSync,
+        ProductionDatabase = service.ProductionDatabase is { } productionDatabase
+            ? new() { SourceId = productionDatabase.SourceId, DatabaseName = productionDatabase.DatabaseName } : null,
+        ComparisonLocalSourceId = service.ComparisonLocalSourceId,
         ApiConfiguration = service.ApiConfiguration is { } configuration
             ? new() { Environment = configuration.Environment } : null
     };

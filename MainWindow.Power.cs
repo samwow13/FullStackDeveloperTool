@@ -11,7 +11,7 @@ public partial class MainWindow
     public bool LongRunningTaskEnabled => _longRunningTaskMode?.IsEnabled == true;
     public string LongRunningTaskDescription =>
         "Keep the computer and display awake while this dashboard is open, including when minimized. " +
-        "Gently nudge the pointer after about one minute without input. Teams controls its own presence; Active is not guaranteed. " +
+        "Gently nudge the pointer after about one minute without input. " +
         "Uncheck or close the dashboard to stop.\n\n" + (_longRunningTaskMode?.Status ?? "Off.");
 
     private void InitializeLongRunningTaskMode()

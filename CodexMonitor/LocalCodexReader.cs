@@ -46,7 +46,19 @@ public sealed class LocalCodexReader
     public IReadOnlyDictionary<string, IReadOnlyList<AgentSnapshot>> ReadSnapshots(IReadOnlyList<string> projectPaths) =>
         ReadStatus(projectPaths).Projects;
 
-    public CodexMonitorSnapshot ReadStatus(IReadOnlyList<string> projectPaths)
+    /// <summary>
+    /// Reads every local thread without depending on saved launcher watches or
+    /// workspace paths. Retained identities keep archived terminal observations
+    /// available to callers that previously saw those agents working.
+    /// </summary>
+    public IReadOnlyList<AgentSnapshot> ReadAllSnapshot(IReadOnlyCollection<string>? retainedAgentIds = null) =>
+        ReadStatusCore([], readAll: true, retainedAgentIds: retainedAgentIds).Projects[string.Empty];
+
+    public CodexMonitorSnapshot ReadStatus(IReadOnlyList<string> projectPaths) =>
+        ReadStatusCore(projectPaths, readAll: false, null);
+
+    private CodexMonitorSnapshot ReadStatusCore(IReadOnlyList<string> projectPaths,
+        bool readAll, IReadOnlyCollection<string>? retainedAgentIds)
     {
         try
         {
@@ -56,9 +68,11 @@ public sealed class LocalCodexReader
                 .ToArray();
             var snapshots = projects.ToDictionary(project => project.Key, _ => new List<AgentSnapshot>(),
                 StringComparer.OrdinalIgnoreCase);
-            if (projects.Length == 0)
+            if (projects.Length == 0 && !readAll)
                 return new(new Dictionary<string, IReadOnlyList<AgentSnapshot>>(StringComparer.OrdinalIgnoreCase),
                     new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase));
+            if (readAll)
+                snapshots.Add(string.Empty, []);
 
             if (!IsCodexRunning())
                 throw new InvalidOperationException("Codex is not running. Completion is unconfirmed; open Codex to resume monitoring.");
@@ -98,7 +112,7 @@ public sealed class LocalCodexReader
             var threadsById = new Dictionary<string, ThreadMetadata>(StringComparer.Ordinal);
             foreach (var thread in threads)
             {
-                if (thread.Guardian)
+                if (thread.Guardian && !readAll)
                     continue;
                 if (!threadsById.TryAdd(thread.Id, thread))
                     throw Unavailable();
@@ -197,9 +211,15 @@ public sealed class LocalCodexReader
             var queued = queue.Query("SELECT DISTINCT thread_id FROM queued_items")
                 .Select(row => Required(row[0])).ToHashSet(StringComparer.Ordinal);
 
+            if (readAll && (queued.Any(id => !threadsById.ContainsKey(id)) ||
+                states.Any(pair => !threadsById.ContainsKey(pair.Key) &&
+                    (pair.Value.State is AgentRunState.Running or AgentRunState.Waiting or AgentRunState.Unknown))))
+                throw Unavailable();
+            var retained = retainedAgentIds?.ToHashSet(StringComparer.Ordinal);
+
             foreach (var thread in threads)
             {
-                if (thread.Archived || thread.Guardian || !owners.TryGetValue(thread.Id, out var owner))
+                if (!readAll && (thread.Archived || thread.Guardian || !owners.ContainsKey(thread.Id)))
                     continue;
                 var state = states.TryGetValue(thread.Id, out var projected)
                     ? projected.State
@@ -207,7 +227,16 @@ public sealed class LocalCodexReader
                 if (queued.Contains(thread.Id) && state != AgentRunState.Running)
                     state = AgentRunState.Waiting;
 
-                snapshots[owner.Key].Add(new AgentSnapshot(thread.Id, thread.Title, thread.ProjectPath, state,
+                // Archived work is not automatically idle. Keep every archived
+                // nonterminal/unknown row, and terminal rows explicitly retained
+                // by a caller; ordinary historical terminal rows add no activity.
+                if (readAll && thread.Archived &&
+                    (state is AgentRunState.Completed or AgentRunState.Failed or AgentRunState.Idle) &&
+                    retained?.Contains(thread.Id) != true)
+                    continue;
+
+                var key = readAll ? string.Empty : owners[thread.Id].Key;
+                snapshots[key].Add(new AgentSnapshot(thread.Id, thread.Title, thread.ProjectPath, state,
                     thread.ParentId, projected?.TurnId, projected?.CompletedAt));
             }
 

@@ -1,0 +1,31 @@
+<Window x:Class="FullStackLauncher.ProjectTasks.ProjectNoteEditorWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:tasks="clr-namespace:FullStackLauncher.ProjectTasks"
+        Title="Edit project note — Full Stack Launcher" Icon="pack://application:,,,/Assets/launcher.ico"
+        Width="1250" Height="900" MinWidth="820" MinHeight="650" WindowStartupLocation="CenterOwner">
+    <Window.InputBindings>
+        <KeyBinding Key="S" Modifiers="Control" Command="{Binding SaveNoteCommand}"/>
+    </Window.InputBindings>
+    <Grid Margin="18">
+        <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="*"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
+        <Grid Margin="0,0,0,12">
+            <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+            <StackPanel>
+                <TextBlock Text="{Binding ProjectName}" FontSize="22" FontWeight="SemiBold" TextTrimming="CharacterEllipsis"/>
+                <TextBlock Text="Write future changes, paste images with Ctrl+V, or snip a chosen window. Closing keeps any unsaved draft in the notes workspace."
+                           Foreground="{StaticResource MutedBrush}" TextWrapping="Wrap" Margin="0,5,0,0"/>
+            </StackPanel>
+            <Button Grid.Column="1" Content="Close editor" Click="Close_Click" Margin="14,0,0,0" VerticalAlignment="Center"/>
+        </Grid>
+        <Border Grid.Row="1" Background="{StaticResource SurfaceBrush}" BorderBrush="{StaticResource BorderBrush}" BorderThickness="1" CornerRadius="8">
+            <ScrollViewer x:Name="EditorScroller" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
+                <tasks:ProjectNoteEditor x:Name="Editor" MinHeight="620"/>
+            </ScrollViewer>
+        </Border>
+        <StackPanel Grid.Row="2" Margin="0,10,0,0">
+            <TextBlock Text="{Binding Feedback}" Foreground="{StaticResource AccentBrush}" TextWrapping="Wrap" AutomationProperties.LiveSetting="Polite"/>
+            <TextBlock Text="{Binding DraftStatus}" Foreground="{StaticResource MutedBrush}" FontSize="11" Margin="0,4,0,0"/>
+        </StackPanel>
+    </Grid>
+</Window>

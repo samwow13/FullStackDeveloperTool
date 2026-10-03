@@ -29,8 +29,17 @@ var checks = new (string Name, Action Check)[]
     ("application website and pgAdmin shortcuts round-trip with spaces", DeveloperToolsRoundTrip),
     ("an explicitly empty tools list remains empty", EmptyDeveloperTools),
     ("malformed tools are preserved with blocked saving", MalformedDeveloperTools),
-    ("duplicate tool IDs and credential URLs are rejected without writes", InvalidDeveloperTools)
+    ("duplicate tool IDs and credential URLs are rejected without writes", InvalidDeveloperTools),
+    ("CRM Angular explicit API link and later port update", CrmProxyLinkChecks.LinkAndUpdate),
+    ("CRM Angular linked proxy drift blocks port update", CrmProxyLinkChecks.ProxyDriftBlocksSave),
+    ("CRM Angular proxy rolls back when settings save fails", CrmProxyLinkChecks.SettingsFailureRollsBackProxy),
+    ("CRM API port edit requires verified stopped linked frontend", ApiPortEditPolicyChecks.LinkedFrontend),
+    ("CRM API port edit requires verified stopped legacy frontend", ApiPortEditPolicyChecks.LegacyFrontend)
 };
+if (args.Contains("--crm-proxy-link"))
+    checks = checks.Where(check => check.Name.StartsWith("CRM Angular", StringComparison.Ordinal)).ToArray();
+else if (args.Contains("--crm-port-link"))
+    checks = checks.Where(check => check.Name.StartsWith("CRM ", StringComparison.Ordinal)).ToArray();
 var failures = 0;
 foreach (var check in checks)
 {

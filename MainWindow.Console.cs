@@ -1,32 +1,60 @@
-using System.Collections.ObjectModel;
 using System.Diagnostics;
+using System.Runtime.CompilerServices;
+using System.Runtime.InteropServices;
 using System.Threading.Channels;
 using System.Windows;
+using System.Windows.Controls;
+using System.Windows.Controls.Primitives;
+using System.Windows.Media;
 using System.Windows.Threading;
 using FullStackLauncher.Models;
+using FullStackLauncher.Services;
 using FullStackLauncher.ViewModels;
 
 namespace FullStackLauncher;
 
 public partial class MainWindow
 {
-    private readonly Dictionary<string, ObservableCollection<ConsoleLine>> _logs = [];
-    private readonly Channel<(string ProjectId, string Source, ServiceLog Log)> _pendingLogs =
-        Channel.CreateBounded<(string, string, ServiceLog)>(new BoundedChannelOptions(2000)
+    private readonly Channel<(string ProjectId, ServiceRunner Runner, string Source, ServiceLog Log)> _pendingLogs =
+        Channel.CreateBounded<(string, ServiceRunner, string, ServiceLog)>(new BoundedChannelOptions(2000)
         { FullMode = BoundedChannelFullMode.DropOldest, SingleReader = true, SingleWriter = false });
+    private readonly ConditionalWeakTable<ServiceRunner, ConsoleResetState> _consoleResetStates = new();
     private readonly DispatcherTimer _consoleTimer = new() { Interval = TimeSpan.FromMilliseconds(100) };
+    private readonly DispatcherTimer _copyErrorsFeedbackTimer = new() { Interval = TimeSpan.FromSeconds(2) };
+    private Popup? _copyErrorsFeedback;
     private bool _forceStopBatchBusy;
 
-    public ObservableCollection<ConsoleLine> ConsoleLines => ProjectConsole(SelectedProject?.Id ?? "launcher");
-
-    private ObservableCollection<ConsoleLine> ProjectConsole(string projectId)
+    private sealed class ConsoleResetState
     {
-        if (!_logs.TryGetValue(projectId, out var lines)) _logs[projectId] = lines = [];
-        return lines;
+        public long AppliedSequence { get; set; }
     }
 
-    private void QueueLog(string projectId, string source, ServiceLog log) =>
-        _pendingLogs.Writer.TryWrite((projectId, source, log));
+    private void QueueLog(string projectId, ServiceRunner runner, string source, ServiceLog log) =>
+        _pendingLogs.Writer.TryWrite((projectId, runner, source, log));
+
+    private ServiceViewModel? FindConsoleService(string projectId, ServiceRunner runner) =>
+        _runners.GetValueOrDefault(projectId)?.FirstOrDefault(item => ReferenceEquals(item.Runner, runner));
+
+    private void QueueConsoleReset(string projectId, ServiceRunner runner)
+    {
+        if (Dispatcher.HasShutdownStarted || Dispatcher.HasShutdownFinished) return;
+        _ = Dispatcher.BeginInvoke(new Action(() =>
+        {
+            if (FindConsoleService(projectId, runner) is { } service) ApplyConsoleReset(service);
+        }), DispatcherPriority.Background);
+    }
+
+    private long ApplyConsoleReset(ServiceViewModel service)
+    {
+        var sequence = service.Runner.ConsoleResetSequence;
+        var state = _consoleResetStates.GetValue(service.Runner, static _ => new ConsoleResetState());
+        if (state.AppliedSequence != sequence)
+        {
+            service.ClearConsoleLines();
+            state.AppliedSequence = sequence;
+        }
+        return sequence;
+    }
 
     private void FlushConsoleOutput()
     {
@@ -36,54 +64,127 @@ public partial class MainWindow
         var started = Stopwatch.GetTimestamp();
         for (var count = 0; count < 120 && _pendingLogs.Reader.TryRead(out var entry); count++)
         {
-            AppendLog(entry.ProjectId, entry.Source, entry.Log);
+            AppendLog(entry.ProjectId, entry.Runner, entry.Source, entry.Log);
             if (Stopwatch.GetElapsedTime(started).TotalMilliseconds >= 8) break;
         }
     }
 
-    private void AppendLog(string projectId, string source, ServiceLog log)
+    private void AppendLog(string projectId, ServiceRunner runner, string source, ServiceLog log)
     {
-        var line = ConsoleLine.FromLog(log, source);
-        var lines = ProjectConsole(projectId);
-        lines.Add(line);
-        while (lines.Count > 1000) lines.RemoveAt(0);
-        var service = _runners.GetValueOrDefault(projectId)?.FirstOrDefault(item => item.Profile.Id == log.ServiceId);
-        if (service is not null)
-        {
-            service.ConsoleLines.Add(line);
-            while (service.ConsoleLines.Count > 600) service.ConsoleLines.RemoveAt(0);
-            if (line.Kind is ServiceLogKind.Command or ServiceLogKind.Error)
-                RevealServiceConsole(service);
-        }
+        if (FindConsoleService(projectId, runner) is not { } service) return;
+        if (log.ConsoleSequence <= ApplyConsoleReset(service)) return;
+        service.AppendConsoleLine(ConsoleLine.FromLog(log, source));
     }
 
-    private static void RevealServiceConsole(ServiceViewModel service)
-    {
-        // Service activity reveals its own output; the combined console respects the saved layout choice.
-        service.IsConsoleVisible = true;
-    }
-
-    private void RecordServiceMessage(ServiceViewModel service, string message, ServiceLogKind kind)
-    {
-        var owner = _runners.FirstOrDefault(item => item.Value.Contains(service)).Key;
-        if (owner is not null)
-            QueueLog(owner, service.Name, new(DateTime.Now, service.Profile.Id, message, kind == ServiceLogKind.Error, kind));
-    }
-
-    private void ClearProjectConsole(object? sender, EventArgs e) => ConsoleLines.Clear();
+    private void RecordServiceMessage(ServiceViewModel service, string message, ServiceLogKind kind) =>
+        service.Runner.RecordConsoleMessage(message, kind);
 
     private void ClearServiceConsole(object? sender, EventArgs e)
     {
-        if (sender is not null && ServiceFrom(sender) is { } service) service.ConsoleLines.Clear();
+        if (sender is null || ServiceFrom(sender) is not { } service) return;
+        ClearServiceOutput(service);
+    }
+
+    private void ClearServiceOutput(ServiceViewModel service)
+    {
+        service.Runner.ClearConsoleOutput();
+        ApplyConsoleReset(service);
+        Notice = $"Cleared {service.Name} output. New output will continue to appear.";
+    }
+
+    private void CopyServiceConsole_Click(object sender, RoutedEventArgs e)
+    {
+        if (ServiceFrom(sender) is not { } service) return;
+        var lines = service.ConsoleLines.ToArray();
+        if (lines.Length == 0) return;
+        try
+        {
+            Clipboard.SetText(string.Join(Environment.NewLine, lines.Select(line => line.PlainText)));
+            Notice = $"Copied {lines.Length:N0} {(lines.Length == 1 ? "line" : "lines")} of {service.Name} output.";
+        }
+        catch (ExternalException)
+        {
+            Notice = "Clipboard is busy. Try Copy output again.";
+        }
+    }
+
+    private void CopyServiceErrors_Click(object sender, RoutedEventArgs e)
+    {
+        CloseCopyErrorsFeedback();
+        if (ServiceFrom(sender) is not { } service) return;
+        var lines = service.ConsoleLines.ToArray();
+        var included = new bool[lines.Length];
+        var errorCount = 0;
+        for (var index = 0; index < lines.Length; index++)
+        {
+            if (lines[index].Kind != ServiceLogKind.Error) continue;
+            errorCount++;
+            // Union the preceding context windows in capture order without duplicating entries.
+            for (var context = Math.Max(0, index - 10); context <= index; context++)
+                included[context] = true;
+        }
+        if (errorCount == 0)
+        {
+            Notice = $"No retained errors to copy for {service.Name}.";
+            return;
+        }
+        try
+        {
+            Clipboard.SetText(string.Join(Environment.NewLine,
+                lines.Where((_, index) => included[index]).Select(line => line.PlainText)));
+            Notice = $"Copied {errorCount:N0} {(errorCount == 1 ? "error" : "errors")} from {service.Name} with up to 10 preceding console entries per error.";
+            if (sender is FrameworkElement target) ShowCopyErrorsFeedback(target);
+        }
+        catch (ExternalException)
+        {
+            Notice = "Clipboard is busy. Try Copy Errors again.";
+        }
+    }
+
+    private void ShowCopyErrorsFeedback(FrameworkElement target)
+    {
+        _copyErrorsFeedback = new Popup
+        {
+            PlacementTarget = target,
+            Placement = PlacementMode.Bottom,
+            VerticalOffset = 6,
+            AllowsTransparency = true,
+            StaysOpen = false,
+            Child = new Border
+            {
+                Background = (Brush)FindResource("CardBrush"),
+                BorderBrush = (Brush)FindResource("AccentBrush"),
+                BorderThickness = new Thickness(1),
+                CornerRadius = new CornerRadius(6),
+                Padding = new Thickness(12, 8, 12, 8),
+                Child = new TextBlock
+                {
+                    Text = "Copied Error",
+                    Foreground = (Brush)FindResource("AccentBrush"),
+                    FontSize = 12
+                }
+            },
+            IsOpen = true
+        };
+        _copyErrorsFeedbackTimer.Start();
+    }
+
+    private void CloseCopyErrorsFeedback()
+    {
+        _copyErrorsFeedbackTimer.Stop();
+        if (_copyErrorsFeedback is { } popup) popup.IsOpen = false;
+        _copyErrorsFeedback = null;
     }
 
     private async Task ForceStopAllAsync()
     {
         if (!CanStopBatch) return;
         var targets = Services.Where(service => service.CanForceStop).ToArray();
+        var projectId = SelectedProject?.Id;
+        if (projectId is not null)
+            RecordAgentBridgeProjectEvent(projectId, "force_stop_all", "requested", revokeReservations: true);
         _forceStopBatchBusy = true;
         foreach (var service in Services) service.AreCommandsBlocked = true;
-        foreach (var service in targets) RevealServiceConsole(service);
         UpdateActions();
         try
         {
@@ -93,8 +194,15 @@ public partial class MainWindow
                 await StopActionAsync(service, includeConflicts: true);
             var blocked = targets.Count(service => service.Runner.Snapshot.State is not (ServiceState.Stopped or ServiceState.Completed) ||
                 service.Runner.HasManagedProcess || service.Runner.Snapshot.ProcessIds.Count > 0);
+            if (projectId is not null)
+                RecordAgentBridgeProjectEvent(projectId, "force_stop_all", blocked == 0 ? "completed" : "failed");
             Notice = blocked == 0 ? "Force stop finished. Selected services are stopped."
                 : $"Force stop finished; {blocked} service(s) still need attention. See their consoles.";
+        }
+        catch
+        {
+            if (projectId is not null) RecordAgentBridgeProjectEvent(projectId, "force_stop_all", "failed");
+            throw;
         }
         finally
         {

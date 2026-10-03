@@ -4,6 +4,7 @@ using System.Media;
 using System.Text.Json;
 using System.Windows;
 using System.Windows.Threading;
+using FullStackLauncher.Services;
 using Forms = System.Windows.Forms;
 
 namespace FullStackLauncher.CodexMonitor;
@@ -20,6 +21,7 @@ public partial class CodexMonitorWindow : Window
     // Only their minimal completion records are persisted; they are never polled or displayed.
     private readonly Dictionary<string, ProjectWatch> _retiredWatches = new(StringComparer.OrdinalIgnoreCase);
     private IReadOnlyList<ChatProgressRow> _progressRows = [];
+    private QueueActivitySnapshot _queueActivity = QueueActivitySnapshot.Empty;
     private readonly ChatProgressWindow _overlay;
     private readonly MonitorPreferences _preferences;
     private readonly bool _firstUse;
@@ -145,7 +147,7 @@ public partial class CodexMonitorWindow : Window
         SourceText.Text = "Local status • " + _codexHome;
         SourceText.ToolTip = "Uses Codex's internal local status format. An incompatible Codex update pauses alerts. Remote/cloud tasks are not monitored.";
 
-        _soundStream = new MemoryStream(CreateChime());
+        _soundStream = new MemoryStream(ReminderSound.CreateChime());
         _sound = new SoundPlayer(_soundStream);
         using var iconResource = Application.GetResourceStream(new Uri("pack://application:,,,/Assets/launcher.ico"))!.Stream;
         _tray = new Forms.NotifyIcon
@@ -257,12 +259,17 @@ public partial class CodexMonitorWindow : Window
         var generation = _generation;
         try
         {
+            var queueActivity = await Task.Run(() => QueueActivityProjection.Read());
+            if (_exiting || generation != _generation) return;
+            _queueActivity = queueActivity;
             if (_watches.Count == 0)
             {
                 UpdateProgressDisplay();
                 AgentList.ItemsSource = null;
-                StatusText.Text = "Choose a Codex project folder to watch.";
-                DetailText.Text = "Add one or more folders above. Removing a project stops watching it; its tasks continue running.";
+                StatusText.Text = _queueActivity.Rows.Count == 0
+                    ? "Choose a Codex project folder to watch."
+                    : "Showing launcher queue activity. Add a folder to watch other Codex tasks.";
+                DetailText.Text = "Removing a watched folder stops passive monitoring; queued tasks continue running in their saved folder.";
                 CheckedText.Text = "No projects watched";
                 SetTrayText("Codex alerts — no projects watched");
                 WriteDiagnostics(false, [], StatusText.Text);
@@ -550,9 +557,18 @@ public partial class CodexMonitorWindow : Window
         SaveProject();
     }
 
-    private void ClearCompleted(string? id)
+    private async void ClearCompleted(string? id)
     {
-        foreach (var watch in _watches.Values) watch.Progress.ClearCompleted(id);
+        if (id == null || !id.StartsWith("queue:", StringComparison.Ordinal))
+            foreach (var watch in _watches.Values) watch.Progress.ClearCompleted(id);
+        if (id == null || id.StartsWith("queue:", StringComparison.Ordinal))
+        {
+            var cleared = await Task.Run(() => QueueActivityProjection.ClearFinished(id));
+            _queueActivity = await Task.Run(() => QueueActivityProjection.Read());
+            if (_exiting) return;
+            if (!cleared)
+                StatusText.Text = "Queue completion history could not be cleared. Open Notes & queue to review the task store.";
+        }
         UpdateProgressDisplay();
         SaveProject();
         if (!_settingsWarning) _savedCompletedJson = JsonSerializer.Serialize(ExportCompleted());
@@ -560,10 +576,12 @@ public partial class CodexMonitorWindow : Window
 
     private void UpdateProgressDisplay()
     {
-        _progressRows = _watches.Values.SelectMany(watch => watch.Progress.Rows)
-            .OrderBy(row => row.State is AgentRunState.Running or AgentRunState.Waiting ? 0 : row.IsCompleted ? 2 : 1)
-            .DistinctBy(row => row.Id).OrderBy(row => row.ProjectPath, StringComparer.OrdinalIgnoreCase)
-            .ThenBy(row => row.State is AgentRunState.Running or AgentRunState.Waiting ? 0 : row.IsCompleted ? 2 : 1)
+        _progressRows = _queueActivity.Rows.Concat(_watches.Values.SelectMany(watch => watch.Progress.Rows)
+                .Where(row => !_queueActivity.OwnedThreadIds.Contains(row.Id)))
+            .DistinctBy(row => row.Id)
+            .OrderBy(row => row.State is AgentRunState.Running or AgentRunState.Waiting ? 0 : row.IsCompleted ? 1 : 2)
+            .ThenByDescending(row => row.CompletedAt)
+            .ThenBy(row => row.ProjectName, StringComparer.OrdinalIgnoreCase)
             .ThenBy(row => row.Title, StringComparer.OrdinalIgnoreCase).ToArray();
         _overlay.UpdateRows(_progressRows);
         ProgressChatList.ItemsSource = _progressRows;
@@ -768,23 +786,4 @@ public partial class CodexMonitorWindow : Window
         catch { return false; }
     }
 
-    private static byte[] CreateChime()
-    {
-        const int rate = 22050;
-        const int samples = rate / 2;
-        using var stream = new MemoryStream();
-        using var writer = new BinaryWriter(stream);
-        writer.Write("RIFF"u8); writer.Write(36 + samples * 2); writer.Write("WAVEfmt "u8);
-        writer.Write(16); writer.Write((short)1); writer.Write((short)1);
-        writer.Write(rate); writer.Write(rate * 2); writer.Write((short)2); writer.Write((short)16);
-        writer.Write("data"u8); writer.Write(samples * 2);
-        for (var i = 0; i < samples; i++)
-        {
-            var t = (double)i / rate;
-            var segment = t < .25 ? t : t - .25;
-            var envelope = Math.Min(segment / .015, 1) * Math.Max(0, 1 - segment / .25);
-            writer.Write((short)(Math.Sin(2 * Math.PI * (t < .25 ? 660 : 880) * segment) * envelope * 7000));
-        }
-        return stream.ToArray();
-    }
 }

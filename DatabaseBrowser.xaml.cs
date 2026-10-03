@@ -8,6 +8,7 @@ using System.Windows.Input;
 using System.Windows.Media;
 using FullStackLauncher.Models;
 using FullStackLauncher.Services;
+using FullStackLauncher.ViewModels;
 
 namespace FullStackLauncher;
 
@@ -17,6 +18,7 @@ public partial class DatabaseBrowser : UserControl
     private readonly Dictionary<DataGridColumn, string> _rowColumnKeys = [];
     private SettingsStore? _store;
     private ProjectProfile? _project;
+    private ServiceViewModel? _entryService;
     private ProjectProfile[] _projects = [];
     private IReadOnlyList<DatabaseTable> _tables = [];
     private CancellationTokenSource? _request;
@@ -75,10 +77,12 @@ public partial class DatabaseBrowser : UserControl
             (_, e) => { e.CanExecute = RowsGrid.SelectedCells.Count > 0; e.Handled = true; }));
     }
 
-    public Task ShowProjectAsync(ProjectProfile? project, IEnumerable<ProjectProfile> projects, SettingsStore store)
+    public Task ShowProjectAsync(ProjectProfile? project, IEnumerable<ProjectProfile> projects, SettingsStore store,
+        ServiceViewModel? entryService = null)
     {
         _request?.Cancel();
         _project = project;
+        _entryService = entryService;
         _projects = projects.ToArray();
         _store = store;
         return RefreshConnectionsAsync();
@@ -89,31 +93,51 @@ public partial class DatabaseBrowser : UserControl
         var project = _project;
         var projects = _projects;
         var store = _store;
-        return RunAsync("Finding existing PostgreSQL connections…", async token =>
+        var entryService = _entryService;
+        var entryRun = entryService?.Runner.ManagedApiRunVersion;
+        var entryDatabase = entryService?.VerifiedDatabaseName;
+        return RunAsync("Finding PostgreSQL and SQL Server connections…", async token =>
         {
             SetSelection(() => { ConnectionPicker.ItemsSource = null; DatabasePicker.ItemsSource = null; });
             ServerText.Text = "Choose a connection";
-            DatabaseTitle.Text = "PostgreSQL";
+            DatabaseTitle.Text = "Databases";
             ConnectionSettings.Visibility = Visibility.Visible;
             ConnectionNotice.Text = "";
             ClearTables();
-            if (project is null || store is null)
+            if (store is null)
             {
-                StatusText.Text = "Select a project to find its database connections.";
+                StatusText.Text = "The connection library is unavailable.";
                 return;
             }
             var discovery = await Task.Run(() => DatabaseConnectionDiscovery.Discover(projects, store), token);
             token.ThrowIfCancellationRequested();
-            var sources = discovery.Sources.OrderByDescending(x => x.ProjectId == project.Id).ThenBy(x => x.Label).ToArray();
+            var sources = discovery.Sources.OrderByDescending(x => x.ProjectId == project?.Id).ThenBy(x => x.Label).ToArray();
             SetSelection(() => ConnectionPicker.ItemsSource = sources);
             ConnectionNotice.Text = discovery.Notice;
             if (sources.Length == 0)
             {
-                StatusText.Text = "No PostgreSQL connections found. Use Add connection to connect and save one, or configure ConnectionStrings in the project's .NET settings or user-secrets.";
+                StatusText.Text = "No database connections found. Use Add connection to save a PostgreSQL or SQL Server connection for work or home.";
                 return;
             }
-            var saved = project.Database;
-            var source = saved is null ? sources.FirstOrDefault(x => x.ProjectId == project.Id) ?? sources[0]
+            if (entryService is not null)
+            {
+                // Opening a card must never silently connect a saved or first-listed database from another service.
+                var candidates = project is not null && entryDatabase is not null &&
+                    entryRun == entryService.Runner.ManagedApiRunVersion && entryDatabase == entryService.VerifiedDatabaseName
+                    ? DashboardDatabaseComparisonService.GetLocalCandidates(sources, project.Id,
+                        entryService.Profile.Id, entryDatabase).Where(entryService.Runner.MatchesAppliedLocalDatabaseConnection).ToArray()
+                    : [];
+                if (candidates.Length != 1)
+                {
+                    StatusText.Text = "The card's current Local database connection is unavailable or ambiguous. Choose a connection explicitly above.";
+                    return;
+                }
+                SetSelection(() => ConnectionPicker.SelectedItem = candidates[0]);
+                await LoadDatabasesAsync(candidates[0], entryDatabase, token);
+                return;
+            }
+            var saved = project?.Database;
+            var source = saved is null ? sources.FirstOrDefault(x => x.ProjectId == project?.Id) ?? sources[0]
                 : sources.FirstOrDefault(x => x.Id == saved.SourceId);
             if (source is null)
             {
@@ -131,11 +155,11 @@ public partial class DatabaseBrowser : UserControl
         ClearTables();
         ServerText.Text = source.Server;
         StatusText.Text = "Connecting and loading existing databases…";
-        var catalog = await PostgresSchemaReader.ReadDatabasesAsync(source, token);
+        var catalog = await DatabaseSchemaReader.ReadDatabasesAsync(source, token);
         token.ThrowIfCancellationRequested();
         if (catalog.Warning is not null) ConnectionNotice.Text = string.Join(" ", ConnectionNotice.Text, catalog.Warning).Trim();
         SetSelection(() => DatabasePicker.ItemsSource = catalog.Databases);
-        var database = preferredDatabase ?? catalog.CurrentDatabase;
+        var database = string.IsNullOrWhiteSpace(preferredDatabase) ? catalog.CurrentDatabase : preferredDatabase;
         if (!catalog.Databases.Contains(database, StringComparer.Ordinal))
         {
             StatusText.Text = $"The saved database '{database}' is no longer available to this role. Choose an existing database above.";
@@ -150,13 +174,13 @@ public partial class DatabaseBrowser : UserControl
         var previousTable = TableList.SelectedItem as DatabaseTable;
         ClearTables();
         StatusText.Text = $"Loading tables from {database}…";
-        var tables = await PostgresSchemaReader.ReadTablesAsync(source, database, token);
+        var tables = await DatabaseSchemaReader.ReadTablesAsync(source, database, token);
         token.ThrowIfCancellationRequested();
         _tables = tables;
         _connected = true;
         DatabaseTitle.Text = database;
         DatabaseTitle.ToolTip = string.Join("\n", source.Label, ConnectionNotice.Text).Trim();
-        ServerText.Text = $"{source.Server} · {tables.Count} tables / views · read-only";
+        ServerText.Text = $"{source.ProviderLabel} · {source.Server} · {tables.Count} tables / views · read-only";
         ConnectionSettings.Visibility = Visibility.Collapsed;
         ApplyFilter(previousTable);
         if (_project is { } project) DatabaseSelected?.Invoke(project, new() { SourceId = source.Id, DatabaseName = database });
@@ -179,7 +203,7 @@ public partial class DatabaseBrowser : UserControl
     private async Task LoadColumnsAsync(DatabaseConnectionSource source, string database, DatabaseTable table, CancellationToken token)
     {
         StatusText.Text = $"Loading columns for {table.DisplayName}…";
-        var columns = await PostgresSchemaReader.ReadColumnsAsync(source, database, table, token);
+        var columns = await DatabaseSchemaReader.ReadColumnsAsync(source, database, table, token);
         token.ThrowIfCancellationRequested();
         ColumnGrid.ItemsSource = columns;
         ColumnsHeading.Text = $"{table.DisplayName} · {columns.Count} columns";
@@ -197,7 +221,7 @@ public partial class DatabaseBrowser : UserControl
     {
         RowsStatus.Text = "Querying up to ten rows…";
         StatusText.Text = $"Querying up to ten rows from {table.DisplayName}…";
-        var preview = await PostgresSchemaReader.ReadTopRowsAsync(source, database, table, token);
+        var preview = await DatabaseSchemaReader.ReadTopRowsAsync(source, database, table, token);
         token.ThrowIfCancellationRequested();
         var data = new DataTable();
         for (var i = 0; i < preview.Columns.Count; i++)
@@ -235,7 +259,7 @@ public partial class DatabaseBrowser : UserControl
     {
         RelationshipsStatus.Text = "Loading foreign key relationships…";
         StatusText.Text = $"Loading relationships for {table.DisplayName}…";
-        var relationships = await PostgresSchemaReader.ReadRelationshipsAsync(source, database, table, token);
+        var relationships = await DatabaseSchemaReader.ReadRelationshipsAsync(source, database, table, token);
         token.ThrowIfCancellationRequested();
         RelationshipsList.ItemsSource = relationships.Select(relationship => new RelationshipView(relationship, table.Id)).ToArray();
         RelationshipContent.Visibility = relationships.Count > 0 ? Visibility.Visible : Visibility.Collapsed;
@@ -263,7 +287,7 @@ public partial class DatabaseBrowser : UserControl
         }
         catch (Exception ex)
         {
-            if (ReferenceEquals(_request, request)) ShowRequestError(PostgresSchemaReader.DescribeError(ex));
+            if (ReferenceEquals(_request, request)) ShowRequestError(DatabaseSchemaReader.DescribeError(ex));
         }
         finally
         {
@@ -310,7 +334,7 @@ public partial class DatabaseBrowser : UserControl
     {
         _tables = [];
         _connected = false;
-        DatabaseTitle.Text = "PostgreSQL";
+        DatabaseTitle.Text = "Databases";
         DatabaseTitle.ToolTip = null;
         SetSelection(() => TableList.ItemsSource = null);
         TablesHeading.Text = "TABLES / VIEWS";

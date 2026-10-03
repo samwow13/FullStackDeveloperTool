@@ -279,16 +279,25 @@ public sealed class SettingsStore
                 if (!serviceIds.Add(service.Id)) throw new ArgumentException($"Duplicate service ID: {service.Id}.");
                 var label = $"'{project.Name}' / '{service.Name}'";
                 Require(service.Kind, $"Service kind for {label}");
+                if (service.ProductionDatabase is { } productionDatabase)
+                {
+                    Require(productionDatabase.SourceId, $"Production database connection source for {label}");
+                    Require(productionDatabase.DatabaseName, $"Production database name for {label}");
+                }
+                if (service.ComparisonLocalSourceId is not null)
+                {
+                    Require(service.ComparisonLocalSourceId, $"Comparison Local connection source for {label}");
+                    if (service.ProductionDatabase is null)
+                        throw new ArgumentException($"Comparison set for {label} needs a production database.");
+                }
                 Require(service.WorkingDirectory, $"Working folder for {label}");
                 ValidatePath(service.WorkingDirectory, $"Working folder for {label}");
                 var projectRoot = Path.GetFullPath(project.RootPath, settingsDirectory);
-                var serviceFolder = Path.GetFullPath(service.WorkingDirectory, projectRoot)
-                    .TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+                var serviceFolder = Path.TrimEndingDirectorySeparator(
+                    Path.GetFullPath(service.WorkingDirectory, projectRoot));
                 foreach (var existing in serviceFolders)
                 {
-                    if (serviceFolder.Equals(existing.Path, StringComparison.OrdinalIgnoreCase) ||
-                        serviceFolder.StartsWith(existing.Path + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase) ||
-                        existing.Path.StartsWith(serviceFolder + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase))
+                    if (WorkingFoldersOverlap(serviceFolder, existing.Path))
                         throw new ArgumentException($"The working folders for {label} and {existing.Label} overlap. " +
                             "Choose separate service folders, with neither inside the other, across all saved projects. " +
                             "This is required to identify and stop each service's processes reliably.");
@@ -318,8 +327,56 @@ public sealed class SettingsStore
                 if (service.ApiConfiguration is { } configuration && configuration.Environment is not ("Local" or "Prod"))
                     throw new ArgumentException($"API configuration for {label} must be Local or Prod.");
             }
+            foreach (var frontend in project.Services)
+            {
+                if (frontend.DisableLegacyApiPortSync && !frontend.Kind.Equals("Angular", StringComparison.OrdinalIgnoreCase))
+                    throw new ArgumentException($"Only Angular services can set proxy synchronization: '{project.Name}' / '{frontend.Name}'.");
+                if (frontend.ApiTargetServiceId is not { } targetId) continue;
+                if (string.IsNullOrWhiteSpace(targetId))
+                    throw new ArgumentException($"The API target link for '{project.Name}' / '{frontend.Name}' cannot be empty.");
+                if (!frontend.Kind.Equals("Angular", StringComparison.OrdinalIgnoreCase))
+                    throw new ArgumentException($"Only Angular services can link to an API target: '{project.Name}' / '{frontend.Name}'.");
+                var api = project.Services.FirstOrDefault(service =>
+                    service is not null && service.Id.Equals(targetId, StringComparison.OrdinalIgnoreCase));
+                if (api is null || ReferenceEquals(api, frontend) || !IsLinkableApiService(api))
+                    throw new ArgumentException($"Choose a valid API service in the same project for '{project.Name}' / '{frontend.Name}'.");
+            }
         }
     }
+
+    internal static IReadOnlyList<(ProjectProfile Project, ServiceProfile Service)> FindServiceFolderConflicts(
+        IEnumerable<ProjectProfile> projects, string settingsDirectory, string proposedFolder,
+        string? excludedProjectId = null)
+    {
+        var conflicts = new List<(ProjectProfile Project, ServiceProfile Service)>();
+        foreach (var project in projects)
+        {
+            if (project.Id.Equals(excludedProjectId, StringComparison.OrdinalIgnoreCase)) continue;
+            var root = Path.GetFullPath(project.RootPath, settingsDirectory);
+            foreach (var service in project.Services)
+            {
+                var folder = Path.GetFullPath(service.WorkingDirectory, root);
+                if (WorkingFoldersOverlap(proposedFolder, folder)) conflicts.Add((project, service));
+            }
+        }
+        return conflicts;
+    }
+
+    internal static bool WorkingFoldersOverlap(string first, string second)
+    {
+        first = Path.TrimEndingDirectorySeparator(first);
+        second = Path.TrimEndingDirectorySeparator(second);
+        return first.Equals(second, StringComparison.OrdinalIgnoreCase) ||
+            IsInside(first, second) || IsInside(second, first);
+    }
+
+    private static bool IsInside(string path, string parent) =>
+        path.StartsWith(Path.EndsInDirectorySeparator(parent) ? parent : parent + Path.DirectorySeparatorChar,
+            StringComparison.OrdinalIgnoreCase);
+
+    internal static bool IsLinkableApiService(ServiceProfile service) =>
+        !service.IsConsole && IsLocalUrl(service.Url) &&
+        (service.Kind.Equals(".NET", StringComparison.OrdinalIgnoreCase) || service.ApiConfiguration is not null);
 
     internal static bool IsLocalUrl(string? value) =>
         Uri.TryCreate(value, UriKind.Absolute, out var uri) &&

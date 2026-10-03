@@ -54,12 +54,12 @@ public partial class GitWorkspaceWindow : Window, INotifyPropertyChanged
     public bool IsRepository => _snapshot?.IsRepository == true;
     public bool CanInitialize => _snapshot is { IsRepository: false };
     public bool HasRemote => IsRepository && SelectedRemote != null;
-    public bool CanCopyUrl => SelectedRemote is { UrlCanCopy: true };
-    public bool CanSync => HasRemote && _snapshot is { IsDetached: false, IsUnborn: false, OperationState: null };
-    public bool CanChangeBranch => _snapshot is { IsRepository: true, IsUnborn: false, OperationState: null } && Changes.Count == 0;
-    public bool CanSwitchBranch => _snapshot is { IsRepository: true, OperationState: null } && Changes.Count == 0;
-    public bool CanCommitAllPush => HasRemote && _snapshot is { IsRepository: true, IsDetached: false, OperationState: null }
-        && Changes.Count > 0 && !Changes.Any(change => change.IsConflict);
+    public bool CanSync => HasRemote && _powerReadError == null && !HasSyncRecovery && _snapshot is { IsDetached: false, IsUnborn: false, OperationState: null };
+    public bool CanChangeBranch => _powerReadError == null && !HasSyncRecovery && _snapshot is { IsRepository: true, IsUnborn: false, OperationState: null } && Changes.Count == 0;
+    public bool CanSwitchBranch => _powerReadError == null && !HasSyncRecovery && _snapshot is { IsRepository: true, OperationState: null } && Changes.Count == 0;
+    public bool CanCommitAllPush => CanFinishSync || (IsIdle && HasRemote && _powerDetails != null && !HasSyncRecovery
+        && _snapshot is { IsRepository: true, IsDetached: false, OperationState: null }
+        && (!_snapshot.IsUnborn || Changes.Count > 0) && !Changes.Any(change => change.IsConflict));
     public bool CanPull => CanSync && Changes.Count == 0;
     public IReadOnlyList<GitBranchInfo> MergeBranches => _mergeBranches;
     public bool CanMerge => CanChangeBranch && _snapshot is { IsDetached: false }
@@ -76,17 +76,23 @@ public partial class GitWorkspaceWindow : Window, INotifyPropertyChanged
         : !IsRepository ? "No repository" : _snapshot.IsDetached
         ? $"Detached HEAD · {_snapshot.Branch}" : $"{_snapshot.Branch}{(_snapshot.IsUnborn ? " · no commits yet" : "")}";
     public string OperationLabel => _snapshot?.OperationState is { } operation
-        ? $"{operation}. Finish or abort it in Git or your editor, then refresh." : "";
+        ? _powerDetails?.ReadyToFinish == true ? "Merge ready locally. Use Commit all & push when you are ready."
+            : _powerDetails?.PendingSync != null && operation == "Merge in progress"
+                ? "Merge in progress. Resolve and stage any conflicts in Git or your editor, then refresh. Follow the recovery details below."
+                : $"{operation}. Finish or abort it in Git or your editor, then refresh." : "";
     public string RemoteSummary => SelectedRemote is { } remote
         ? remote.FetchUrl == remote.PushUrl ? remote.FetchUrl : $"Fetch: {remote.FetchUrl}\nPush: {remote.PushUrl}"
-        : "Connect a remote in Repository setup.";
+        : "Choose Config to connect a repository.";
     public string CommitAvailabilityText => !IsRepository ? "Initialize or select a repository to begin."
+        : _powerReadError != null ? _powerReadError
+        : _powerDetails?.ReadyToFinish == true ? "Local merge is ready. Review the destination branch, commit all changes and push."
+        : HasSyncRecovery ? "Review the local merge below. Resolve and stage any conflicts, then refresh before committing and pushing."
         : _snapshot!.OperationState != null ? "Finish the active Git operation, then refresh."
         : Changes.Any(change => change.IsConflict) ? "Resolve conflicts in your editor, then refresh."
         : _snapshot.IsDetached ? "Switch to a local branch before committing."
-        : !HasRemote ? "Connect a remote in Repository setup."
-        : Changes.Count == 0 ? "No uncommitted changes. Use Push to upload existing commits."
-        : $"Stage all {Changes.Count:N0} changed files, commit, and push to {SelectedRemote!.Name}/{_snapshot.Branch}.";
+        : !HasRemote ? "Choose Config to connect a repository."
+        : Changes.Count == 0 ? "Review the destination branch and push existing commits. No empty commit will be created."
+        : $"Review the destination branch, then commit all {Changes.Count:N0} changed files with an automatic message and push.";
     private string ProposedBranchName => BranchName?.Text.Trim() ?? "";
     private GitBranchInfo? ProposedLocalBranch => Branches.FirstOrDefault(branch => !branch.IsRemote && branch.Name == ProposedBranchName);
     private GitBranchInfo? ProposedOnlineBranch => Branches.FirstOrDefault(branch => branch.IsRemote
@@ -94,6 +100,8 @@ public partial class GitWorkspaceWindow : Window, INotifyPropertyChanged
     public bool CanCreateNamedBranch => CanChangeBranch && ProposedBranchName.Length > 0 && ProposedLocalBranch == null;
     public bool CanSwitchNamedBranch => CanSwitchBranch && (ProposedLocalBranch is { IsCurrent: false } || (ProposedLocalBranch == null && ProposedOnlineBranch != null));
     public string BranchActionText => !IsRepository ? "Select a repository first."
+        : _powerReadError != null ? "Refresh to read the Git workflow state before changing branches."
+        : HasSyncRecovery ? "Commit or review the pending local merge before changing branches."
         : _snapshot!.OperationState != null ? "Finish the active Git operation first."
         : Changes.Count > 0 ? "Commit or stash local changes before switching or merging."
         : ProposedBranchName.Length == 0 ? "Enter a branch name or select one below."
@@ -118,25 +126,33 @@ public partial class GitWorkspaceWindow : Window, INotifyPropertyChanged
         _ready = true;
         _displayedFolder = SelectedFolder?.Directory;
         await RefreshAsync();
+        await EnsureSetupAsync();
     }
 
     private async void Folder_Changed(object sender, SelectionChangedEventArgs e)
     {
         if (!_ready || _busy) return;
+        var keepConfigOpen = _setupOpen;
+        ResetPublishFeedback();
         if (_displayedFolder != null) _drafts[_displayedFolder] = CaptureDraft();
         _displayedFolder = SelectedFolder?.Directory;
         _snapshot = null;
         _preferredRemote = null;
         _remoteCheck = null;
         _comparison = null;
+        _powerDetails = null;
+        _powerReadError = null;
         RestoreDraft(_displayedFolder != null ? _drafts.GetValueOrDefault(_displayedFolder) : null);
+        if (keepConfigOpen) _setupOpen = true;
         Changed();
         await RefreshAsync();
+        await EnsureSetupAsync();
+        if (keepConfigOpen && !_setupOpen) OpenSetup(IsRepository ? SetupStep.Connections : SetupStep.Local);
     }
 
     private void ApplySnapshot(GitRepositorySnapshot snapshot)
     {
-        var selectedRemoteName = _preferredRemote ?? SelectedRemote?.Name ?? RemoteName.Text.Trim();
+        var selectedRemoteName = _preferredRemote ?? SelectedRemote?.Name;
         _applyingSnapshot = true;
         try
         {
@@ -146,15 +162,14 @@ public partial class GitWorkspaceWindow : Window, INotifyPropertyChanged
             var mergeSelection = MergePicker.SelectedItem as GitBranchInfo;
             _mergeBranches = snapshot.Branches.Where(branch => !branch.IsCurrent).ToArray();
             Changed();
-            RemotePicker.SelectedItem = Remotes.FirstOrDefault(remote => remote.Name == selectedRemoteName)
-                ?? Remotes.FirstOrDefault(remote => remote.Name == "origin") ?? Remotes.FirstOrDefault();
+            RemotePicker.SelectedItem = Remotes.FirstOrDefault(remote => remote.Name == selectedRemoteName);
             MergePicker.SelectedItem = _mergeBranches.FirstOrDefault(branch => mergeSelection != null && branch.Name == mergeSelection.Name && branch.IsRemote == mergeSelection.IsRemote)
                 ?? _mergeBranches.FirstOrDefault(branch => branch.IsRemote && branch.Name == $"{SelectedRemote?.Name}/{snapshot.Branch}");
             _preferredRemote = null;
             if (BranchName.Text.Length == 0 && !snapshot.IsDetached) BranchName.Text = snapshot.Branch;
-            if (!snapshot.IsRepository) WorkspaceTabs.SelectedItem = SetupTab;
         }
         finally { _applyingSnapshot = false; }
+        SynchronizePublishBranchDraft();
         if (!_remoteDraftDirty) UpdateRemoteSelection();
         Changed();
     }
@@ -171,13 +186,27 @@ public partial class GitWorkspaceWindow : Window, INotifyPropertyChanged
         try
         {
             var snapshot = await Task.Run(() => GitRepositoryService.ReadAsync(folder.Directory, _operation.Token));
+            _trustRoot = null;
+            _localSetupError = null;
+            if (_preferredRemote == null)
+                await RestoreAgentConnectionSelectionAsync(snapshot, _operation.Token);
             ApplySnapshot(snapshot);
+            if (!snapshot.IsRepository) OpenSetup(SetupStep.Local);
             await RefreshComparisonAsync(_operation.Token);
+            await RefreshPowerDetailsAsync(_operation.Token);
+            if (snapshot.IsRepository && SelectedRemote == null && !_setupOpen && !HasSyncRecovery)
+                OpenSetup(Remotes.Count > 0 ? SetupStep.Connections : SetupStep.Provider);
             SetStatus($"Refreshed {DateTime.Now:T} · remote comparison uses last fetched history.");
         }
         catch (Exception ex)
         {
             _snapshot = null;
+            _powerDetails = null;
+            _trustRoot = (ex as GitRepositoryTrustException)?.RepositoryRoot;
+            _localSetupError = ex is GitRepositoryTrustException
+                ? "Git blocked this repository because another Windows account owns it. Review the folder below before trusting it."
+                : "Git could not read this folder. Check that the folder exists and Git for Windows is installed, then retry. Details are below.";
+            OpenSetup(SetupStep.Local);
             var detail = SafeError(ex);
             AddActivity("Refresh", folder.Directory, detail);
             SetStatus(ex is OperationCanceledException ? "Refresh canceled or timed out. Status is unavailable until the next refresh." : detail);
@@ -194,7 +223,8 @@ public partial class GitWorkspaceWindow : Window, INotifyPropertyChanged
     // Every action captures its folder and inputs before entering the worker. Changing
     // selection and closing are disabled until the outcome and fresh status are known.
     private async Task<bool> ExecuteAsync(string title, Func<CancellationToken, Task<string>> action,
-        bool refresh = true, Action<string>? completed = null, string? successMessage = null, bool useResultAsStatus = false)
+        bool refresh = true, Action<string>? completed = null, string? successMessage = null, bool useResultAsStatus = false,
+        GitRemoteInfo? pushedRemote = null, string? cancellationContext = null)
     {
         if (_busy || SelectedFolder is not { } folder) return false;
         var expected = _snapshot;
@@ -214,12 +244,17 @@ public partial class GitWorkspaceWindow : Window, INotifyPropertyChanged
             outcome = useResultAsStatus && !string.IsNullOrWhiteSpace(result) ? result : successMessage ?? $"{title} completed.";
             AddActivity(title, Root ?? folder.Directory, string.IsNullOrWhiteSpace(result) ? outcome : result);
             completed?.Invoke(result);
+            if (pushedRemote != null)
+            {
+                CompletePublishFeedback(true, outcome);
+                await OpenPostPushLinkAsync(pushedRemote);
+            }
         }
         catch (Exception ex)
         {
-            if (ex is GitCommitPushException { CommitCreated: true }) _commitDraft = "";
+            if (ex is GitCommitPushException { CommitCreated: true }) { _commitDraft = ""; _syncMessageDraft = ""; }
             outcome = ex is OperationCanceledException
-                ? SafeError(ex) + " Changes may already have taken effect; review local and remote status before retrying."
+                ? SafeError(ex) + (cancellationContext ?? " Changes may already have taken effect; review local and remote status before retrying.")
                 : SafeError(ex);
             AddActivity(title, Root ?? folder.Directory, outcome);
         }
@@ -232,12 +267,22 @@ public partial class GitWorkspaceWindow : Window, INotifyPropertyChanged
                 _operation = new();
                 try
                 {
-                    ApplySnapshot(await Task.Run(() => GitRepositoryService.ReadAsync(folder.Directory, _operation.Token)));
+                    var refreshed = await Task.Run(() => GitRepositoryService.ReadAsync(folder.Directory, _operation.Token));
+                    if (_preferredRemote == null)
+                        await RestoreAgentConnectionSelectionAsync(refreshed, _operation.Token);
+                    ApplySnapshot(refreshed);
+                    _trustRoot = null;
+                    _localSetupError = null;
                     await RefreshComparisonAsync(_operation.Token);
+                    await RefreshPowerDetailsAsync(_operation.Token);
                 }
                 catch (Exception ex)
                 {
                     _snapshot = null;
+                    _powerDetails = null;
+                    _trustRoot = (ex as GitRepositoryTrustException)?.RepositoryRoot;
+                    _localSetupError = "The operation ended, but local status could not be read. Retry before continuing.";
+                    OpenSetup(SetupStep.Local);
                     _comparison = null;
                     outcome += " Local refresh failed; refresh before another repository action.";
                     AddActivity("Refresh after action", folder.Directory, SafeError(ex));
@@ -265,15 +310,62 @@ public partial class GitWorkspaceWindow : Window, INotifyPropertyChanged
     private async void Remote_Changed(object sender, SelectionChangedEventArgs e)
     {
         if (_applyingSnapshot) return;
+        var keepConfigOpen = _setupOpen;
+        SynchronizePublishBranchDraft();
         UpdateRemoteSelection();
         _comparison = null;
         _comparisonError = null;
-        if (_ready && !_busy) await RefreshAsync();
+        _powerDetails = null;
+        _powerReadError = IsRepository ? "Refresh to read workflow settings for this connection." : null;
+        Changed();
+        if (_ready && !_busy)
+        {
+            if (Root is { } root && SelectedRemote is { } remote && !await SaveAgentConnectionSelectionAsync(root, remote))
+            {
+                _powerReadError = "The active Git connection could not be saved. Refresh or select it again before committing or merging.";
+                Changed();
+                return;
+            }
+            await RefreshAsync();
+            await EnsureSetupAsync();
+            if (keepConfigOpen && !_setupOpen) OpenSetup(IsRepository ? SetupStep.Connections : SetupStep.Local);
+        }
+    }
+
+    private Task<bool> SaveAgentConnectionSelectionAsync(string root, GitRemoteInfo remote) =>
+        ExecuteAsync("Select active Git connection", async token =>
+        {
+            await AgentGitChangeStore.SelectConnectionAsync(root, remote.Name, AgentGitChangeStore.ConnectionId(remote), token);
+            return $"{remote.Name} is now the active connection for agent change summaries in this checkout.";
+        }, refresh: false, useResultAsStatus: true);
+
+    private async Task RestoreAgentConnectionSelectionAsync(GitRepositorySnapshot snapshot, CancellationToken token)
+    {
+        if (snapshot.RepositoryRoot is not { } root) return;
+        _preferredRemote = "";
+        try
+        {
+            var selection = await AgentGitChangeStore.ReadSelectionAsync(root, token);
+            var eligible = snapshot.Remotes.Where(remote => remote.UrlCanCopy).ToArray();
+            var selected = selection != null
+                ? eligible.SingleOrDefault(remote => remote.Name == selection.RemoteName && AgentGitChangeStore.ConnectionId(remote) == selection.ConnectionId)
+                : eligible.SingleOrDefault(remote => snapshot.Upstream?.StartsWith(remote.Name + "/", StringComparison.Ordinal) == true)
+                    ?? (snapshot.Upstream == null && snapshot.Remotes.Count == 1 && eligible.Length == 1 ? eligible[0] : null);
+            _preferredRemote = selected?.Name ?? "";
+            if (selected == null && snapshot.Remotes.Count > 0)
+                AddActivity("Select active Git connection", root, selection != null
+                    ? "The saved connection changed or was removed. Choose Config, select a connection, then choose Use selected connection."
+                    : "The current branch does not identify one active connection. Choose Config, select a connection, then choose Use selected connection.");
+        }
+        catch (Exception exception) when (exception is not OperationCanceledException)
+        {
+            AddActivity("Read active Git connection", root, SafeError(exception));
+        }
     }
 
     private void UpdateRemoteSelection()
     {
-        if (_applyingSnapshot || RemoteName == null) return;
+        if (_applyingSnapshot || RemoteName == null || _remoteDraftDirty) return;
         _remoteCheck = null;
         if (SelectedRemote is { } remote)
         {
@@ -288,11 +380,15 @@ public partial class GitWorkspaceWindow : Window, INotifyPropertyChanged
 
     private void RemoteDraft_Changed(object sender, TextChangedEventArgs e)
     {
-        if (_ready && !_applyingSnapshot) _remoteDraftDirty = true;
+        if (!_ready || _applyingSnapshot) return;
+        _remoteDraftDirty = true;
+        InvalidateConnectionCheck();
+        Changed();
     }
 
     private FormDraft CaptureDraft() => new(_commitDraft, BranchName.Text, RemoteName.Text, RemoteUrl.Text,
-        _remoteDraftDirty, InitialBranch.Text, AzureOrganization.Text, AzureProject.Text, AzureRepository.Text);
+        _remoteDraftDirty, InitialBranch.Text, _setupProvider, _setupStep, _setupOpen, _publishBranchDraft,
+        _syncMessageDraft, _commitDraftScope, _publishBranchDraftScope);
 
     private void RestoreDraft(FormDraft? draft)
     {
@@ -300,20 +396,31 @@ public partial class GitWorkspaceWindow : Window, INotifyPropertyChanged
         try
         {
             _commitDraft = draft?.Commit ?? "";
+            RestorePublishBranchDraft(draft?.PublishBranch ?? "", draft?.PublishScope);
+            _syncMessageDraft = draft?.SyncMessage ?? "";
+            _commitDraftScope = draft?.CommitScope;
             BranchName.Text = draft?.Branch ?? "";
             RemoteName.Text = draft?.Remote ?? "origin";
             RemoteUrl.Text = draft?.Url ?? "";
             InitialBranch.Text = draft?.InitialBranch ?? "main";
-            AzureOrganization.Text = draft?.Organization ?? "";
-            AzureProject.Text = draft?.Project ?? "";
-            AzureRepository.Text = draft?.Repository ?? "";
+            _setupProvider = draft?.Provider;
+            _setupStep = draft?.Step ?? SetupStep.Local;
+            if (_setupStep is SetupStep.Review or SetupStep.Complete) _setupStep = SetupStep.Authentication;
+            _setupOpen = draft?.SetupOpen ?? true;
+            _trustRoot = null;
+            _localSetupError = null;
+            InvalidateConnectionCheck();
             _remoteDraftDirty = draft?.RemoteDirty ?? false;
+            // Connection form drafts belong to the configured folder. The active connection
+            // belongs to the resolved checkout and is restored independently from its ledger.
+            _preferredRemote = null;
         }
         finally { _applyingSnapshot = false; }
     }
 
     private sealed record FormDraft(string Commit, string Branch, string Remote, string Url, bool RemoteDirty,
-        string InitialBranch, string Organization, string Project, string Repository);
+        string InitialBranch, GitHostingProvider? Provider, SetupStep Step, bool SetupOpen, string PublishBranch,
+        string SyncMessage, CommitDraftScope? CommitScope, PublishBranchScope? PublishScope);
 
     private void BranchName_Changed(object sender, TextChangedEventArgs e)
     {
@@ -362,22 +469,14 @@ public partial class GitWorkspaceWindow : Window, INotifyPropertyChanged
         if (!CanSync || Root is not { } root || SelectedRemote is not { } remote) return;
         var branch = _snapshot!.Branch;
         if (!Confirm("Push commits", $"Repository: {root}\nBranch: {branch}\nDestination: {remote.Name}/{branch}\n{remote.PushUrl}\n\nPush all existing commits on this branch?")) return;
-        await ExecuteAsync($"Push {remote.Name}/{branch}", token => GitRepositoryService.PushAsync(root, remote.Name, branch, token),
-            useResultAsStatus: true);
+        BeginPublishFeedback(branch, remote.Name);
+        SetPublishPhase("Pushing commits");
+        var pushed = await ExecuteAsync($"Push {remote.Name}/{branch}", token => GitRepositoryService.PushAsync(root, remote.Name, branch, token),
+            useResultAsStatus: true, pushedRemote: remote);
+        CompletePublishFeedback(pushed, StatusText);
     }
 
-    private async void CommitAllPush_Click(object sender, RoutedEventArgs e)
-    {
-        if (_busy || !CanCommitAllPush || Root is not { } root || SelectedRemote is not { } remote) return;
-        var branch = _snapshot!.Branch;
-        var prompt = new GitCommitWindow(root, branch, remote.Name, remote.PushUrl, Changes.Count, _commitDraft) { Owner = this };
-        var accepted = prompt.ShowDialog() == true;
-        _commitDraft = prompt.Message;
-        if (!accepted) return;
-        var message = _commitDraft.Trim();
-        await ExecuteAsync("Commit all & push", token => GitRepositoryService.StageAllCommitAndPushAsync(root, message, remote.Name, branch, token),
-            completed: _ => _commitDraft = "", useResultAsStatus: true);
-    }
+    private async void CommitAllPush_Click(object sender, RoutedEventArgs e) => await ReviewCommitAllPushAsync();
 
     private void MergeSelection_Changed(object sender, SelectionChangedEventArgs e) => Changed(nameof(CanMerge));
 
@@ -387,58 +486,6 @@ public partial class GitWorkspaceWindow : Window, INotifyPropertyChanged
         var current = _snapshot!.Branch;
         if (!Confirm("Merge branch", $"Repository: {root}\n\nMerge {branch.Name} into {current}?\n\nUses the {(branch.IsRemote ? "last fetched" : "local")} branch. Conflicts, if any, stay open for resolution in your editor.")) return;
         await ExecuteAsync($"Merge {branch.Name} into {current}", token => GitRepositoryService.MergeBranchAsync(root, branch.Name, current, token, sourceIsRemote: branch.IsRemote));
-    }
-
-    private async void Initialize_Click(object sender, RoutedEventArgs e)
-    {
-        if (!CanInitialize || SelectedFolder is not { } folder) return;
-        var branch = InitialBranch.Text.Trim();
-        await ExecuteAsync("Initialize repository", token => GitRepositoryService.InitializeAsync(folder.Directory, branch, token),
-            successMessage: "Repository initialized. Connect a remote to get started.");
-    }
-
-    private async void SaveRemote_Click(object sender, RoutedEventArgs e)
-    {
-        if (Root is not { } root) return;
-        var name = RemoteName.Text.Trim();
-        var url = RemoteUrl.Text.Trim();
-        var previous = Remotes.FirstOrDefault(remote => remote.Name == name);
-        if (previous != null && !Confirm("Replace remote URL", $"Repository: {root}\nRemote: {name}\nCurrent fetch: {previous.FetchUrl}\nCurrent push: {previous.PushUrl}\n\nReplace this remote with the URL entered in the form?")) return;
-        await ExecuteAsync("Save remote", token => GitRepositoryService.SaveRemoteAsync(root, name, url, previous != null, token),
-            completed: _ => { _remoteDraftDirty = false; _preferredRemote = name; },
-            successMessage: "Remote saved.");
-    }
-
-    private async void AzureLookup_Click(object sender, RoutedEventArgs e)
-    {
-        if (SelectedFolder is not { } folder) return;
-        var org = AzureOrganization.Text.Trim();
-        var project = AzureProject.Text.Trim();
-        var name = AzureRepository.Text.Trim();
-        if (await ExecuteAsync("Look up Azure repository", token => GitRepositoryService.LookupAzureRemoteAsync(folder.Directory, org, project, name, token),
-            false, url => RemoteUrl.Text = url.Trim())) SetStatus("Repository URL loaded. Choose Save remote to connect it.");
-    }
-
-    private async void AzureCreate_Click(object sender, RoutedEventArgs e)
-    {
-        if (Root is not { } root) return;
-        var remote = RemoteName.Text.Trim();
-        var org = AzureOrganization.Text.Trim();
-        var project = AzureProject.Text.Trim();
-        var name = AzureRepository.Text.Trim();
-        if (Remotes.Any(item => item.Name == remote))
-        {
-            SetStatus("That remote name already exists. Enter a new name before creating a repository.");
-            return;
-        }
-        if (org.Length == 0 || project.Length == 0 || name.Length == 0 || remote.Length == 0)
-        {
-            SetStatus("Enter the Azure organization URL, project, repository name and local remote name first.");
-            return;
-        }
-        if (!Confirm("Create Azure DevOps repository", $"Organization: {org}\nProject: {project}\nRepository: {name}\n\nConnect to local repository: {root}\nRemote name: {remote}\n\nCreate an empty hosted repository using this project's access permissions? Push commits separately after creation.")) return;
-        await ExecuteAsync("Create and connect Azure repository", token => GitRepositoryService.CreateAzureRemoteAsync(root, remote, org, project, name, token),
-            completed: _ => { _remoteDraftDirty = false; _preferredRemote = remote; });
     }
 
     private async void CheckBranch_Click(object sender, RoutedEventArgs e)
@@ -465,13 +512,6 @@ public partial class GitWorkspaceWindow : Window, INotifyPropertyChanged
         await ExecuteAsync("Switch branch", token => GitRepositoryService.SwitchBranchAsync(root, name, token));
     }
 
-    private void CopyUrl_Click(object sender, RoutedEventArgs e)
-    {
-        if (SelectedRemote is not { UrlCanCopy: true } remote) return;
-        try { Clipboard.SetText(remote.FetchUrl); SetStatus("Repository clone link copied."); }
-        catch (Exception) { SetStatus("The clipboard is busy. Try Copy repository link again."); }
-    }
-
     private bool Confirm(string title, string text) => !_busy && MessageBox.Show(this,
         SensitiveDataProtection.Redact(text), title, MessageBoxButton.OKCancel, MessageBoxImage.Question, MessageBoxResult.Cancel) == MessageBoxResult.OK;
 
@@ -483,7 +523,11 @@ public partial class GitWorkspaceWindow : Window, INotifyPropertyChanged
 
     private void Window_Closing(object? sender, CancelEventArgs e)
     {
-        if (!_busy) return;
+        if (!_busy)
+        {
+            if (HasSetupDrafts && !Confirm("Close Git setup", "Unsaved connection details will be discarded. Connections already saved in Git will remain. Close the workspace?")) e.Cancel = true;
+            return;
+        }
         e.Cancel = true;
         SetStatus("A Git operation is still running. Wait for it or use Cancel operation before closing.");
     }

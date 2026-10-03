@@ -26,3 +26,12 @@ Personal folder paths, the saved project name, and diagnostic task/turn/project 
 - A fresh owned connection retrieved both exact turns and their completed/interrupted states. `thread/read includeTurns:true` returned a deprecation notice for full-history hydration, so `thread/turns/list` was also called successfully with a bounded page and `itemsView: summary`. It returned both IDs/statuses and `nextCursor: null`. The fresh process then exited successfully on stdin EOF. No resume request or additional work was submitted. Active-run recovery remains unverified.
 
 This verification does not modify Codex configuration or stored databases and does not attach to its desktop daemon.
+
+## Experimental project placement check — September 23, 2026
+
+- Installed CLI: `codex-cli 0.155.0-alpha.16.3`. Its opt-in experimental App Server schema exposes `project/list` and a `projectId` input on `thread/start`.
+- A read-only `project/list` call found a unique project root matching the selected saved desktop project's folder. App Server project IDs and desktop saved-project IDs differed for the same folders.
+- A prompt-free durable `thread/start` accepted the experimental project ID and exact folder, but the desktop did not list that empty thread. After its owned server closed, a new connection could not resume it because no rollout existed. No turn was sent to it.
+- A second, bounded diagnostic created a new thread and sent one fixed reply-only turn in the same owned server connection. It used the unique App Server project ID, exact folder, discovered default model/effort, read-only sandbox, no network, and never-approve policy. Exact thread/turn start and completed terminal IDs matched. The structured final reply reported completion; no tool or child work was observed.
+- The desktop discovered the second exact task and completed turn under general **Tasks** with `projectId: null`, rather than the saved desktop project. The experimental project ID did not establish desktop sidebar assignment in this observed run.
+- No prepared queue note or project work ran. No private desktop API, Codex database write, clipboard, typing simulation, or focus change was used. The user subsequently authorized general **Tasks** placement for future automatic queue work, while retaining each queue's saved working folder.

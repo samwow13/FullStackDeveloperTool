@@ -1,0 +1,66 @@
+<Window x:Class="FullStackLauncher.ServiceConsoleWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:controls="clr-namespace:FullStackLauncher.Controls"
+        Title="Service console" Width="1100" Height="740" MinWidth="740" MinHeight="430"
+        WindowStartupLocation="CenterOwner" ResizeMode="CanResize"
+        Icon="/Assets/launcher.ico" Background="{StaticResource BackgroundBrush}"
+        Foreground="{StaticResource TextBrush}" Loaded="OnLoaded" Closed="OnClosed">
+    <Grid Margin="22">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
+            <RowDefinition Height="Auto"/>
+        </Grid.RowDefinitions>
+        <StackPanel Margin="0,0,0,17">
+            <TextBlock Text="SERVICE CONSOLE" Foreground="{StaticResource AccentBrush}" FontSize="10" FontWeight="Bold"/>
+            <TextBlock x:Name="ServiceHeading" FontSize="23" FontWeight="SemiBold" Margin="0,4,0,3" TextWrapping="Wrap"/>
+            <TextBlock x:Name="ProjectHeading" Foreground="{StaticResource MutedBrush}" TextWrapping="Wrap"/>
+        </StackPanel>
+        <Border Grid.Row="1" Background="{StaticResource SurfaceBrush}" BorderBrush="{StaticResource BorderBrush}"
+                BorderThickness="1" CornerRadius="8" Padding="12,10" Margin="0,0,0,10">
+            <WrapPanel>
+                <StackPanel Orientation="Horizontal" Margin="0,0,22,2">
+                    <Label Content="_Show" Target="{Binding ElementName=SeverityFilter}" Foreground="{StaticResource TextBrush}"
+                           VerticalAlignment="Center" Padding="0,0,10,0"/>
+                    <ComboBox x:Name="SeverityFilter" Width="178" SelectionChanged="ViewOptionsChanged"
+                              AutomationProperties.Name="Console severity filter" ToolTip="Filter displayed entries by their classified severity">
+                        <ComboBoxItem Content="All output" Tag="all" IsSelected="True"/>
+                        <ComboBoxItem Content="Errors + warnings" Tag="problems"/>
+                        <ComboBoxItem Content="Errors" Tag="error"/>
+                        <ComboBoxItem Content="Warnings" Tag="warning"/>
+                        <ComboBoxItem Content="Commands" Tag="command"/>
+                        <ComboBoxItem Content="Output" Tag="output"/>
+                        <ComboBoxItem Content="Success" Tag="success"/>
+                        <ComboBoxItem Content="Info" Tag="information"/>
+                    </ComboBox>
+                </StackPanel>
+                <StackPanel Orientation="Horizontal" Margin="0,0,0,2">
+                    <Label Content="_Sort" Target="{Binding ElementName=SortOrder}" Foreground="{StaticResource TextBrush}"
+                           VerticalAlignment="Center" Padding="0,0,10,0"/>
+                    <ComboBox x:Name="SortOrder" Width="178" SelectionChanged="ViewOptionsChanged"
+                              AutomationProperties.Name="Console sort order" ToolTip="Errors first groups errors, then warnings, then other output; newest entries lead each group">
+                        <ComboBoxItem Content="Oldest first" Tag="oldest" IsSelected="True"/>
+                        <ComboBoxItem Content="Newest first" Tag="newest"/>
+                        <ComboBoxItem Content="Errors first" Tag="severity"/>
+                    </ComboBox>
+                </StackPanel>
+            </WrapPanel>
+        </Border>
+        <TextBlock x:Name="CountsText" Grid.Row="2" Foreground="{StaticResource MutedBrush}" Margin="1,0,0,10"
+                   TextWrapping="Wrap"/>
+        <controls:ConsoleOutput x:Name="Output" Grid.Row="3" ShowSource="True" ClearRequested="ClearOutputRequested"/>
+        <Grid Grid.Row="4" Margin="0,13,0,0">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="*"/>
+                <ColumnDefinition Width="Auto"/>
+            </Grid.ColumnDefinitions>
+            <TextBlock Text="Live capture · Copy all and Clear apply to every retained line, including hidden entries."
+                       TextWrapping="Wrap" Foreground="{StaticResource MutedBrush}" FontSize="11" Margin="0,0,20,0"
+                       VerticalAlignment="Center"/>
+            <Button Grid.Column="1" Content="Close" MinWidth="85" Click="CloseClick"/>
+        </Grid>
+    </Grid>
+</Window>

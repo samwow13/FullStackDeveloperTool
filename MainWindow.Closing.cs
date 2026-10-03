@@ -24,6 +24,8 @@ public partial class MainWindow
         // confirmation, so polling and build output cannot compete with its first paint.
         // Keep this separate from _closing: the user's explicit Save choice must still work.
         _closeRequested = true;
+        SuspendNextCommitReminder();
+        var resumeGitComparison = SuspendDashboardGitChecks();
         var resumeStatus = _timer.IsEnabled;
         var resumeConsole = _consoleTimer.IsEnabled;
         _timer.Stop();
@@ -49,10 +51,11 @@ public partial class MainWindow
             _closing = true;
             IsEnabled = false;
             if (_projectTasksWindow != null) _projectTasksWindow.IsEnabled = false;
-            DatabasePanel.CancelPending();
             Notice = "Stopping launcher-owned commands…";
             // Paint the progress message before beginning native process cleanup.
             await Dispatcher.Yield(DispatcherPriority.Background);
+            await StopGitConnectionWarmupAsync();
+            await StopDashboardGitComparisonAsync();
             await Task.WhenAll(runners.Select(x => x.StopManagedAsync()));
             if (closeWatcher)
             {
@@ -76,8 +79,10 @@ public partial class MainWindow
             {
                 _closing = false;
                 _closeRequested = false;
+                PresentNextCommit();
                 if (resumeStatus) _timer.Start();
                 if (resumeConsole) _consoleTimer.Start();
+                if (resumeGitComparison) _dashboardGitTimer.Start();
                 UpdateActions();
             }
         }

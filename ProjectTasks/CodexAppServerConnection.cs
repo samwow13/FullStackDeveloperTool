@@ -35,7 +35,8 @@ internal sealed class CodexAppServerConnection : IAsyncDisposable
         _stderrDrain = DrainErrorAsync();
     }
 
-    public static async Task<CodexAppServerConnection> StartAsync(string folder, CancellationToken token)
+    public static async Task<CodexAppServerConnection> StartAsync(string folder, CancellationToken token,
+        bool experimentalApi = false)
     {
         token.ThrowIfCancellationRequested();
         var process = new Process();
@@ -46,15 +47,17 @@ internal sealed class CodexAppServerConnection : IAsyncDisposable
             if (!process.Start())
                 throw new InvalidOperationException(UnavailableMessage);
             connection = new CodexAppServerConnection(process);
-            await connection.RequestAsync("initialize", new
+            var parameters = new Dictionary<string, object>
             {
-                clientInfo = new
+                ["clientInfo"] = new
                 {
                     name = "full_stack_launcher",
                     title = "Full Stack Launcher",
                     version = typeof(CodexAppServerConnection).Assembly.GetName().Version?.ToString() ?? "1.0"
                 }
-            }, token).ConfigureAwait(false);
+            };
+            if (experimentalApi) parameters["capabilities"] = new { experimentalApi = true };
+            await connection.RequestAsync("initialize", parameters, token).ConfigureAwait(false);
             await connection.SendAsync(new { method = "initialized", @params = new { } }, token).ConfigureAwait(false);
             return connection;
         }
@@ -307,7 +310,7 @@ internal sealed class CodexAppServerConnection : IAsyncDisposable
 }
 
 internal sealed class CodexInteractionRequiredException() : InvalidOperationException(
-    "Codex requested approval, input, or a tool that this connection check cannot handle. Open Codex to review it; the check did not approve the request.") { }
+    "Codex requested approval, input, or a client tool. Open Codex to review it; Full Stack Launcher did not approve or answer the request.") { }
 
 internal sealed class CodexRequestException(int code) : InvalidOperationException(code switch
 {

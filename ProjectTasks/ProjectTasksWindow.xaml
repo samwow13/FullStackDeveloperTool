@@ -3,7 +3,7 @@
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         xmlns:tasks="clr-namespace:FullStackLauncher.ProjectTasks"
         Title="Project notes &amp; queue — Full Stack Launcher" Icon="pack://application:,,,/Assets/launcher.ico"
-        Width="1180" Height="900" MinWidth="940" MinHeight="780" WindowStartupLocation="CenterOwner"
+        Width="1400" Height="980" MinWidth="1030" MinHeight="790" WindowStartupLocation="CenterOwner"
         Closing="Window_Closing">
     <tasks:ProjectTasksPanel/>
 </Window>

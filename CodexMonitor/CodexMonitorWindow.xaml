@@ -86,7 +86,7 @@
                                 <Ellipse Width="10" Height="10" Fill="{Binding DotColor}" VerticalAlignment="Center" ToolTip="{Binding Status}"/>
                                 <StackPanel Grid.Column="1">
                                     <TextBlock Text="{Binding ProjectName}" Foreground="{StaticResource AccentBrush}" FontSize="10" FontWeight="SemiBold" TextTrimming="CharacterEllipsis" ToolTip="{Binding ProjectPath}" Margin="0,0,0,3"/>
-                                    <TextBlock Text="{Binding Title}" Foreground="{StaticResource TextBrush}" TextWrapping="Wrap" ToolTip="{Binding Title}"/>
+                                    <TextBlock Text="{Binding ActivityTitle}" Foreground="{StaticResource TextBrush}" TextWrapping="Wrap" ToolTip="{Binding ActivityTitle}"/>
                                     <Grid Margin="0,4,0,0"><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
                                         <TextBlock Text="{Binding Status}" Foreground="{StaticResource MutedBrush}" FontSize="11" TextWrapping="Wrap" Margin="0,0,12,0"/>
                                         <TextBlock Grid.Column="1" Text="{Binding EstimateText}" Foreground="{StaticResource TextBrush}" FontSize="11" FontWeight="SemiBold" ToolTip="{Binding EstimateDetail}"/>

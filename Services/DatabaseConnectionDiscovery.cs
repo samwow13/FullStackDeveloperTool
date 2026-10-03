@@ -25,6 +25,7 @@ public static class DatabaseConnectionDiscovery
                 if (projectFiles.Length == 0) continue;
                 foreach (var projectFile in projectFiles)
                 {
+                    var projectProvider = DatabaseConnectionSecurity.ReadProjectProvider(projectFile);
                     var selection = service.ApiConfiguration;
                     var prefix = $"{service.Id}/{Path.GetFileName(projectFile)}";
                     var label = $"{project.Name} / {service.Name}";
@@ -69,10 +70,19 @@ public static class DatabaseConnectionDiscovery
                         {
                             try
                             {
+                                var provider = DatabaseConnectionSecurity.DetectProvider(item.Value.Value, projectProvider);
+                                if (provider is null)
+                                {
+                                    warnings.Add("Some connection strings have an unsupported or ambiguous provider. Add those connections explicitly and choose PostgreSQL or SQL Server.");
+                                    continue;
+                                }
                                 sources.Add(new($"{sourcePrefix}/{item.Key.ToUpperInvariant()}{suffix}", project.Id,
-                                    $"{sourceLabel} · {item.Key} ({item.Value.Origin})", item.Value.Value));
+                                    $"{sourceLabel} · {item.Key} ({item.Value.Origin})", item.Value.Value, provider));
                             }
-                            catch (ArgumentException) { /* Other database providers are not PostgreSQL sources. */ }
+                            catch (ArgumentException)
+                            {
+                                warnings.Add("Some database connections could not be loaded safely. Check their provider and security settings; connection values have not been displayed.");
+                            }
                         }
                     }
                 }

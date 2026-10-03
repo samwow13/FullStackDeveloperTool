@@ -56,7 +56,7 @@
                                         <TextBlock Text="{Binding ProjectName}" Foreground="#415469" FontSize="10" TextTrimming="CharacterEllipsis" ToolTip="{Binding ProjectPath}" Margin="0,0,10,0"/>
                                         <TextBlock Grid.Column="1" Text="{Binding EstimateText}" Foreground="#263443" FontSize="10" FontWeight="SemiBold" ToolTip="{Binding EstimateDetail}"/>
                                     </Grid>
-                                    <TextBlock Text="{Binding Title}" Foreground="#172331" FontSize="12" FontWeight="SemiBold" TextWrapping="Wrap" TextTrimming="CharacterEllipsis" MaxHeight="54" LineHeight="18" LineStackingStrategy="BlockLineHeight" ToolTip="{Binding Title}"/>
+                                    <TextBlock Text="{Binding ActivityTitle}" Foreground="#172331" FontSize="12" FontWeight="SemiBold" TextWrapping="Wrap" TextTrimming="CharacterEllipsis" MaxHeight="54" LineHeight="18" LineStackingStrategy="BlockLineHeight" ToolTip="{Binding ActivityTitle}"/>
                                 </StackPanel>
                             </Grid>
                         </Border>

@@ -16,7 +16,9 @@ public partial class MainWindow
         {
             // Finish staging the updated build before asking the old watcher to exit.
             // No project argument: restore its independent saved watches and overlay.
-            var start = await Task.Run(() => MonitorRuntime.CreateStart(["--codex-monitor", "--background"]));
+            var arguments = new List<string> { "--codex-monitor", "--background" };
+            AddQueueStoreSettingsArgument(arguments);
+            var start = await Task.Run(() => MonitorRuntime.CreateStart(arguments.ToArray()));
             await MonitorLifetime.StopAsync();
             using var process = Process.Start(start)
                 ?? throw new InvalidOperationException("The replacement watcher could not start.");

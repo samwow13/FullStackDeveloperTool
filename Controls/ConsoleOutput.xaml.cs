@@ -13,6 +13,8 @@ using FullStackLauncher.ViewModels;
 
 namespace FullStackLauncher.Controls;
 
+public enum ConsoleFollowMode { End, Start, None }
+
 /// <summary>Selectable terminal output with incremental document updates and user-controlled following.</summary>
 public partial class ConsoleOutput : UserControl
 {
@@ -20,6 +22,13 @@ public partial class ConsoleOutput : UserControl
         nameof(ItemsSource), typeof(IEnumerable), typeof(ConsoleOutput), new PropertyMetadata(null, ItemsSourceChanged));
     public static readonly DependencyProperty ShowSourceProperty = DependencyProperty.Register(
         nameof(ShowSource), typeof(bool), typeof(ConsoleOutput), new PropertyMetadata(true, PresentationChanged));
+    public static readonly DependencyProperty CopyItemsSourceProperty = DependencyProperty.Register(
+        nameof(CopyItemsSource), typeof(IEnumerable), typeof(ConsoleOutput), new PropertyMetadata(null, CopyItemsSourceChanged));
+    public static readonly DependencyProperty FollowModeProperty = DependencyProperty.Register(
+        nameof(FollowMode), typeof(ConsoleFollowMode), typeof(ConsoleOutput), new PropertyMetadata(ConsoleFollowMode.End, FollowModeChanged));
+    public static readonly DependencyProperty EmptyMessageProperty = DependencyProperty.Register(
+        nameof(EmptyMessage), typeof(string), typeof(ConsoleOutput),
+        new PropertyMetadata("Waiting for output. Commands and their results appear here.", EmptyMessageChanged));
 
     private static readonly Brush TimestampBrush = FrozenBrush("#829F95");
     private static readonly Brush SourceBrush = FrozenBrush("#9CBAD2");
@@ -27,6 +36,7 @@ public partial class ConsoleOutput : UserControl
     private static readonly Brush ErrorBackground = FrozenBrush("#291820");
     private readonly List<(ConsoleLine Line, Paragraph Paragraph)> _displayed = [];
     private INotifyCollectionChanged? _subscribed;
+    private INotifyCollectionChanged? _copySubscribed;
     private bool _updating;
     private bool _scrollPending;
     private bool _rebuildPending;
@@ -40,7 +50,37 @@ public partial class ConsoleOutput : UserControl
 
     public IEnumerable? ItemsSource { get => (IEnumerable?)GetValue(ItemsSourceProperty); set => SetValue(ItemsSourceProperty, value); }
     public bool ShowSource { get => (bool)GetValue(ShowSourceProperty); set => SetValue(ShowSourceProperty, value); }
+    /// <summary>Optional complete buffer for Copy all and Clear when the displayed source is filtered.</summary>
+    public IEnumerable? CopyItemsSource { get => (IEnumerable?)GetValue(CopyItemsSourceProperty); set => SetValue(CopyItemsSourceProperty, value); }
+    public ConsoleFollowMode FollowMode { get => (ConsoleFollowMode)GetValue(FollowModeProperty); set => SetValue(FollowModeProperty, value); }
+    public string EmptyMessage { get => (string)GetValue(EmptyMessageProperty); set => SetValue(EmptyMessageProperty, value); }
     public event EventHandler? ClearRequested;
+
+    private static void CopyItemsSourceChanged(DependencyObject d, DependencyPropertyChangedEventArgs e)
+    {
+        var control = (ConsoleOutput)d;
+        control.Unsubscribe();
+        if (control.IsLoaded) control.Subscribe();
+        control.QueueRebuild();
+    }
+
+    private static void FollowModeChanged(DependencyObject d, DependencyPropertyChangedEventArgs e)
+    {
+        var control = (ConsoleOutput)d;
+        if (control.FollowToggle is null) return;
+        control.FollowToggle.IsEnabled = control.FollowMode != ConsoleFollowMode.None;
+        control.FollowToggle.ToolTip = control.FollowMode == ConsoleFollowMode.None
+            ? "Follow output is available with Oldest first or Newest first sorting."
+            : "Scroll with new output. Scroll away from the latest line to pause; re-enable to jump to it.";
+        control.UpdateStatus();
+        control.FollowLatest();
+    }
+
+    private static void EmptyMessageChanged(DependencyObject d, DependencyPropertyChangedEventArgs e)
+    {
+        var control = (ConsoleOutput)d;
+        if (control.EmptyState is not null) control.EmptyState.Text = control.EmptyMessage;
+    }
 
     private static void ItemsSourceChanged(DependencyObject d, DependencyPropertyChangedEventArgs e)
     {
@@ -58,16 +98,24 @@ public partial class ConsoleOutput : UserControl
 
     private void Subscribe()
     {
-        if (_subscribed is not null) return;
+        if (_subscribed is not null || _copySubscribed is not null) return;
         _subscribed = ItemsSource as INotifyCollectionChanged;
         if (_subscribed is not null) _subscribed.CollectionChanged += CollectionChanged;
+        _copySubscribed = CopyItemsSource as INotifyCollectionChanged;
+        if (_copySubscribed is not null && !ReferenceEquals(_copySubscribed, _subscribed))
+            _copySubscribed.CollectionChanged += CopyCollectionChanged;
     }
 
     private void Unsubscribe()
     {
         if (_subscribed is not null) _subscribed.CollectionChanged -= CollectionChanged;
+        if (_copySubscribed is not null && !ReferenceEquals(_copySubscribed, _subscribed))
+            _copySubscribed.CollectionChanged -= CopyCollectionChanged;
         _subscribed = null;
+        _copySubscribed = null;
     }
+
+    private void CopyCollectionChanged(object? sender, NotifyCollectionChangedEventArgs e) => QueueRebuild();
 
     private void CollectionChanged(object? sender, NotifyCollectionChangedEventArgs e)
     {
@@ -78,13 +126,18 @@ public partial class ConsoleOutput : UserControl
             return;
         }
         if (!ReferenceEquals(sender, _subscribed)) return;
-        // A timer drain can add/trim hundreds of lines in both consoles. Coalesce them
+        // A timer drain can add/trim hundreds of lines across console views. Coalesce them
         // into one document transaction, and do no rich-text work for hidden panels.
         QueueRebuild();
     }
 
     private void QueueRebuild()
     {
+        if (!Dispatcher.CheckAccess())
+        {
+            Dispatcher.BeginInvoke(DispatcherPriority.Background, new Action(QueueRebuild));
+            return;
+        }
         if (_rebuildPending || !IsLoaded || !IsVisible) return;
         _rebuildPending = true;
         Dispatcher.BeginInvoke(DispatcherPriority.Background, new Action(() =>
@@ -101,43 +154,60 @@ public partial class ConsoleOutput : UserControl
     }
 
     private ConsoleLine[] RetainedLines() => ItemsSource?.OfType<ConsoleLine>().ToArray() ?? [];
+    private ConsoleLine[] CopyLines() => (CopyItemsSource ?? ItemsSource)?.OfType<ConsoleLine>().ToArray() ?? [];
 
     private void SynchronizeDocument()
     {
         var lines = RetainedLines();
         var started = Stopwatch.GetTimestamp();
+        var complete = false;
+        var changes = 0;
         _updating = true;
         OutputText.BeginChange();
         try
         {
-            // Keep existing paragraphs (and text selection) for the retained overlap.
-            // Normal capture only appends at the end and trims the oldest entries.
-            var first = lines.Length == 0 ? -1 : _displayed.FindIndex(item => ReferenceEquals(item.Line, lines[0]));
-            var overlap = first < 0 ? 0 : Math.Min(_displayed.Count - first, lines.Length);
-            var canRetain = !_resetDocument && first >= 0;
-            for (var index = 0; canRetain && index < overlap; index++)
-                canRetain = ReferenceEquals(_displayed[first + index].Line, lines[index]);
-            if (!canRetain)
+            // Retain paragraph objects and selections for unchanged entries, including
+            // insertion within a filtered or severity-sorted popout. Bound each batch.
+            if (_resetDocument)
             {
                 OutputText.Document.Blocks.Clear();
                 _displayed.Clear();
             }
-            else
-            {
-                for (var index = 0; index < first; index++)
-                    OutputText.Document.Blocks.Remove(_displayed[index].Paragraph);
-                _displayed.RemoveRange(0, first);
-                while (_displayed.Count > lines.Length)
-                {
-                    OutputText.Document.Blocks.Remove(_displayed[^1].Paragraph);
-                    _displayed.RemoveAt(_displayed.Count - 1);
-                }
-            }
             _resetDocument = false;
-            for (var count = 0; _displayed.Count < lines.Length && count < 40; count++)
+            var expected = lines.ToHashSet();
+            var removedMissing = true;
+            for (var index = _displayed.Count - 1; index >= 0; index--)
             {
-                Insert(_displayed.Count, lines[_displayed.Count]);
-                if (Stopwatch.GetElapsedTime(started).TotalMilliseconds >= 8) break;
+                if (expected.Contains(_displayed[index].Line)) continue;
+                if (BatchFull())
+                {
+                    removedMissing = false;
+                    break;
+                }
+                OutputText.Document.Blocks.Remove(_displayed[index].Paragraph);
+                _displayed.RemoveAt(index);
+                changes++;
+            }
+            if (removedMissing)
+            {
+                complete = true;
+                for (var index = 0; index < lines.Length; index++)
+                {
+                    if (index < _displayed.Count && ReferenceEquals(_displayed[index].Line, lines[index])) continue;
+                    if (BatchFull()) { complete = false; break; }
+                    var existing = _displayed.FindIndex(index, item => ReferenceEquals(item.Line, lines[index]));
+                    if (existing >= 0)
+                    {
+                        var entry = _displayed[existing];
+                        OutputText.Document.Blocks.Remove(entry.Paragraph);
+                        _displayed.RemoveAt(existing);
+                        if (index == _displayed.Count) OutputText.Document.Blocks.Add(entry.Paragraph);
+                        else OutputText.Document.Blocks.InsertBefore(_displayed[index].Paragraph, entry.Paragraph);
+                        _displayed.Insert(index, entry);
+                    }
+                    else Insert(index, lines[index]);
+                    changes++;
+                }
             }
         }
         finally
@@ -147,7 +217,9 @@ public partial class ConsoleOutput : UserControl
         }
         UpdateStatus();
         FollowLatest();
-        if (_displayed.Count < lines.Length) QueueRebuild();
+        if (!complete) QueueRebuild();
+
+        bool BatchFull() => changes >= 40 || changes > 0 && Stopwatch.GetElapsedTime(started).TotalMilliseconds >= 8;
     }
 
     private void Insert(int index, ConsoleLine line)
@@ -175,31 +247,42 @@ public partial class ConsoleOutput : UserControl
 
     private void OutputScrolled(object sender, ScrollChangedEventArgs e)
     {
-        if (_updating || FollowToggle is null || FollowToggle.IsChecked != true) return;
+        if (_updating || FollowMode == ConsoleFollowMode.None || FollowToggle is null || FollowToggle.IsChecked != true) return;
         // Content growth changes the extent. Only a viewport scroll away from the tail pauses following.
-        if (e.ExtentHeightChange == 0 && e.VerticalChange < 0 &&
-            e.VerticalOffset + e.ViewportHeight < e.ExtentHeight - 2)
+        if (e.ExtentHeightChange == 0 &&
+            (FollowMode == ConsoleFollowMode.End && e.VerticalChange < 0 && e.VerticalOffset + e.ViewportHeight < e.ExtentHeight - 2 ||
+             FollowMode == ConsoleFollowMode.Start && e.VerticalChange > 0 && e.VerticalOffset > 2))
             FollowToggle.IsChecked = false;
     }
 
     private void OutputMouseWheel(object sender, MouseWheelEventArgs e)
     {
-        if (e.Delta > 0 && OutputText.ExtentHeight > OutputText.ViewportHeight) FollowToggle.IsChecked = false;
+        if (OutputText.ExtentHeight > OutputText.ViewportHeight &&
+            (FollowMode == ConsoleFollowMode.End && e.Delta > 0 || FollowMode == ConsoleFollowMode.Start && e.Delta < 0))
+            FollowToggle.IsChecked = false;
     }
 
     private void OutputKeyDown(object sender, KeyEventArgs e)
     {
-        if (e.Key is Key.Up or Key.PageUp || e.Key == Key.Home && Keyboard.Modifiers.HasFlag(ModifierKeys.Control))
+        if (FollowMode == ConsoleFollowMode.End &&
+                (e.Key is Key.Up or Key.PageUp || e.Key == Key.Home && Keyboard.Modifiers.HasFlag(ModifierKeys.Control)) ||
+            FollowMode == ConsoleFollowMode.Start &&
+                (e.Key is Key.Down or Key.PageDown || e.Key == Key.End && Keyboard.Modifiers.HasFlag(ModifierKeys.Control)))
             FollowToggle.IsChecked = false;
     }
 
     private void FollowLatest()
     {
-        if (!IsVisible || FollowToggle?.IsChecked != true || _scrollPending) return;
+        if (!IsVisible || FollowMode == ConsoleFollowMode.None || FollowToggle?.IsChecked != true || _scrollPending) return;
         _scrollPending = true;
         Dispatcher.BeginInvoke(DispatcherPriority.Background, new Action(() =>
         {
-            try { if (IsLoaded && IsVisible && FollowToggle.IsChecked == true) OutputText.ScrollToEnd(); }
+            try
+            {
+                if (!IsLoaded || !IsVisible || FollowToggle.IsChecked != true) return;
+                if (FollowMode == ConsoleFollowMode.Start) OutputText.ScrollToHome();
+                else if (FollowMode == ConsoleFollowMode.End) OutputText.ScrollToEnd();
+            }
             finally { _scrollPending = false; }
         }));
     }
@@ -208,14 +291,23 @@ public partial class ConsoleOutput : UserControl
     {
         if (StatusText is null) return;
         EmptyState.Visibility = _displayed.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
-        CopyButton.IsEnabled = _displayed.Count > 0;
+        var retainedCount = CopyLines().Length;
+        CopyButton.IsEnabled = retainedCount > 0;
+        ClearButton.IsEnabled = retainedCount > 0;
+        CopyButton.ToolTip = CopyItemsSource is null
+            ? "Copy the complete retained output with timestamps and labels"
+            : "Copy every retained line, including lines hidden by the filter, in capture order";
+        ClearButton.ToolTip = CopyItemsSource is null
+            ? "Clear this console's retained output"
+            : "Clear all retained output for this service, including lines hidden by the filter";
         StatusText.Text = notice ?? $"{_displayed.Count:N0} {(_displayed.Count == 1 ? "line" : "lines")} · " +
-            (FollowToggle.IsChecked == true ? "Following output" : "Scroll paused · Enable Follow output to jump to latest");
+            (FollowMode == ConsoleFollowMode.None ? "Follow output available with chronological sorting" :
+                FollowToggle.IsChecked == true ? "Following output" : "Scroll paused · Enable Follow output to jump to latest");
     }
 
     private void CopyAllClick(object sender, RoutedEventArgs e)
     {
-        var lines = RetainedLines();
+        var lines = CopyLines();
         if (lines.Length == 0) return;
         try
         {

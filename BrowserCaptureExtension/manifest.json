@@ -1,0 +1,17 @@
+{
+  "manifest_version": 3,
+  "name": "FullStack Launcher Page Context",
+  "version": "1.1.0",
+  "description": "Capture selected browser page context and open launcher frontends after checking all paired tabs for an existing site.",
+  "minimum_chrome_version": "116",
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAq9PFj7iYrEyYwstzZ0tqbMmlG5l5v5+5Usyp1bi1IICGBQvbsv6l0DH4ayhgCk5Hn4mVAP/PP+lI8cPLS6PG1k3UnNpceR36Clsxyybm6InUVyV2ZmskX3s6cYVzPwRQayGpfNCFuRtyPUMyhDcMm+b/uyswmxbYbQxYvuknUE5oC6U42M2k3ab+JgmZL1/x7W+/AyJ2KU070vy7YOy13T9lTOia5jQN23ysMX3mw0QjJL2D6YV828SBvcpcQdI9vvZD9jq75FfpTwlSkRUV23CSSHglkb8TSiXXMTbXP39hHtHzwBDJJjM9Z/XYJOipkfc9rfX7oZZewgolqwyVRQIDAQAB",
+  "permissions": ["alarms", "scripting", "storage", "tabs"],
+  "host_permissions": ["<all_urls>"],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "options_page": "options.html",
+  "action": {
+    "default_title": "FullStack Launcher Page Context setup"
+  }
+}

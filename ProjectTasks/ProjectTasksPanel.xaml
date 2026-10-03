@@ -13,47 +13,232 @@
             <Setter Property="FontSize" Value="11"/>
             <Setter Property="Margin" Value="0,0,6,6"/>
         </Style>
+        <Style x:Key="TaskPopupAction" TargetType="Button" BasedOn="{StaticResource {x:Type Button}}">
+            <Setter Property="HorizontalAlignment" Value="Stretch"/>
+            <Setter Property="HorizontalContentAlignment" Value="Left"/>
+            <Setter Property="Padding" Value="9,6"/>
+            <Setter Property="Margin" Value="0,0,0,3"/>
+            <Setter Property="FontSize" Value="11"/>
+        </Style>
+        <Style x:Key="QueueSettingsToggleStyle" TargetType="ToggleButton">
+            <Setter Property="Foreground" Value="{StaticResource TextBrush}"/>
+            <Setter Property="Background" Value="#29374B"/>
+            <Setter Property="BorderBrush" Value="#3A4B63"/>
+            <Setter Property="Cursor" Value="Hand"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="ToggleButton">
+                        <Border x:Name="Frame" Background="{TemplateBinding Background}" BorderBrush="{TemplateBinding BorderBrush}"
+                                BorderThickness="1" CornerRadius="7">
+                            <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsMouseOver" Value="True"><Setter TargetName="Frame" Property="Opacity" Value="0.8"/></Trigger>
+                            <Trigger Property="IsChecked" Value="True"><Setter Property="Background" Value="#254D48"/><Setter Property="BorderBrush" Value="{StaticResource AccentBrush}"/></Trigger>
+                            <Trigger Property="IsKeyboardFocused" Value="True"><Setter Property="BorderBrush" Value="White"/></Trigger>
+                            <Trigger Property="IsEnabled" Value="False"><Setter Property="Cursor" Value="Arrow"/><Setter TargetName="Frame" Property="Opacity" Value="0.5"/></Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
     </UserControl.Resources>
     <Border Padding="22">
-    <ScrollViewer x:Name="PanelScroller" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
-    <Grid MinHeight="790" Height="{Binding ViewportHeight, ElementName=PanelScroller}">
+    <ScrollViewer x:Name="PanelScroller" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled" ScrollChanged="PanelScroller_ScrollChanged">
+    <Grid MinHeight="740">
         <Grid.RowDefinitions>
             <RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="*"/><RowDefinition Height="Auto"/>
         </Grid.RowDefinitions>
-        <Grid Margin="0,0,0,16">
+        <Grid Margin="0,0,0,10">
             <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
             <StackPanel>
                 <TextBlock Text="PROJECT NOTES &amp; QUEUE" FontSize="11" FontWeight="Bold" Foreground="{StaticResource AccentBrush}"/>
                 <TextBlock Text="{Binding ProjectName}" FontSize="25" FontWeight="SemiBold" Margin="0,7,12,3" TextTrimming="CharacterEllipsis"/>
                 <TextBlock Text="{Binding ProjectFolder}" Style="{StaticResource TaskCaption}" ToolTip="{Binding ProjectFolder}"/>
+                <TextBlock Text="Follows the dashboard project" Style="{StaticResource TaskCaption}" Margin="0,5,0,0"/>
             </StackPanel>
-            <StackPanel Grid.Column="1" Margin="18,0,0,0" VerticalAlignment="Center">
-                <Button Content="Codex connection…" Click="CodexConnection_Click" IsEnabled="{Binding HasProject}" Margin="0,0,0,7"/>
-                <Button Content="Reload notes" Command="{Binding ReloadCommand}" ToolTip="Reload saved notes after changes in another launcher. Unsaved drafts stay here for review."/>
-                <TextBlock Text="Follows the dashboard project" Style="{StaticResource TaskCaption}" Margin="0,6,0,0"/>
-            </StackPanel>
+            <Grid Grid.Column="1" Margin="18,0,0,0" VerticalAlignment="Top">
+                <ToggleButton x:Name="QueueSettingsToggle" Width="42" Height="42"
+                              VerticalAlignment="Top" Style="{StaticResource QueueSettingsToggleStyle}"
+                              AutomationProperties.Name="Queue settings" AutomationProperties.HelpText="Show Codex connection, model, thinking level, and assigned queue folder"
+                              ToolTip="Queue settings and Codex connection">
+                    <TextBlock Text="&#xE713;" FontFamily="Segoe MDL2 Assets" FontSize="19"/>
+                </ToggleButton>
+            </Grid>
+            <Popup x:Name="QueueSettingsPopup" PlacementTarget="{Binding ElementName=QueueSettingsToggle}"
+                   Placement="Custom" StaysOpen="True" AllowsTransparency="True"
+                   IsOpen="{Binding IsChecked, ElementName=QueueSettingsToggle, Mode=TwoWay}" Opened="QueueSettings_Opened">
+                <Border x:Name="QueueSettingsContent" Width="430" Background="{StaticResource SurfaceBrush}" DataContext="{Binding DataContext, ElementName=QueueSettingsToggle}"
+                        BorderBrush="{StaticResource BorderBrush}" BorderThickness="1" CornerRadius="8" Padding="13"
+                        Focusable="True" KeyboardNavigation.TabNavigation="Cycle" KeyDown="QueueSettings_KeyDown"
+                        AutomationProperties.Name="Queue settings panel">
+                    <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled" MaxHeight="440">
+                        <StackPanel>
+                            <Grid>
+                                <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+                                <TextBlock Text="QUEUE SETTINGS" FontSize="10" FontWeight="Bold" Foreground="{StaticResource AccentBrush}" VerticalAlignment="Center"/>
+                                <Button Grid.Column="1" Content="×" Click="CloseQueueSettings_Click" FontSize="15" Padding="7,2"
+                                        AutomationProperties.Name="Close queue settings" ToolTip="Close queue settings"/>
+                            </Grid>
+                            <Button Content="Codex connection…" Click="CodexConnection_Click" IsEnabled="{Binding HasProject}"
+                                    HorizontalAlignment="Left" FontSize="11" Padding="9,6" Margin="0,8,0,12"
+                                    ToolTip="Open connection check and saved diagnostic history"/>
+                            <Grid>
+                                <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+                                <TextBlock Text="Codex model" FontWeight="SemiBold" VerticalAlignment="Center"/>
+                                <Button Grid.Column="1" Content="Refresh models" Command="{Binding RefreshModelsCommand}" FontSize="11" Padding="8,6"/>
+                            </Grid>
+                            <TextBlock Text="{Binding ModelStatus}" Style="{StaticResource TaskCaption}" Margin="0,8,0,6"/>
+                            <Button Content="Use Codex default" Command="{Binding UseCodexDefaultCommand}" FontSize="11" Padding="8,6" HorizontalAlignment="Left"
+                                    ToolTip="Save the model and thinking level returned by the current Codex catalog." ToolTipService.ShowOnDisabled="True"/>
+                            <Label Content="_Model" Target="{Binding ElementName=DefaultModelChoice}" Foreground="{StaticResource MutedBrush}" Padding="0,8,0,5"/>
+                            <ComboBox x:Name="DefaultModelChoice" ItemsSource="{Binding Models}" SelectedItem="{Binding SelectedDefaultModel, Mode=TwoWay}" DisplayMemberPath="DisplayName" IsEnabled="{Binding CanChooseDefaultModel}"/>
+                            <Label Content="_Thinking level" Target="{Binding ElementName=DefaultEffortChoice}" Foreground="{StaticResource MutedBrush}" Padding="0,8,0,5"/>
+                            <ComboBox x:Name="DefaultEffortChoice" ItemsSource="{Binding DefaultEfforts}" SelectedItem="{Binding SelectedDefaultEffort, Mode=TwoWay}" DisplayMemberPath="Id" IsEnabled="{Binding CanChooseDefaultModel}" ToolTip="{Binding SelectedDefaultEffort.Description}"/>
+                            <TextBlock Text="{Binding DefaultOptionsStatus}" Style="{StaticResource TaskCaption}" Margin="0,8,0,11"/>
+                            <TextBlock Text="Assigned queue folder" Foreground="{StaticResource MutedBrush}" FontSize="11"/>
+                            <TextBlock Text="{Binding AssignedFolder}" FontSize="11" TextWrapping="Wrap" Margin="0,3,0,0"/>
+                            <Border Visibility="{Binding FolderChanged, Converter={StaticResource BoolToVisibility}}"
+                                    Background="#292721" BorderBrush="#735A38" BorderThickness="1" CornerRadius="6" Padding="9" Margin="0,8,0,0">
+                                <StackPanel>
+                                    <TextBlock Text="FOLDER CHANGED" FontSize="10" FontWeight="Bold" Foreground="#FFD78A"/>
+                                    <TextBlock Text="The project folder changed. The queue still uses its saved folder." TextWrapping="Wrap" FontSize="11" Margin="0,4,0,0"/>
+                                    <Button Content="Use current project folder" Command="{Binding UseCurrentFolderCommand}" FontSize="11" Padding="8,6" Margin="0,7,0,0" HorizontalAlignment="Left"/>
+                                </StackPanel>
+                            </Border>
+                            <Border Visibility="{Binding HasLegacyPredecessor, Converter={StaticResource BoolToVisibility}}"
+                                    Background="#292721" BorderBrush="#735A38" BorderThickness="1" CornerRadius="6" Padding="9" Margin="0,8,0,0">
+                                <StackPanel>
+                                    <TextBlock Text="OLD WAIT" FontSize="10" FontWeight="Bold" Foreground="#FFD78A"/>
+                                    <TextBlock Text="This queue has an older external wait saved. Pause the queue before clearing it." FontSize="11" TextWrapping="Wrap" Margin="0,4,0,0"/>
+                                    <Button Content="Clear old wait" Command="{Binding ClearPredecessorCommand}" FontSize="11" Padding="8,6" Margin="0,6,0,0" HorizontalAlignment="Left"/>
+                                </StackPanel>
+                            </Border>
+                            <TextBlock Text="{Binding Feedback}" Style="{StaticResource TaskCaption}" Margin="0,11,0,0" AutomationProperties.LiveSetting="Polite"/>
+                        </StackPanel>
+                    </ScrollViewer>
+                </Border>
+            </Popup>
         </Grid>
-        <Border Grid.Row="1" Background="#203631" BorderBrush="#397767" BorderThickness="1" CornerRadius="8" Padding="13,10" Margin="0,0,0,14">
-            <StackPanel>
-                <TextBlock Text="Prepare your next tasks" FontWeight="SemiBold" Foreground="{StaticResource AccentBrush}"/>
-                <TextBlock Text="Capture notes, choose their order, and prepare a queue. Automatic execution is unavailable. Open Codex connection to explicitly run a separate, bounded connection check." TextWrapping="Wrap" Margin="0,4,0,0"/>
-            </StackPanel>
+        <Border Grid.Row="1" Background="{StaticResource SurfaceBrush}" BorderBrush="{StaticResource BorderBrush}"
+                BorderThickness="1" CornerRadius="8" Padding="10,7" Margin="0,0,0,13">
+            <Grid>
+                <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
+                <Grid>
+                    <Grid.ColumnDefinitions><ColumnDefinition Width="Auto"/><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+                    <TextBlock Text="CODEX TASKS" FontSize="11" FontWeight="Bold" Foreground="{StaticResource AccentBrush}"
+                               VerticalAlignment="Center"/>
+                    <TextBlock Grid.Column="1" Text="{Binding ActivitySummary}" FontSize="11" Foreground="{StaticResource MutedBrush}"
+                               Margin="12,0,8,0" TextTrimming="CharacterEllipsis" VerticalAlignment="Center"
+                               AutomationProperties.LiveSetting="Polite"/>
+                    <Button Grid.Column="2" Content="{Binding HistoryButtonLabel}" Click="TaskHistory_Click" FontSize="11" Padding="8,4" Margin="0,0,7,0"
+                            IsEnabled="{Binding HasProject}" ToolTip="View archived task activity for this project and clear it all at once."/>
+                    <Button Grid.Column="3" Content="All attempts…" Click="QueueAttempts_Click" FontSize="11" Padding="8,4"
+                            ToolTip="Inspect saved task and turn IDs, exact outcomes, and review holds."/>
+                </Grid>
+                <ScrollViewer Grid.Row="1" HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Disabled">
+                    <ItemsControl ItemsSource="{Binding RecentTaskActivity}">
+                        <ItemsControl.ItemsPanel>
+                            <ItemsPanelTemplate><StackPanel Orientation="Horizontal"/></ItemsPanelTemplate>
+                        </ItemsControl.ItemsPanel>
+                        <ItemsControl.ItemTemplate>
+                            <DataTemplate>
+                                <Border Width="210" Background="{StaticResource BackgroundBrush}" BorderBrush="{StaticResource BorderBrush}"
+                                        BorderThickness="1" CornerRadius="5" Padding="7,5" Margin="0,6,7,0" ToolTip="{Binding Detail}">
+                                    <Grid>
+                                        <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
+                                        <Grid.ColumnDefinitions><ColumnDefinition Width="12"/><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+                                        <Ellipse Width="7" Height="7" Fill="{Binding StatusBrush}" HorizontalAlignment="Left" VerticalAlignment="Center"/>
+                                        <TextBlock Grid.Column="1" Text="{Binding Name}" FontSize="11" FontWeight="SemiBold" VerticalAlignment="Center"
+                                                   TextTrimming="CharacterEllipsis" ToolTip="{Binding Name}"/>
+                                        <TextBlock Grid.Row="1" Grid.Column="1" Grid.ColumnSpan="3" Text="{Binding Status}" Foreground="{Binding StatusBrush}"
+                                                   FontSize="10" FontWeight="SemiBold" TextTrimming="CharacterEllipsis"/>
+                                        <Button Grid.Column="2" Content="View Chat" Click="ViewTaskChat_Click"
+                                                FontSize="10" Padding="4,1" Margin="4,0,0,0" MinHeight="20"
+                                                AutomationProperties.Name="{Binding Name, StringFormat=View chat for {0}}"
+                                                ToolTip="Read this attempt's saved request and Codex conversation so far">
+                                            <Button.Style>
+                                                <Style TargetType="Button" BasedOn="{StaticResource {x:Type Button}}">
+                                                    <Style.Triggers>
+                                                        <DataTrigger Binding="{Binding AttemptId}" Value="{x:Null}">
+                                                            <Setter Property="Visibility" Value="Collapsed"/>
+                                                        </DataTrigger>
+                                                    </Style.Triggers>
+                                                </Style>
+                                            </Button.Style>
+                                        </Button>
+                                        <ToggleButton x:Name="TaskActionsToggle" Grid.Column="3" Content="⋯" Width="23" MinHeight="20"
+                                                      FontSize="13" Margin="4,0,0,0" Padding="0" VerticalAlignment="Center"
+                                                      AutomationProperties.Name="{Binding Name, StringFormat=Actions for {0}}"
+                                                      ToolTip="Task actions">
+                                            <ToggleButton.Style>
+                                                <Style TargetType="ToggleButton" BasedOn="{StaticResource QueueSettingsToggleStyle}">
+                                                    <Style.Triggers>
+                                                        <DataTrigger Binding="{Binding AttemptId}" Value="{x:Null}">
+                                                            <Setter Property="Visibility" Value="Collapsed"/>
+                                                        </DataTrigger>
+                                                    </Style.Triggers>
+                                                </Style>
+                                            </ToggleButton.Style>
+                                        </ToggleButton>
+                                        <Popup PlacementTarget="{Binding ElementName=TaskActionsToggle}" Placement="Bottom"
+                                               HorizontalOffset="-145" VerticalOffset="4" StaysOpen="False" AllowsTransparency="True"
+                                               IsOpen="{Binding IsChecked, ElementName=TaskActionsToggle, Mode=TwoWay}"
+                                               Opened="TaskActions_Opened" Closed="TaskActions_Closed">
+                                            <Border Width="170" Background="{StaticResource SurfaceBrush}" BorderBrush="{StaticResource BorderBrush}"
+                                                    BorderThickness="1" CornerRadius="7" Padding="7"
+                                                    DataContext="{Binding DataContext, ElementName=TaskActionsToggle}"
+                                                    Focusable="True" KeyboardNavigation.TabNavigation="Cycle" KeyDown="TaskActions_KeyDown">
+                                                <StackPanel>
+                                                    <TextBlock Text="TASK ACTIONS" FontSize="10" FontWeight="Bold" Foreground="{StaticResource AccentBrush}" Margin="3,2,0,6"/>
+                                                    <Button Content="Stop task…" Style="{StaticResource TaskPopupAction}" Click="StopTask_Click"
+                                                            Visibility="{Binding CanStop, Converter={StaticResource BoolToVisibility}}"/>
+                                                    <Button Content="Re-attempt…" Style="{StaticResource TaskPopupAction}" Click="RetryTask_Click"
+                                                            Visibility="{Binding CanRetry, Converter={StaticResource BoolToVisibility}}"/>
+                                                    <Button Content="Review attempt…" Style="{StaticResource TaskPopupAction}" Click="ReviewTask_Click"
+                                                            Visibility="{Binding CanReview, Converter={StaticResource BoolToVisibility}}"/>
+                                                    <Button Content="Move to History" Style="{StaticResource TaskPopupAction}" Click="ArchiveTask_Click"
+                                                            Visibility="{Binding CanMoveToHistory, Converter={StaticResource BoolToVisibility}}"/>
+                                                    <Button Content="Delete…" Style="{StaticResource TaskPopupAction}" Click="DeleteTask_Click"
+                                                            Visibility="{Binding CanDelete, Converter={StaticResource BoolToVisibility}}"
+                                                            Foreground="#FFACA9" ToolTip="Remove tracked activity and abandon any unresolved queue hold. Saved receipt remains in All attempts."/>
+                                                </StackPanel>
+                                            </Border>
+                                        </Popup>
+                                    </Grid>
+                                </Border>
+                            </DataTemplate>
+                        </ItemsControl.ItemTemplate>
+                    </ItemsControl>
+                </ScrollViewer>
+            </Grid>
         </Border>
         <Grid Grid.Row="2">
-            <Grid.ColumnDefinitions><ColumnDefinition Width="1.18*" MinWidth="420"/><ColumnDefinition Width="14"/><ColumnDefinition Width="1*" MinWidth="330"/></Grid.ColumnDefinitions>
+            <Grid.ColumnDefinitions><ColumnDefinition Width="1.55*" MinWidth="520"/><ColumnDefinition Width="14"/><ColumnDefinition Width="0.8*" MinWidth="330"/></Grid.ColumnDefinitions>
             <Grid>
-                <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="0.8*" MinHeight="90"/><RowDefinition Height="Auto"/><RowDefinition Height="1.1*" MinHeight="165"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
+                <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="*" MinHeight="340"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
                 <Grid Margin="0,0,0,8">
                     <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
                     <StackPanel><TextBlock Text="Notes" FontSize="17" FontWeight="SemiBold"/><TextBlock Text="{Binding NoteCount}" Style="{StaticResource TaskCaption}"/></StackPanel>
-                    <Button Grid.Column="1" Content="+ New note" Command="{Binding NewNoteCommand}" VerticalAlignment="Center"/>
+                    <WrapPanel Grid.Column="1" VerticalAlignment="Center">
+                        <Button Content="Edit selected note" Click="OpenEditor_Click" IsEnabled="{Binding CanEdit}"
+                                Visibility="{Binding HasSelectedNote, Converter={StaticResource BoolToVisibility}}" Margin="0,0,7,0"/>
+                        <Button Content="+ New note" Click="NewNote_Click" IsEnabled="{Binding CanEdit}"/>
+                    </WrapPanel>
                 </Grid>
                 <Border Grid.Row="1" Background="{StaticResource SurfaceBrush}" BorderBrush="{StaticResource BorderBrush}" BorderThickness="1" CornerRadius="8">
                     <Grid>
-                        <TextBlock Text="No notes yet. Start with a task name and a description below." Style="{StaticResource TaskCaption}" Margin="14" VerticalAlignment="Center" HorizontalAlignment="Center" IsHitTestVisible="False">
+                        <TextBlock Text="No saved notes yet. Select + New note to write a task and add images." Style="{StaticResource TaskCaption}" Margin="14" VerticalAlignment="Center" HorizontalAlignment="Center" IsHitTestVisible="False">
                             <TextBlock.Visibility><Binding Path="Notes.Count"><Binding.Converter><local:EmptyCountVisibilityConverter xmlns:local="clr-namespace:FullStackLauncher.ProjectTasks"/></Binding.Converter></Binding></TextBlock.Visibility>
                         </TextBlock>
-                        <ListBox ItemsSource="{Binding Notes}" SelectedItem="{Binding SelectedNote, Mode=TwoWay}" AutomationProperties.Name="Project notes" Padding="4">
+                        <ListBox ItemsSource="{Binding Notes}" SelectedItem="{Binding SelectedNote, Mode=TwoWay}" MouseDoubleClick="Notes_MouseDoubleClick" AutomationProperties.Name="Project notes" Padding="4">
+                            <ListBox.Style>
+                                <Style TargetType="ListBox" BasedOn="{StaticResource {x:Type ListBox}}">
+                                    <Style.Triggers>
+                                        <DataTrigger Binding="{Binding Notes.Count}" Value="0"><Setter Property="Visibility" Value="Collapsed"/></DataTrigger>
+                                    </Style.Triggers>
+                                </Style>
+                            </ListBox.Style>
                             <ListBox.ItemTemplate><DataTemplate>
                                 <Grid>
                                     <Grid.ColumnDefinitions><ColumnDefinition Width="24"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
@@ -72,46 +257,59 @@
                     <Button Content="↑" Style="{StaticResource TaskAction}" Command="{Binding MoveNoteUpCommand}" AutomationProperties.Name="Move note up"/>
                     <Button Content="↓" Style="{StaticResource TaskAction}" Command="{Binding MoveNoteDownCommand}" AutomationProperties.Name="Move note down"/>
                     <Button Content="{Binding CompleteLabel}" Style="{StaticResource TaskAction}" Command="{Binding ToggleCompleteCommand}"/>
-                    <Button Content="Add to queue →" Style="{StaticResource TaskAction}" Command="{Binding AddToQueueCommand}" ToolTip="Save note edits first. Adding to the queue does not start execution." ToolTipService.ShowOnDisabled="True"/>
+                    <Button Content="Add to queue →" Style="{StaticResource TaskAction}" Command="{Binding AddToQueueCommand}" ToolTip="Save note edits first. If the queue is enabled, this item may start immediately after it is added." ToolTipService.ShowOnDisabled="True"/>
                     <Button Content="Delete note" Style="{StaticResource TaskAction}" Click="DeleteNote_Click" IsEnabled="{Binding HasSelectedNote}" Foreground="#FFACA9"/>
-                </WrapPanel>
-                <Border Grid.Row="3" Background="{StaticResource SurfaceBrush}" BorderBrush="{StaticResource BorderBrush}" BorderThickness="1" CornerRadius="8" Padding="13" IsEnabled="{Binding CanEdit}">
-                    <Grid>
-                        <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="*"/></Grid.RowDefinitions>
-                        <TextBlock Text="{Binding EditorHeading}" FontWeight="SemiBold" Margin="0,0,0,8"/>
-                        <DockPanel Grid.Row="1" LastChildFill="True">
-                            <Label Content="Task _name" Target="{Binding ElementName=NoteName}" Foreground="{StaticResource MutedBrush}" Padding="0,8,10,0"/>
-                            <TextBox x:Name="NoteName" Text="{Binding EditorName, UpdateSourceTrigger=PropertyChanged}" MaxLength="160" ToolTip="Optional. The first nonempty description line supplies the initial name."/>
-                        </DockPanel>
-                        <Label Grid.Row="2" Content="_Description / Codex prompt" Target="{Binding ElementName=NotePrompt}" Foreground="{StaticResource MutedBrush}" Padding="0,9,0,5"/>
-                        <TextBox x:Name="NotePrompt" Grid.Row="3" Text="{Binding EditorPrompt, UpdateSourceTrigger=PropertyChanged}" AcceptsReturn="True" VerticalScrollBarVisibility="Auto" TextWrapping="Wrap" MaxLength="100000" AutomationProperties.Name="Note description and Codex prompt"/>
-                    </Grid>
-                </Border>
-                <WrapPanel Grid.Row="4" Margin="0,9,0,0">
-                    <Button Content="_Save note" Command="{Binding SaveNoteCommand}" Style="{StaticResource PrimaryButton}" Padding="13,8" Margin="0,0,7,0"/>
-                    <Button Content="Discard draft" Command="{Binding DiscardDraftCommand}" Padding="12,8"/>
                 </WrapPanel>
             </Grid>
             <Grid Grid.Column="2">
-                <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="*" MinHeight="90"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
+                <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="*" MinHeight="90"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
                 <StackPanel Margin="0,0,0,8">
                     <TextBlock Text="Queue" FontSize="17" FontWeight="SemiBold"/>
                     <TextBlock Text="{Binding QueueCount}" Style="{StaticResource TaskCaption}"/>
-                    <TextBlock Text="{Binding QueueStatus}" TextWrapping="Wrap" Foreground="{StaticResource AccentBrush}" Margin="0,9,0,0"/>
+                    <WrapPanel Margin="0,10,0,0">
+                        <Button Content="Enable Queue" Style="{StaticResource TaskAction}" Command="{Binding EnableAutoRunCommand}"
+                                ToolTip="First eligible item may start immediately. Codex uses the assigned working folder; desktop placement may be under general Tasks."
+                                ToolTipService.ShowOnDisabled="True"/>
+                        <Button Content="Pause Queue" Style="{StaticResource TaskAction}" Command="{Binding PauseQueueCommand}"
+                                ToolTip="Prevent future dispatch. An already submitted task would continue." ToolTipService.ShowOnDisabled="True"/>
+                        <Button Content="{Binding GlobalPauseLabel}" Style="{StaticResource TaskAction}" Command="{Binding ToggleGlobalPauseCommand}"
+                                ToolTip="Clear resumes any already enabled project queues. This project's queue can be enabled separately." ToolTipService.ShowOnDisabled="True"/>
+                    </WrapPanel>
+                    <Border Background="{StaticResource SurfaceBrush}" BorderBrush="#735A38" BorderThickness="1"
+                            CornerRadius="7" Padding="10,8" Margin="0,4,0,0">
+                        <Grid>
+                            <Grid.ColumnDefinitions><ColumnDefinition Width="3"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+                            <Border Background="#FFD78A" CornerRadius="2"/>
+                            <StackPanel Grid.Column="1" Margin="10,0,0,0">
+                                <TextBlock Text="QUEUE STATUS" FontSize="10" FontWeight="Bold" Foreground="#FFD78A"/>
+                                <TextBlock Text="{Binding QueueStatus}" FontSize="11" TextWrapping="Wrap" Margin="0,3,0,0"
+                                           AutomationProperties.LiveSetting="Polite"/>
+                                <TextBlock Text="{Binding GlobalPauseStatus}" Foreground="#FFD78A" FontSize="11" TextWrapping="Wrap"
+                                           Margin="0,5,0,0" AutomationProperties.LiveSetting="Polite">
+                                    <TextBlock.Style>
+                                        <Style TargetType="TextBlock">
+                                            <Style.Triggers>
+                                                <Trigger Property="Text" Value=""><Setter Property="Visibility" Value="Collapsed"/></Trigger>
+                                            </Style.Triggers>
+                                        </Style>
+                                    </TextBlock.Style>
+                                </TextBlock>
+                            </StackPanel>
+                        </Grid>
+                    </Border>
                 </StackPanel>
                 <Border Grid.Row="1" Background="{StaticResource SurfaceBrush}" BorderBrush="{StaticResource BorderBrush}" BorderThickness="1" CornerRadius="8">
                     <Grid>
                         <TextBlock Text="Add a saved note to prepare your first queue item." Style="{StaticResource TaskCaption}" Margin="14" VerticalAlignment="Center" HorizontalAlignment="Center" IsHitTestVisible="False">
                             <TextBlock.Visibility><Binding Path="Queue.Count"><Binding.Converter><local:EmptyCountVisibilityConverter xmlns:local="clr-namespace:FullStackLauncher.ProjectTasks"/></Binding.Converter></Binding></TextBlock.Visibility>
                         </TextBlock>
-                        <ListBox ItemsSource="{Binding Queue}" SelectedItem="{Binding SelectedQueue, Mode=TwoWay}" AutomationProperties.Name="Project task queue" Padding="4">
+                        <ListBox ItemsSource="{Binding Queue}" SelectedItem="{Binding SelectedQueue, Mode=TwoWay}" AutomationProperties.Name="Project task queue" Padding="4" MaxHeight="240">
                             <ListBox.ItemTemplate><DataTemplate>
                                 <Grid>
                                     <Grid.ColumnDefinitions><ColumnDefinition Width="27"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
                                     <TextBlock Text="{Binding Position}" Foreground="{StaticResource AccentBrush}" FontWeight="Bold"/>
                                     <StackPanel Grid.Column="1">
                                         <TextBlock Text="{Binding Name}" FontWeight="SemiBold" TextWrapping="Wrap"/>
-                                        <TextBlock Text="{Binding Options}" Style="{StaticResource TaskCaption}" Margin="0,4,0,0"/>
                                         <TextBlock Text="{Binding Status}" Foreground="{StaticResource AccentBrush}" FontSize="11" Margin="0,4,0,0"/>
                                     </StackPanel>
                                 </Grid>
@@ -123,31 +321,12 @@
                     <Button Content="↑" Style="{StaticResource TaskAction}" Command="{Binding MoveQueueUpCommand}" AutomationProperties.Name="Move queue item up"/>
                     <Button Content="↓" Style="{StaticResource TaskAction}" Command="{Binding MoveQueueDownCommand}" AutomationProperties.Name="Move queue item down"/>
                     <Button Content="{Binding ItemEnabledLabel}" Style="{StaticResource TaskAction}" Command="{Binding ToggleItemCommand}"/>
+                    <Button Content="Retry selected item…" Style="{StaticResource TaskAction}" Click="RetrySelectedItem_Click"
+                            IsEnabled="{Binding CanRetrySelectedItem}"
+                            ToolTip="Create a new attempt for a confirmed terminal or reviewed held item. Queue stays paused until Enable Queue."
+                            ToolTipService.ShowOnDisabled="True"/>
                     <Button Content="Remove from queue" Style="{StaticResource TaskAction}" Command="{Binding RemoveFromQueueCommand}"/>
                 </WrapPanel>
-                <Border Grid.Row="3" Background="{StaticResource SurfaceBrush}" BorderBrush="{StaticResource BorderBrush}" BorderThickness="1" CornerRadius="8" Padding="13">
-                    <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled" MaxHeight="325">
-                    <StackPanel>
-                        <Grid>
-                            <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
-                            <TextBlock Text="Queue item settings" FontWeight="SemiBold" VerticalAlignment="Center"/>
-                            <Button Grid.Column="1" Content="Refresh models" Command="{Binding RefreshModelsCommand}" FontSize="11" Padding="8,6"/>
-                        </Grid>
-                        <TextBlock Text="{Binding ModelStatus}" Style="{StaticResource TaskCaption}" Margin="0,8,0,8"/>
-                        <Label Content="_Model" Target="{Binding ElementName=ModelChoice}" Foreground="{StaticResource MutedBrush}" Padding="0,0,0,5"/>
-                        <ComboBox x:Name="ModelChoice" ItemsSource="{Binding Models}" SelectedItem="{Binding SelectedModel, Mode=TwoWay}" DisplayMemberPath="DisplayName" IsEnabled="{Binding CanChooseModel}"/>
-                        <Label Content="_Thinking level" Target="{Binding ElementName=EffortChoice}" Foreground="{StaticResource MutedBrush}" Padding="0,8,0,5"/>
-                        <ComboBox x:Name="EffortChoice" ItemsSource="{Binding Efforts}" SelectedItem="{Binding SelectedEffort, Mode=TwoWay}" DisplayMemberPath="Id" IsEnabled="{Binding CanChooseModel}" ToolTip="{Binding SelectedEffort.Description}"/>
-                        <TextBlock Text="{Binding SavedQueueOptions}" Style="{StaticResource TaskCaption}" Margin="0,8,0,8"/>
-                        <TextBlock Text="Assigned queue folder" Foreground="{StaticResource MutedBrush}" FontSize="11"/>
-                        <TextBlock Text="{Binding AssignedFolder}" FontSize="11" TextWrapping="Wrap" Margin="0,3,0,0"/>
-                        <StackPanel Visibility="{Binding FolderChanged, Converter={StaticResource BoolToVisibility}}" Margin="0,8,0,0">
-                            <TextBlock Text="The project folder changed. The queue still uses its saved folder." TextWrapping="Wrap" Foreground="#FFD78A" FontSize="11"/>
-                            <Button Content="Use current project folder" Command="{Binding UseCurrentFolderCommand}" FontSize="11" Padding="8,6" Margin="0,7,0,0" HorizontalAlignment="Left"/>
-                        </StackPanel>
-                    </StackPanel>
-                    </ScrollViewer>
-                </Border>
             </Grid>
         </Grid>
         <Border Grid.Row="3" BorderBrush="{StaticResource BorderBrush}" BorderThickness="0,1,0,0" Margin="0,14,0,0" Padding="0,10,0,0">

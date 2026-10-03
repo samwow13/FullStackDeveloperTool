@@ -26,6 +26,7 @@ public sealed class ProjectTaskStore
     private readonly object _gate = new();
     private bool _loaded;
     private bool _blocked;
+    private int _loadedSourceVersion;
     private string? _loadedFingerprint;
     private ProjectTaskData? _lastGoodData;
 
@@ -35,6 +36,7 @@ public sealed class ProjectTaskStore
     public string StorePath { get; }
     public string? LoadWarning { get; private set; }
     public bool CanSave => _loaded && !_blocked;
+    public int LoadedSourceVersion { get { lock (_gate) return _loadedSourceVersion; } }
 
     public ProjectTaskStore() : this(null) { }
 
@@ -63,6 +65,7 @@ public sealed class ProjectTaskStore
             {
                 var content = ReadExistingFile();
                 var data = content == null ? new ProjectTaskData() : ParseAndValidate(content);
+                _loadedSourceVersion = content == null ? data.Version : ReadSourceVersion(content);
                 _loadedFingerprint = content == null ? null : Fingerprint(content);
                 _lastGoodData = Clone(data);
                 _loaded = true;
@@ -83,12 +86,39 @@ public sealed class ProjectTaskStore
         }
     }
 
+    /// <summary>Detect another writer without changing the loaded save baseline.</summary>
+    public bool HasChangedSinceLoad()
+    {
+        lock (_gate)
+        {
+            if (!_loaded) return true;
+            if (_blocked) return false; // A blocked store is retried by its caller.
+            try
+            {
+                var current = ReadExistingFile();
+                return !string.Equals(current == null ? null : Fingerprint(current),
+                    _loadedFingerprint, StringComparison.Ordinal);
+            }
+            catch (Exception ex) when (IsStoreException(ex))
+            {
+                return true; // Load will surface the read failure and block writes.
+            }
+        }
+    }
+
     public void Save(ProjectTaskData data)
     {
         lock (_gate)
         {
             if (!CanSave)
                 throw new InvalidOperationException(LoadWarning ?? "Load project tasks before saving them.");
+            // Hold the owner slot through the file replacement. A one-time check
+            // would race an older owner starting immediately before the v6 write.
+            using var migrationClaim = _loadedSourceVersion < 6 &&
+                !Environment.GetCommandLineArgs().Contains("--queue-owner", StringComparer.OrdinalIgnoreCase)
+                ? QueueOwnerClient.TryClaimOwnerMutex(StorePath)
+                    ?? throw new InvalidOperationException("An older queue owner is still running. Wait for its idle handoff or exit its tray icon before saving project tasks.")
+                : null;
             ArgumentNullException.ThrowIfNull(data);
             // Freeze the caller's proposed state before writing; keep a separate
             // baseline so mutations of a returned model cannot alter the checks.
@@ -126,6 +156,7 @@ public sealed class ProjectTaskStore
                 if (current != null) File.Replace(temporaryPath, StorePath, StorePath + ".bak");
                 else File.Move(temporaryPath, StorePath, overwrite: false);
                 _loadedFingerprint = Fingerprint(bytes);
+                _loadedSourceVersion = candidate.Version;
                 _lastGoodData = candidate;
                 LoadWarning = null;
             }
@@ -164,6 +195,19 @@ public sealed class ProjectTaskStore
 
     private static string Fingerprint(byte[] content) => Convert.ToHexString(SHA256.HashData(content));
 
+    private static int ReadSourceVersion(byte[] content)
+    {
+        ReadOnlyMemory<byte> json = content;
+        if (content.Length >= 3 && content[0] == 0xef && content[1] == 0xbb && content[2] == 0xbf)
+            json = json[3..];
+        using var document = JsonDocument.Parse(json, new JsonDocumentOptions
+        {
+            CommentHandling = JsonCommentHandling.Skip,
+            AllowTrailingCommas = true
+        });
+        return document.RootElement.GetProperty("version").GetInt32();
+    }
+
     private static string? ReadSettingsOverride()
     {
         var args = Environment.GetCommandLineArgs().Skip(1).ToArray();
@@ -196,8 +240,9 @@ public sealed class ProjectTaskStore
         var root = document.RootElement;
         RequireUniqueProperties(root);
         var version = RequireProperty(root, "version", JsonValueKind.Number);
-        if (!version.TryGetInt32(out var sourceVersion) || sourceVersion is not (1 or 2))
+        if (!version.TryGetInt32(out var sourceVersion) || sourceVersion is not (1 or 2 or 3 or 4 or 5 or 6))
             throw new ArgumentException("Unsupported project task store version.");
+        if (sourceVersion >= 4) RequireBoolean(root, "pauseAllQueues");
         var notes = RequireProperty(root, "notes", JsonValueKind.Array);
         var items = RequireProperty(root, "queueItems", JsonValueKind.Array);
         var queues = RequireProperty(root, "queues", JsonValueKind.Array);
@@ -208,6 +253,15 @@ public sealed class ProjectTaskStore
             RequireProperty(note, "order", JsonValueKind.Number);
             RequireBoolean(note, "isCompleted");
             RequireBoolean(note, "isArchived");
+            if (sourceVersion >= 3)
+            {
+                var images = RequireProperty(note, "images", JsonValueKind.Array);
+                foreach (var image in images.EnumerateArray())
+                {
+                    RequireProperties(image, JsonValueKind.String, "id", "caption", "mimeType", "dataBase64");
+                    if (sourceVersion >= 6) RequirePageFields(image);
+                }
+            }
         }
         foreach (var item in items.EnumerateArray())
         {
@@ -219,29 +273,43 @@ public sealed class ProjectTaskStore
         {
             RequireProperties(queue, JsonValueKind.String, "projectId", "assignedFolder", "recoveryState", "statusMessage");
             RequireBoolean(queue, "enabled");
+            if (sourceVersion >= 4)
+                RequireProperties(queue, JsonValueKind.String, "defaultModelId", "defaultReasoningEffort");
         }
         foreach (var receipt in receipts.EnumerateArray())
         {
-            if (sourceVersion == 2)
+            if (sourceVersion >= 2)
                 RequireProperties(receipt, JsonValueKind.String, "purpose", "connectionDetails", "desktopAssociation");
             RequireProperties(receipt, JsonValueKind.String, "attemptId", "state", "outcome", "createdAt", "updatedAt", "notificationState",
                 "resultSummary", "finalResponse", "attentionReason", "completionMessage", "notificationError");
+            if (sourceVersion >= 5)
+                RequireNullableProperty(receipt, "queueAbandonedAt", JsonValueKind.String);
             var snapshot = RequireProperty(receipt, "snapshot", JsonValueKind.Object);
             RequireProperties(snapshot, JsonValueKind.String, "projectId", "projectName", "noteId", "queueItemId", "name", "prompt", "modelId", "reasoningEffort", "folder");
+            if (sourceVersion >= 6)
+            {
+                var images = RequireProperty(snapshot, "images", JsonValueKind.Array);
+                foreach (var image in images.EnumerateArray()) RequirePageFields(image);
+            }
         }
         var data = JsonSerializer.Deserialize<ProjectTaskData>(json.Span, JsonOptions)
             ?? throw new ArgumentException("Project task data is empty.");
-        // Version 2 adds an immutable receipt purpose and connection evidence.
-        // Migrate in memory; the normal atomic save retains the original as backup.
-        // Older launchers reject version 2 instead of silently dropping these fields.
-        if (data.Version == 1) data.Version = 2;
+        // Migrate only in memory; a normal atomic save retains the prior file as backup.
+        // Legacy queue flags never authorize execution in the new format.
+        if (data.Version is 1 or 2 or 3 or 4 or 5)
+        {
+            data.Version = 6;
+            if (sourceVersion <= 3 && data.Queues != null)
+                foreach (var queue in data.Queues)
+                    if (queue != null) queue.Enabled = false;
+        }
         Validate(data);
         return data;
     }
 
     private static void Validate(ProjectTaskData data)
     {
-        if (data.Version != 2) throw new ArgumentException("Unsupported project task store version; expected version 1 or 2 on load, and version 2 on save.");
+        if (data.Version != 6) throw new ArgumentException("Unsupported project task store version; expected version 1, 2, 3, 4, 5, or 6 on load, and version 6 on save.");
         if (data.Notes == null || data.QueueItems == null || data.Queues == null || data.Receipts == null)
             throw new ArgumentException("Project task collections must be arrays.");
         var notes = new Dictionary<string, ProjectTaskNote>(StringComparer.Ordinal);
@@ -252,6 +320,7 @@ public sealed class ProjectTaskStore
             Require(note.ProjectId, "Project ID");
             Require(note.Name, "Task name");
             RequireText(note.Prompt, "Task prompt");
+            ValidateImages(note.Images);
             RequireOrder(note.Order);
             RequireTimestamps(note.CreatedAt, note.UpdatedAt);
             if (!notes.TryAdd(note.Id, note)) throw new ArgumentException("Duplicate note ID.");
@@ -262,6 +331,8 @@ public sealed class ProjectTaskStore
             if (queue == null) throw new ArgumentException("A queue cannot be null.");
             Require(queue.ProjectId, "Queue project ID");
             RequireAbsoluteFolder(queue.AssignedFolder);
+            RequireText(queue.DefaultModelId, "Default queue model");
+            RequireText(queue.DefaultReasoningEffort, "Default queue thinking level");
             RequireText(queue.StatusMessage, "Queue status message");
             RequireEnum(queue.RecoveryState);
             if (!queueIds.Add(queue.ProjectId)) throw new ArgumentException("Duplicate project queue.");
@@ -270,6 +341,8 @@ public sealed class ProjectTaskStore
                 Require(predecessor.ThreadId, "Predecessor task ID");
                 Require(predecessor.TurnId, "Predecessor turn ID");
             }
+            else if (queue.ExternalPredecessorSatisfiedAt is not null)
+                throw new ArgumentException("An observed predecessor completion requires its exact task and turn IDs.");
         }
         var itemIds = new HashSet<string>(StringComparer.Ordinal);
         var queuedNotes = new HashSet<string>(StringComparer.Ordinal);
@@ -308,11 +381,20 @@ public sealed class ProjectTaskStore
             Require(snapshot.QueueItemId, "Dispatched queue item ID");
             Require(snapshot.Name, "Dispatched task name");
             Require(snapshot.Prompt, "Dispatched prompt");
+            ValidateImages(snapshot.Images);
+            RequireText(snapshot.ImageStagingId, "Image staging ID");
+            if (snapshot.Images.Count > 0 && !Guid.TryParseExact(snapshot.ImageStagingId, "N", out _))
+                throw new ArgumentException("An image dispatch requires a valid staging ID.");
+            if (snapshot.Images.Count == 0 && snapshot.ImageStagingId.Length != 0)
+                throw new ArgumentException("A text-only dispatch cannot have image staging.");
             Require(snapshot.ModelId, "Dispatched model");
             // Some discovered models may not expose an effort override; the
             // runner validates that combination and records the empty override.
             RequireText(snapshot.ReasoningEffort, "Dispatched thinking level");
             RequireAbsoluteFolder(snapshot.Folder);
+            RequireText(snapshot.PredecessorHandoff, "Dispatched predecessor handoff");
+            if (snapshot.PredecessorHandoff.Length > 1000)
+                throw new ArgumentException("A predecessor handoff is too long.");
             RequireEnum(receipt.State);
             RequireEnum(receipt.Purpose);
             RequireEnum(receipt.DesktopAssociation);
@@ -327,12 +409,48 @@ public sealed class ProjectTaskStore
             RequireText(receipt.NotificationError, "Notification error");
             if (receipt.TurnId != null) { Require(receipt.TurnId, "Run turn ID"); Require(receipt.ThreadId, "Run task ID"); }
             if (receipt.ThreadId != null) Require(receipt.ThreadId, "Run task ID");
+            if (receipt.Purpose == ProjectTaskExecutionPurpose.QueueItem &&
+                receipt.State == ProjectTaskRunState.Completed && receipt.Outcome == ProjectTaskOutcome.Succeeded)
+            {
+                Require(receipt.ThreadId, "Completed queue task ID");
+                Require(receipt.TurnId, "Completed queue turn ID");
+                if (receipt.FinishedAt == null)
+                    throw new ArgumentException("A successful queue attempt requires a confirmed terminal time.");
+            }
             if (receipt.NotificationState == ProjectTaskNotificationState.Attempted && receipt.NotificationAttemptedAt == null)
                 throw new ArgumentException("A notification attempt must record its time.");
+            if (receipt.QueueReviewCompletedAt != null &&
+                (receipt.Purpose != ProjectTaskExecutionPurpose.QueueItem ||
+                  receipt.State == ProjectTaskRunState.Completed && receipt.Outcome == ProjectTaskOutcome.Succeeded ||
+                  receipt.State is not (ProjectTaskRunState.NeedsAttention or ProjectTaskRunState.Recovering or
+                      ProjectTaskRunState.Failed or ProjectTaskRunState.Interrupted or ProjectTaskRunState.Completed)))
+                throw new ArgumentException("Only a non-success queue attempt can have a completed manual review.");
+            var confirmedSuccess = receipt.FinishedAt is not null &&
+                receipt.State == ProjectTaskRunState.Completed && receipt.Outcome == ProjectTaskOutcome.Succeeded &&
+                !string.IsNullOrWhiteSpace(receipt.ThreadId) && !string.IsNullOrWhiteSpace(receipt.TurnId);
+            if (receipt.QueueAbandonedAt is { } abandonedAt &&
+                (receipt.Purpose != ProjectTaskExecutionPurpose.QueueItem || confirmedSuccess ||
+                 receipt.QueueReviewCompletedAt is not null || abandonedAt < receipt.CreatedAt ||
+                 receipt.ActivityDeletedAt is null || receipt.ActivityDeletedAt < abandonedAt ||
+                 receipt.State is ProjectTaskRunState.Prepared or ProjectTaskRunState.Starting or
+                     ProjectTaskRunState.Running or ProjectTaskRunState.Recovering))
+                throw new ArgumentException("Only a deleted, non-success queue attempt can be abandoned.");
+            if (receipt.ActivityArchivedAt is { } archivedAt &&
+                (receipt.Purpose != ProjectTaskExecutionPurpose.QueueItem ||
+                  archivedAt < receipt.CreatedAt ||
+                  !confirmedSuccess && receipt.QueueReviewCompletedAt is null))
+                throw new ArgumentException("Only a confirmed successful or reviewed queue attempt can be moved to activity history.");
+            if (receipt.ActivityDeletedAt is { } deletedAt &&
+                (receipt.Purpose != ProjectTaskExecutionPurpose.QueueItem ||
+                  deletedAt < receipt.CreatedAt ||
+                  !confirmedSuccess && receipt.QueueAbandonedAt is null &&
+                      receipt.QueueReviewCompletedAt is null))
+                throw new ArgumentException("Only a confirmed successful, reviewed, or abandoned queue attempt can be deleted from task activity.");
         }
         foreach (var item in data.QueueItems.Where(item => item.LastAttemptId != null))
         {
             if (!receiptIds.TryGetValue(item.LastAttemptId!, out var receipt) ||
+                receipt.Purpose != ProjectTaskExecutionPurpose.QueueItem ||
                 receipt.Snapshot.QueueItemId != item.Id || receipt.Snapshot.ProjectId != item.ProjectId)
                 throw new ArgumentException("A queue item's attempt must reference its own execution receipt.");
         }
@@ -345,15 +463,106 @@ public sealed class ProjectTaskStore
         {
             if (!receipts.TryGetValue(oldReceipt.AttemptId, out var receipt))
                 throw new ArgumentException("Execution receipts must be retained independently of notes and queue entries.");
-            if (receipt.Snapshot != oldReceipt.Snapshot || receipt.CreatedAt != oldReceipt.CreatedAt || receipt.Purpose != oldReceipt.Purpose)
+            if (!SnapshotsEqual(receipt.Snapshot, oldReceipt.Snapshot) ||
+                receipt.CreatedAt != oldReceipt.CreatedAt || receipt.Purpose != oldReceipt.Purpose)
                 throw new ArgumentException("A saved execution's dispatch snapshot and creation time are immutable.");
             if ((oldReceipt.ThreadId != null && receipt.ThreadId != oldReceipt.ThreadId) ||
                 (oldReceipt.TurnId != null && receipt.TurnId != oldReceipt.TurnId))
                 throw new ArgumentException("An acknowledged execution identity cannot be changed or cleared.");
+            if ((oldReceipt.SubmissionStartedAt != null && receipt.SubmissionStartedAt != oldReceipt.SubmissionStartedAt) ||
+                (oldReceipt.StartedAt != null && receipt.StartedAt != oldReceipt.StartedAt) ||
+                (oldReceipt.FinishedAt != null && receipt.FinishedAt != oldReceipt.FinishedAt))
+                throw new ArgumentException("Recorded execution milestones cannot be changed or cleared.");
+            if (oldReceipt.FinishedAt != null &&
+                (receipt.State != oldReceipt.State || receipt.Outcome != oldReceipt.Outcome))
+                throw new ArgumentException("A recorded terminal execution result cannot be changed.");
+            if (!string.IsNullOrEmpty(oldReceipt.CompletionMessage) &&
+                receipt.CompletionMessage != oldReceipt.CompletionMessage)
+                throw new ArgumentException("A retained completion message cannot be changed or cleared.");
+            if (oldReceipt.CompletionHistoryClearedAt != null &&
+                receipt.CompletionHistoryClearedAt != oldReceipt.CompletionHistoryClearedAt)
+                throw new ArgumentException("A recorded completion-history clear cannot be reset.");
+            if (oldReceipt.ActivityArchivedAt != null &&
+                receipt.ActivityArchivedAt != oldReceipt.ActivityArchivedAt)
+                throw new ArgumentException("A recorded activity-history move cannot be changed or reset.");
+            if (oldReceipt.ActivityDeletedAt != null &&
+                receipt.ActivityDeletedAt != oldReceipt.ActivityDeletedAt)
+                throw new ArgumentException("A recorded activity deletion cannot be changed or reset.");
+            if (oldReceipt.QueueReviewCompletedAt != null &&
+                receipt.QueueReviewCompletedAt != oldReceipt.QueueReviewCompletedAt)
+                throw new ArgumentException("A completed queue review cannot be changed or reset.");
+            if (oldReceipt.QueueAbandonedAt != null &&
+                (receipt.QueueAbandonedAt != oldReceipt.QueueAbandonedAt ||
+                 receipt.State != oldReceipt.State || receipt.Outcome != oldReceipt.Outcome ||
+                 receipt.FinishedAt != oldReceipt.FinishedAt))
+                throw new ArgumentException("An abandoned queue attempt and its recorded outcome cannot be changed or reset.");
             if (oldReceipt.NotificationState == ProjectTaskNotificationState.Attempted &&
                 (receipt.NotificationState != ProjectTaskNotificationState.Attempted ||
                  receipt.NotificationAttemptedAt != oldReceipt.NotificationAttemptedAt))
                 throw new ArgumentException("A recorded notification attempt cannot be reset.");
+        }
+    }
+
+    internal static bool SnapshotsEqual(ProjectTaskDispatchSnapshot left, ProjectTaskDispatchSnapshot right) =>
+        left.ProjectId == right.ProjectId && left.ProjectName == right.ProjectName &&
+        left.NoteId == right.NoteId && left.QueueItemId == right.QueueItemId &&
+        left.Name == right.Name && left.Prompt == right.Prompt &&
+        left.ImageStagingId == right.ImageStagingId &&
+        left.ModelId == right.ModelId && left.ReasoningEffort == right.ReasoningEffort &&
+        left.Folder == right.Folder && left.PredecessorHandoff == right.PredecessorHandoff &&
+        left.Images.Count == right.Images.Count && left.Images.Zip(right.Images).All(pair =>
+            pair.First.Id == pair.Second.Id && pair.First.Caption == pair.Second.Caption &&
+            pair.First.MimeType == pair.Second.MimeType && pair.First.DataBase64 == pair.Second.DataBase64 &&
+            pair.First.PageUrl == pair.Second.PageUrl && pair.First.PageHtml == pair.Second.PageHtml &&
+            pair.First.PageCss == pair.Second.PageCss && pair.First.PageCaptureStatus == pair.Second.PageCaptureStatus &&
+            pair.First.IncludePageContextInPrompt == pair.Second.IncludePageContextInPrompt);
+
+    private static void RequirePageFields(JsonElement image)
+    {
+        RequireProperties(image, JsonValueKind.String, "pageUrl", "pageHtml", "pageCss", "pageCaptureStatus");
+        RequireBoolean(image, "includePageContextInPrompt");
+    }
+
+    private static void ValidateImages(List<ProjectTaskNoteImage>? images)
+    {
+        if (images == null || images.Count > ProjectTaskNoteImage.MaximumCount)
+            throw new ArgumentException("A note has too many images or an invalid image list.");
+        var ids = new HashSet<string>(StringComparer.Ordinal);
+        var totalBytes = 0;
+        foreach (var image in images)
+        {
+            if (image == null) throw new ArgumentException("A note image cannot be null.");
+            Require(image.Id, "Image ID");
+            RequireText(image.Caption, "Image caption");
+            if (image.Caption.Length > 240) throw new ArgumentException("An image caption is too long.");
+            RequireText(image.PageUrl, "Browser page URL");
+            RequireText(image.PageHtml, "Browser page HTML");
+            RequireText(image.PageCss, "Browser page CSS");
+            RequireText(image.PageCaptureStatus, "Browser page capture status");
+            if (image.PageUrl.Length > ProjectTaskNoteImage.MaximumPageUrlCharacters ||
+                image.PageHtml.Length > ProjectTaskNoteImage.MaximumPageHtmlCharacters ||
+                image.PageCss.Length > ProjectTaskNoteImage.MaximumPageCssCharacters ||
+                image.PageCaptureStatus.Length > ProjectTaskNoteImage.MaximumPageCaptureStatusCharacters)
+                throw new ArgumentException("A browser page capture exceeds the note limit.");
+            if (image.IncludePageContextInPrompt &&
+                string.IsNullOrWhiteSpace(image.PageHtml) && string.IsNullOrWhiteSpace(image.PageCss))
+                throw new ArgumentException("Browser page source is unavailable for prompt inclusion.");
+            if (!ids.Add(image.Id)) throw new ArgumentException("Duplicate note image ID.");
+            if (image.MimeType is not ("image/png" or "image/jpeg"))
+                throw new ArgumentException("A note image must be PNG or JPEG.");
+            if (image.DataBase64 == null || image.DataBase64.Length == 0 || image.DataBase64.Length > ((ProjectTaskNoteImage.MaximumBytes + 2) / 3) * 4 + 4)
+                throw new ArgumentException("A note image is empty or too large.");
+            byte[] bytes;
+            try { bytes = Convert.FromBase64String(image.DataBase64); }
+            catch (FormatException ex) { throw new ArgumentException("A note image contains invalid data.", ex); }
+            if (bytes.Length > ProjectTaskNoteImage.MaximumBytes || bytes.Length == 0)
+                throw new ArgumentException("A note image is empty or too large.");
+            if (image.MimeType == "image/png" && !bytes.AsSpan().StartsWith(new byte[] { 137, 80, 78, 71, 13, 10, 26, 10 }) ||
+                image.MimeType == "image/jpeg" && !bytes.AsSpan().StartsWith(new byte[] { 255, 216, 255 }))
+                throw new ArgumentException("A note image has an invalid format.");
+            totalBytes += bytes.Length;
+            if (totalBytes > ProjectTaskNoteImage.MaximumTotalBytes)
+                throw new ArgumentException("A note's images exceed the total size limit.");
         }
     }
 
@@ -368,6 +577,18 @@ public sealed class ProjectTaskStore
         if (found == null || found.Value.ValueKind != kind)
             throw new ArgumentException($"A required '{name}' field is missing or invalid.");
         return found.Value;
+    }
+
+    private static void RequireNullableProperty(JsonElement element, string name, JsonValueKind kind)
+    {
+        if (element.ValueKind != JsonValueKind.Object) throw new ArgumentException("A task entry must be an object.");
+        foreach (var property in element.EnumerateObject())
+        {
+            if (!property.Name.Equals(name, StringComparison.OrdinalIgnoreCase)) continue;
+            if (property.Value.ValueKind is JsonValueKind.Null || property.Value.ValueKind == kind) return;
+            break;
+        }
+        throw new ArgumentException($"A required '{name}' field is missing or invalid.");
     }
 
     private static void RequireUniqueProperties(JsonElement element)

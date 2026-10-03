@@ -14,6 +14,7 @@ public sealed record GitRepositorySnapshot
     public int Behind { get; init; }
     public bool TrackingAvailable { get; init; }
     public string StateFingerprint { get; init; } = "";
+    public string WorkingTreeFingerprint { get; init; } = "";
     public IReadOnlyList<GitChange> Changes { get; init; } = [];
     public IReadOnlyList<GitBranchInfo> Branches { get; init; } = [];
     public IReadOnlyList<GitRemoteInfo> Remotes { get; init; } = [];
@@ -81,6 +82,10 @@ public sealed record GitRemoteInfo
     public string FetchUrl { get; init; } = "";
     public string PushUrl { get; init; } = "";
     public bool UrlCanCopy { get; init; }
+    public GitHostingProvider? Provider { get; init; }
+    // Null uses the provider's repository page; empty explicitly disables opening.
+    public string? PostPushUrl { get; init; }
+    public string? PostPushLinkError { get; init; }
 }
 
 /// <summary>Tracked working-tree changes from the selected remote's cached branch tip.</summary>

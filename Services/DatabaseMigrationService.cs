@@ -46,6 +46,8 @@ public static class DatabaseMigrationService
     public static async Task<DatabaseMigrationPlan> PrepareAsync(string projectPath, DatabaseConnectionSource source,
         string database, IProgress<string>? progress, CancellationToken token)
     {
+        if (source.Provider != DatabaseProvider.PostgreSql)
+            throw new DatabaseMigrationException("Migration preparation and application currently support PostgreSQL only. SQL Server schema comparison is read-only.");
         await PreparationGate.WaitAsync(token);
         try
         {
@@ -117,6 +119,8 @@ public static class DatabaseMigrationService
         DatabaseConnectionSource source, string database, string typedTarget, bool backupConfirmed,
         IProgress<string>? progress, CancellationToken token)
     {
+        if (source.Provider != DatabaseProvider.PostgreSql)
+            throw new DatabaseMigrationException("Migration application currently supports PostgreSQL only.");
         var commitStarted = false;
         try
         {

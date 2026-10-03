@@ -1,0 +1,25 @@
+<Window x:Class="FullStackLauncher.GitPostPushLinkWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="After-push link" Width="650" Height="390" MinWidth="440" MinHeight="300"
+        Background="{StaticResource BackgroundBrush}" Foreground="{StaticResource TextBrush}"
+        FontFamily="Segoe UI" FontSize="13" WindowStartupLocation="CenterOwner" Icon="/Assets/launcher.ico">
+    <Grid Margin="22">
+        <Grid.RowDefinitions><RowDefinition Height="*"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
+        <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
+            <StackPanel Margin="0,0,10,0">
+                <TextBlock Text="Open a link after pushing" FontSize="23" FontWeight="SemiBold" TextWrapping="Wrap" Margin="0,0,0,12"/>
+                <TextBlock x:Name="ConnectionText" Foreground="{StaticResource MutedBrush}" TextWrapping="Wrap" Margin="0,0,0,12"/>
+                <TextBlock Text="After a confirmed successful push, this link opens in an existing Chrome window. If no Chrome window is open, a new one opens. Leave the link blank to disable opening." TextWrapping="Wrap" Margin="0,0,0,16"/>
+                <Label Content="After-push _link" Target="{Binding ElementName=LinkInput}" Foreground="{StaticResource TextBrush}" Padding="0,0,0,6"/>
+                <TextBox x:Name="LinkInput" MaxLength="2048" HorizontalScrollBarVisibility="Auto" AutomationProperties.Name="After-push link"/>
+                <Button Content="Use repository page" Click="UseDefault_Click" HorizontalAlignment="Left" Margin="0,10,0,0"/>
+                <TextBlock x:Name="ValidationText" Foreground="#FFD391" TextWrapping="Wrap" Margin="0,12,0,0" AutomationProperties.LiveSetting="Polite"/>
+            </StackPanel>
+        </ScrollViewer>
+        <StackPanel Grid.Row="1" Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,16,0,0">
+            <Button Content="Cancel" IsCancel="True" MinWidth="85" Margin="0,0,10,0"/>
+            <Button Content="Save" Click="Save_Click" IsDefault="True" MinWidth="85" Style="{StaticResource PrimaryButton}"/>
+        </StackPanel>
+    </Grid>
+</Window>

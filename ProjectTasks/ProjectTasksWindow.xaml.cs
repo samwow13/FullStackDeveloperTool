@@ -1,21 +1,43 @@
 using System.ComponentModel;
 using System.Windows;
+using System.Windows.Threading;
 using FullStackLauncher.Models;
 
 namespace FullStackLauncher.ProjectTasks;
 
 public partial class ProjectTasksWindow : Window
 {
-    private readonly ProjectTasksViewModel _model = new();
+    private readonly ProjectTasksViewModel _model;
+    private readonly DispatcherTimer _ownerStatusTimer = new() { Interval = TimeSpan.FromSeconds(3) };
+    private bool _pollingOwner;
 
-    public ProjectTasksWindow()
+    public ProjectTasksWindow(Func<string, IReadOnlyList<ProjectApplicationState>>? applicationStates = null)
     {
+        _model = new ProjectTasksViewModel(applicationStates);
         InitializeComponent();
         DataContext = _model;
-        Closed += (_, _) => _model.Dispose();
+        _ownerStatusTimer.Tick += async (_, _) => await RefreshOwnerStatusAsync();
+        Loaded += async (_, _) =>
+        {
+            _ownerStatusTimer.Start();
+            await Task.WhenAll(RefreshOwnerStatusAsync(), _model.LoadModelsAsync());
+        };
+        Closed += (_, _) => { _ownerStatusTimer.Stop(); _model.Dispose(); };
     }
 
-    public void ShowProject(ProjectProfile? project, string folder) => _model.ShowProject(project, folder);
+    public void ShowProject(ProjectProfile? project, string folder)
+    {
+        _model.ShowProject(project, folder);
+        _ = RefreshOwnerStatusAsync();
+    }
+
+    private async Task RefreshOwnerStatusAsync()
+    {
+        if (_pollingOwner) return;
+        _pollingOwner = true;
+        try { await _model.RefreshOwnerStatusAsync(); }
+        finally { _pollingOwner = false; }
+    }
 
     public bool PrepareToClose()
     {

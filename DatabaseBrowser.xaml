@@ -92,23 +92,23 @@
                 <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
                 <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
                 <StackPanel>
-                    <TextBlock x:Name="DatabaseTitle" Text="PostgreSQL" FontSize="17" FontWeight="SemiBold" TextTrimming="CharacterEllipsis"/>
+                    <TextBlock x:Name="DatabaseTitle" Text="Databases" FontSize="17" FontWeight="SemiBold" TextTrimming="CharacterEllipsis"/>
                     <TextBlock x:Name="ServerText" Text="Choose an existing connection" Foreground="{StaticResource MutedBrush}" FontSize="10" TextTrimming="CharacterEllipsis" Margin="0,3,0,0"/>
                 </StackPanel>
                 <WrapPanel Grid.Row="1" Grid.ColumnSpan="2" VerticalAlignment="Center" Margin="0,8,0,0">
                     <Button Content="Accounts…" Click="DatabaseAccounts_Click" Margin="0,0,6,0" Style="{StaticResource SmallButton}" ToolTip="View database users, set passwords, and add or remove accounts directly"/>
-                    <Button Content="Compare &amp; migrate…" Click="DatabaseTools_Click" Margin="0,0,6,0" Style="{StaticResource SmallButton}" ToolTip="Compare two PostgreSQL schemas and review migrations for a selected target"/>
+                    <Button Content="Compare &amp; migrate…" Click="DatabaseTools_Click" Margin="0,0,6,0" Style="{StaticResource SmallButton}" ToolTip="Compare PostgreSQL or SQL Server schemas; migration application supports PostgreSQL only"/>
                     <Button x:Name="CancelButton" Content="Cancel" Click="Cancel_Click" Visibility="Collapsed" Margin="0,0,6,0" Style="{StaticResource SmallButton}"/>
                     <Button x:Name="ChangeConnectionButton" Content="Connection…" Click="ChangeConnection_Click" Margin="0,0,6,0" Style="{StaticResource SmallButton}"/>
                     <Button x:Name="RefreshSchemaButton" Content="↻ Refresh" Click="RefreshSchema_Click" IsEnabled="False" Style="{StaticResource SmallButton}" ToolTip="Refresh tables and the selected view"/>
-                    <Button Content="Hide" Click="HideDatabase_Click" Style="{StaticResource SmallButton}" Margin="6,0,0,0" ToolTip="Hide the database explorer; restore it with the Database section button" AutomationProperties.Name="Hide database explorer"/>
+                    <Button Content="Close" Click="HideDatabase_Click" Style="{StaticResource SmallButton}" Margin="6,0,0,0" ToolTip="Close this explorer; reopen it from the Database card in Services" AutomationProperties.Name="Close database explorer"/>
                 </WrapPanel>
             </Grid>
             <StackPanel x:Name="ConnectionSettings" Grid.Row="1" Margin="0,0,0,10">
                 <Grid>
                     <Grid.ColumnDefinitions><ColumnDefinition Width="3*"/><ColumnDefinition Width="2*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
-                    <StackPanel Margin="0,0,8,0"><Label Content="_Connection" Target="{Binding ElementName=ConnectionPicker}" Foreground="{StaticResource MutedBrush}" Padding="0,0,0,4" FontSize="10"/><ComboBox x:Name="ConnectionPicker" DisplayMemberPath="Label" SelectionChanged="Connection_SelectionChanged" AutomationProperties.Name="PostgreSQL connection" Padding="6,4" FontSize="11"/></StackPanel>
-                    <StackPanel Grid.Column="1" Margin="0,0,8,0"><Label Content="_Database" Target="{Binding ElementName=DatabasePicker}" Foreground="{StaticResource MutedBrush}" Padding="0,0,0,4" FontSize="10"/><ComboBox x:Name="DatabasePicker" SelectionChanged="Database_SelectionChanged" AutomationProperties.Name="Existing PostgreSQL databases" Padding="6,4" FontSize="11"/></StackPanel>
+                    <StackPanel Margin="0,0,8,0"><Label Content="_Connection" Target="{Binding ElementName=ConnectionPicker}" Foreground="{StaticResource MutedBrush}" Padding="0,0,0,4" FontSize="10"/><ComboBox x:Name="ConnectionPicker" DisplayMemberPath="Label" SelectionChanged="Connection_SelectionChanged" AutomationProperties.Name="Database server connection" Padding="6,4" FontSize="11"/></StackPanel>
+                    <StackPanel Grid.Column="1" Margin="0,0,8,0"><Label Content="_Database" Target="{Binding ElementName=DatabasePicker}" Foreground="{StaticResource MutedBrush}" Padding="0,0,0,4" FontSize="10"/><ComboBox x:Name="DatabasePicker" SelectionChanged="Database_SelectionChanged" AutomationProperties.Name="Existing databases" Padding="6,4" FontSize="11"/></StackPanel>
                     <StackPanel Grid.Column="2" Orientation="Horizontal" VerticalAlignment="Bottom">
                         <Button x:Name="AddConnectionButton" Content="Add connection…" Click="AddConnection_Click" Style="{StaticResource SmallButton}" Margin="0,0,6,0"/>
                         <Button x:Name="RefreshButton" Content="Reload connections" Click="Refresh_Click" Style="{StaticResource SmallButton}"/>
@@ -138,7 +138,7 @@
                         <TabItem x:Name="SchemaTab" Header="_Columns">
                             <ScrollViewer x:Name="ColumnsViewport" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
                             <StackPanel Margin="0,6,0,0">
-                                <DataGrid x:Name="ColumnGrid" CurrentCellChanged="Column_CurrentCellChanged" AutomationProperties.Name="PostgreSQL column definitions">
+                                <DataGrid x:Name="ColumnGrid" CurrentCellChanged="Column_CurrentCellChanged" AutomationProperties.Name="Database column definitions">
                                     <DataGrid.Columns>
                                         <DataGridTextColumn Header="#" Binding="{Binding Position}" Width="45" ElementStyle="{StaticResource GridText}"/>
                                         <DataGridTextColumn Header="Column" Binding="{Binding Name}" Width="165" ElementStyle="{StaticResource GridText}"/>

@@ -1,0 +1,95 @@
+<UserControl x:Class="FullStackLauncher.ProjectTasks.ProjectNoteEditor"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             Foreground="{StaticResource TextBrush}" Background="{StaticResource SurfaceBrush}" IsEnabled="{Binding CanEdit}"
+             PreviewKeyDown="NoteEditor_PreviewKeyDown">
+    <Grid Margin="16">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*" MinHeight="225"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+        </Grid.RowDefinitions>
+        <TextBlock Text="{Binding EditorHeading}" FontSize="17" FontWeight="SemiBold" Margin="0,0,0,12"/>
+        <DockPanel Grid.Row="1" LastChildFill="True">
+            <Label Content="Task _name" Target="{Binding ElementName=NoteName}" Foreground="{StaticResource MutedBrush}" Padding="0,8,12,0"/>
+            <TextBox x:Name="NoteName" Text="{Binding EditorName, UpdateSourceTrigger=PropertyChanged}" MaxLength="160"
+                     ToolTip="Optional. The first nonempty description line supplies the initial name."/>
+        </DockPanel>
+        <Grid Grid.Row="2" Margin="0,12,0,6">
+            <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+            <Label Content="_Description / future changes" Target="{Binding ElementName=NotePrompt}" Foreground="{StaticResource MutedBrush}" Padding="0"/>
+            <TextBlock Grid.Column="1" Text="Paste text or images with Ctrl+V" Foreground="{StaticResource MutedBrush}" FontSize="11" VerticalAlignment="Center"/>
+        </Grid>
+        <TextBox x:Name="NotePrompt" Grid.Row="3" Text="{Binding EditorPrompt, UpdateSourceTrigger=PropertyChanged}"
+                 AcceptsReturn="True" AcceptsTab="True" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled"
+                 TextWrapping="Wrap" MaxLength="100000" MaxHeight="520" FontSize="14"
+                 AutomationProperties.Name="Note description and Codex prompt"/>
+        <StackPanel Grid.Row="4" Margin="0,13,0,7">
+            <TextBlock Text="Images and current app states" FontWeight="SemiBold"/>
+            <TextBlock Text="Saved images and captions accompany the text when this note runs in the queue. Browser snips also save page source when available; choose per snip whether it joins the prompt. Long source is shortened to fit the task limit and marked in the prompt. App states insert a frozen status summary into the text above."
+                       Foreground="{StaticResource MutedBrush}" FontSize="11" TextWrapping="Wrap" Margin="0,3,0,8"/>
+            <WrapPanel>
+                <Button Content="Snip image…" Click="SnipImage_Click" Padding="9,6" Margin="0,0,6,6"
+                        ToolTip="Choose a window, switch its Chrome or Edge tab if needed, then select a screen area to attach."/>
+                <Button Content="Browser source setup…" Click="BrowserSourceSetup_Click" Padding="9,6" Margin="0,0,6,6"
+                        ToolTip="Install and pair the local Chrome or Edge extension used to capture live HTML and CSS with browser snips."/>
+                <Button Content="Add image file…" Click="AddImageFile_Click" Padding="9,6" Margin="0,0,6,6"/>
+                <Button Content="Insert current app states" Command="{Binding InsertAppStatesCommand}" Padding="9,6" Margin="0,0,0,6"/>
+            </WrapPanel>
+        </StackPanel>
+        <Border Grid.Row="5" Background="#111923" BorderBrush="{StaticResource BorderBrush}" BorderThickness="1" CornerRadius="7" MinHeight="75" MaxHeight="205">
+            <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled" Padding="8">
+                <StackPanel>
+                    <TextBlock Text="{Binding EditorImageCount}" Foreground="{StaticResource MutedBrush}" FontSize="11" Margin="2,0,0,7"/>
+                    <ItemsControl ItemsSource="{Binding EditorImages}">
+                        <ItemsControl.ItemsPanel><ItemsPanelTemplate><WrapPanel/></ItemsPanelTemplate></ItemsControl.ItemsPanel>
+                        <ItemsControl.ItemTemplate><DataTemplate>
+                            <Border Width="220" Background="{StaticResource CardBrush}" BorderBrush="{StaticResource BorderBrush}" BorderThickness="1" CornerRadius="6" Margin="0,0,8,8" Padding="7">
+                                <StackPanel>
+                                    <Button Click="OpenImage_Click" Padding="0" ToolTip="Open full image" AutomationProperties.Name="Open note image">
+                                        <Grid Width="202" Height="90">
+                                            <Image Source="{Binding Preview}" Stretch="Uniform"/>
+                                            <TextBlock Text="Preview unavailable" Foreground="{StaticResource MutedBrush}" FontSize="11"
+                                                       HorizontalAlignment="Center" VerticalAlignment="Center"
+                                                       Visibility="{Binding PreviewUnavailable, Converter={StaticResource BoolToVisibility}}"/>
+                                        </Grid>
+                                    </Button>
+                                    <TextBox Text="{Binding Caption, UpdateSourceTrigger=PropertyChanged}" MaxLength="240" Margin="0,7,0,6"
+                                             AutomationProperties.Name="Image caption" ToolTip="Describe what this image shows."/>
+                                    <TextBlock Text="{Binding PageUrl}" Foreground="{StaticResource MutedBrush}" FontSize="11"
+                                               TextTrimming="CharacterEllipsis" ToolTip="{Binding PageUrl}"
+                                               Visibility="{Binding HasPageCapture, Converter={StaticResource BoolToVisibility}}"/>
+                                    <TextBlock Text="{Binding PageSourceSummary}" Foreground="{StaticResource MutedBrush}" FontSize="11"
+                                               TextWrapping="Wrap" MaxHeight="54" Margin="0,4,0,3"
+                                               ToolTip="{Binding PageSourceSummary}"
+                                               Visibility="{Binding HasPageCapture, Converter={StaticResource BoolToVisibility}}"/>
+                                    <CheckBox IsChecked="{Binding IncludePageContextInPrompt, UpdateSourceTrigger=PropertyChanged}"
+                                              IsEnabled="{Binding HasPageSource}" Margin="0,2,0,7"
+                                              Visibility="{Binding HasPageCapture, Converter={StaticResource BoolToVisibility}}"
+                                              AutomationProperties.Name="Include saved browser page HTML and CSS in task prompt">
+                                        <TextBlock Text="Include page HTML/CSS in prompt" TextWrapping="Wrap"/>
+                                    </CheckBox>
+                                    <Button Content="View captured HTML/CSS" Click="OpenPageSource_Click" Padding="7,5" FontSize="11"
+                                            Margin="0,0,0,6" Visibility="{Binding HasPageSource, Converter={StaticResource BoolToVisibility}}"/>
+                                    <Button Content="Remove image" Click="RemoveImage_Click" Padding="7,5" FontSize="11"/>
+                                </StackPanel>
+                            </Border>
+                        </DataTemplate></ItemsControl.ItemTemplate>
+                    </ItemsControl>
+                </StackPanel>
+            </ScrollViewer>
+        </Border>
+        <WrapPanel Grid.Row="6" Margin="0,12,0,0">
+            <Button Content="_Save draft" Command="{Binding SaveNoteCommand}" Style="{StaticResource PrimaryButton}" Padding="14,9" Margin="0,0,8,6"/>
+            <Button Content="Save &amp; clear" Command="{Binding SaveAndClearCommand}" Click="SaveAndClear_Click" Padding="12,9" Margin="0,0,8,6"
+                    ToolTip="Save this note, then open a blank note."/>
+            <Button Content="Save and add to queue" Command="{Binding SaveAndQueueCommand}" Padding="12,9" Margin="0,0,8,6"
+                    ToolTip="Save the note and add it to the queue in one step. An enabled queue may start it immediately."/>
+            <Button Content="Discard draft" Command="{Binding DiscardDraftCommand}" Padding="12,9" Margin="0,0,0,6"/>
+        </WrapPanel>
+    </Grid>
+</UserControl>

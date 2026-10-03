@@ -17,6 +17,15 @@ public sealed class ServiceRunner : IDisposable
 {
     private static readonly Regex Ansi = new(@"\x1B(?:\][^\x07]*(?:\x07|\x1B\\)|\[[0-?]*[ -/]*[@-~])", RegexOptions.Compiled);
     private static readonly Regex StartupUrl = new(@"(?:Now listening on:|\bLocal:|(?:listening|running|started|ready)\s+(?:at|on)\s*:?|open your browser on)\s*(?<url>https?://[^\s<>""']+)", RegexOptions.Compiled | RegexOptions.IgnoreCase);
+    private static readonly Regex FrontendBuildSucceeded = new(
+        @"\b(?:application bundle generation complete|compiled successfully|successfully compiled|compiled with warnings|build succeeded)\b|\bVITE\s+v\S+\s+ready in\s+\d|^\s*(?:[✓✔√]\s*)?(?:Ready in\s+\d|Compiled\s+.+\s+in\s+\d)",
+        RegexOptions.NonBacktracking | RegexOptions.IgnoreCase, TimeSpan.FromMilliseconds(100));
+    private static readonly Regex FrontendBuildFailed = new(
+        @"\b(?:failed to compile|(?:build|compilation|generation) failed|fatal|unhandled exception|EADDRINUSE)\b|(?:^|\s|\[)\s*(?:error|err|fail)(?:\s*[:!\]]|\s+[a-z]*\d+\b)|\bERROR\s+in\b|\[(?:ERROR|FAIL|FAILED)\]",
+        RegexOptions.NonBacktracking | RegexOptions.IgnoreCase, TimeSpan.FromMilliseconds(100));
+    private static readonly Regex FrontendBuildStarted = new(
+        @"\b(?:changes detected\.?\s+rebuilding|generating browser application bundles)\b|^\s*(?:[○◌]\s*)?Compiling\b",
+        RegexOptions.NonBacktracking | RegexOptions.IgnoreCase, TimeSpan.FromMilliseconds(100));
     private static readonly HttpClient Http = new(new HttpClientHandler
     {
         AllowAutoRedirect = false,
@@ -31,6 +40,11 @@ public sealed class ServiceRunner : IDisposable
     private readonly ConcurrentDictionary<int, byte> _expectedExits = new();
     private readonly Channel<ServiceLog> _logs = Channel.CreateBounded<ServiceLog>(new BoundedChannelOptions(500)
     { FullMode = BoundedChannelFullMode.DropOldest, SingleReader = true, SingleWriter = false });
+    private readonly object _consoleLogSync = new();
+    private long _consoleSequence;
+    private long _consoleResetSequence;
+    private long _outputGeneration;
+    private bool _repeatDiagnosticAfterConsoleReset;
     private Process? _startProcess;
     private ConsoleProcessSession? _consoleSession;
     private ConsoleProcessSession? _maintenanceSession;
@@ -46,7 +60,21 @@ public sealed class ServiceRunner : IDisposable
     private int _stopRevision;
     private ApiLaunchConfiguration? _launchConfiguration;
     private bool _apiProcessLaunched;
+    private long _managedApiRunVersion;
+    // Build output and HTTP probes must belong to one explicitly started frontend run.
+    // Console clearing and hot reloads do not create another browser-open opportunity.
+    private long _managedFrontendRunVersion;
+    private long _frontendBuildRevision;
+    private int _frontendRunStopRevision;
+    private bool _frontendRunActive;
+    private bool _frontendBuildSuccessful;
+    private bool _frontendReadyEmitted;
     public string? AppliedConfigurationEnvironment => HasManagedProcess && _apiProcessLaunched ? _launchConfiguration?.Environment : null;
+    public string? AppliedDatabaseIdentifier => HasManagedProcess && _apiProcessLaunched ? _launchConfiguration?.DatabaseIdentifier : null;
+    public long ManagedApiRunVersion => Interlocked.Read(ref _managedApiRunVersion);
+    internal bool MatchesAppliedLocalDatabaseConnection(DatabaseConnectionSource source) =>
+        source is not null && Snapshot.State == ServiceState.Running && HasManagedProcess &&
+        _apiProcessLaunched && _launchConfiguration?.MatchesAppliedLocalDatabaseConnection(source) == true;
     public bool ConfigurationNeedsRestart { get; set; }
 
     public ServiceRunner(ServiceProfile profile, string workingDirectory)
@@ -58,11 +86,25 @@ public sealed class ServiceRunner : IDisposable
     }
 
     public event Action<ServiceLog>? LogReceived;
+    internal event Action<string, long>? FrontendReady;
+    internal event Action? ConsoleOutputReset;
+    internal long ConsoleResetSequence => Interlocked.Read(ref _consoleResetSequence);
+    internal long ManagedFrontendRunVersion => Interlocked.Read(ref _managedFrontendRunVersion);
     public ServiceProfile Profile { get; }
     public string WorkingDirectory { get; }
     public ServiceSnapshot Snapshot => Volatile.Read(ref _snapshot);
     public bool HasManagedProcess => _hasManagedProcess;
     public bool HasVerifiedNoServiceProcesses => _hasVerifiedNoServiceProcesses;
+
+    internal bool CanOpenReadyFrontend(long runVersion)
+    {
+        lock (_consoleLogSync)
+            return !_disposed && !_intentionalStop && _frontendRunActive && _frontendReadyEmitted &&
+                _frontendBuildSuccessful && _lastError is null && runVersion == _managedFrontendRunVersion &&
+                _frontendRunStopRevision == Volatile.Read(ref _stopRevision) &&
+                FrontendServiceSupport.IsFrontend(Profile) && HasManagedProcess &&
+                Snapshot.State == ServiceState.Running;
+    }
 
     public Task RefreshAsync() => WithGateAsync(() => RefreshCoreAsync());
     public Task RefreshForProfileEditAsync() => WithGateAsync(async () =>
@@ -79,20 +121,36 @@ public sealed class ServiceRunner : IDisposable
         return WithGateAsync(() => RunMaintenanceAsync(Profile.SetupCommand, "Setup", revision));
     }
 
-    public async Task RestartAsync()
+    public async Task RestartAsync(Action? beforeRestart = null, Action? beforeStart = null)
     {
         CancelMaintenance();
+        var revision = Volatile.Read(ref _stopRevision);
         await WithGateAsync(async () =>
         {
             var configuration = await Task.Run(PrepareConfiguration);
-            if (await StopCoreAsync(includeExternal: true)) await StartCoreAsync(configuration);
+            if (configuration is null) await Task.Run(() => ValidateCommand(Profile.StartCommand, "Start"));
+            // Agent callbacks recheck their lease after asynchronous preparation and notify
+            // immediately before the disruptive operation, never for rejected preflight.
+            RequireCurrentRestart();
+            beforeRestart?.Invoke();
+            if (await StopAndClearConsoleAsync()) await StartCoreAsync(configuration, () =>
+            {
+                RequireCurrentRestart();
+                beforeStart?.Invoke();
+            });
         });
+
+        void RequireCurrentRestart()
+        {
+            if (revision != Volatile.Read(ref _stopRevision))
+                throw new InvalidOperationException("Restart canceled by a subsequent service stop.");
+        }
     }
 
     public Task ApplyConfigurationAsync(ApiLaunchConfiguration configuration) => WithGateAsync(async () =>
     {
         // The UI preflights and saves the selection before entering the process operation.
-        if (await StopCoreAsync(includeExternal: true)) await StartCoreAsync(configuration);
+        if (await StopAndClearConsoleAsync()) await StartCoreAsync(configuration);
     });
 
     private ApiLaunchConfiguration? PrepareConfiguration() => !Profile.IsConsole && Profile.ApiConfiguration is { } selection
@@ -116,7 +174,7 @@ public sealed class ServiceRunner : IDisposable
                     if (approval is null) return;
                 }
             }
-            await StopCoreAsync(includeExternal: true, conflictApproval: approval);
+            await StopAndClearConsoleAsync(approval);
         });
     }
 
@@ -137,7 +195,7 @@ public sealed class ServiceRunner : IDisposable
             var approval = ConfirmConflict(inspection, confirm, restart: true);
             if (approval is null) return;
             if (revision != Volatile.Read(ref _stopRevision)) return;
-            if (await StopCoreAsync(includeExternal: true, conflictApproval: approval)
+            if (await StopAndClearConsoleAsync(approval)
                 && revision == Volatile.Read(ref _stopRevision))
                 await StartCoreAsync(configuration);
         });
@@ -214,7 +272,7 @@ public sealed class ServiceRunner : IDisposable
 
     private async Task StartCoreAsync() => await StartCoreAsync(await Task.Run(PrepareConfiguration));
 
-    private async Task StartCoreAsync(ApiLaunchConfiguration? configuration)
+    private async Task StartCoreAsync(ApiLaunchConfiguration? configuration, Action? beforeStart = null)
     {
         if (Profile.IsConsole) configuration = null;
         if (!Profile.IsConsole && NormalizeLocalUri(Profile.Url) is null)
@@ -246,6 +304,9 @@ public sealed class ServiceRunner : IDisposable
             await Task.Run(previousSession.Dispose);
         }
         _startProcess?.Dispose();
+        // Inspection and output draining yield. Respect a stop or dashboard override
+        // that arrived during those awaits before launching another process.
+        beforeStart?.Invoke();
         _startProcess = await Task.Run(() => StartCommand(Profile.StartCommand, detectUrl: true, configuration));
         ConfigurationNeedsRestart = false;
         Publish(ServiceState.Starting, Profile.IsConsole ? "Starting console command" : "Starting; waiting for the local HTTP endpoint",
@@ -323,6 +384,9 @@ public sealed class ServiceRunner : IDisposable
     private Process StartCommand(string command, bool detectUrl, ApiLaunchConfiguration? configuration = null)
     {
         if (Profile.IsConsole) return StartConsoleCommand(command, isStart: detectUrl);
+        var outputGeneration = Interlocked.Read(ref _outputGeneration);
+        var frontendRunVersion = detectUrl && FrontendServiceSupport.IsFrontend(Profile)
+            ? BeginFrontendRun() : (long?)null;
         var process = new Process
         {
             StartInfo = new ProcessStartInfo
@@ -342,8 +406,8 @@ public sealed class ServiceRunner : IDisposable
         if (configuration is not null) process.StartInfo = configuration.StartInfo;
         _apiProcessLaunched = detectUrl && configuration is not null;
         if (detectUrl) _launchConfiguration = configuration;
-        process.OutputDataReceived += (_, e) => ReceiveOutput(e.Data, false, detectUrl, configuration);
-        process.ErrorDataReceived += (_, e) => ReceiveOutput(e.Data, true, detectUrl, configuration);
+        process.OutputDataReceived += (_, e) => ReceiveOutput(e.Data, false, detectUrl, configuration, outputGeneration, frontendRunVersion);
+        process.ErrorDataReceived += (_, e) => ReceiveOutput(e.Data, true, detectUrl, configuration, outputGeneration, frontendRunVersion);
         if (detectUrl)
             process.Exited += (_, _) =>
             {
@@ -351,15 +415,32 @@ public sealed class ServiceRunner : IDisposable
                 {
                     var code = process.ExitCode;
                     var expected = _expectedExits.TryRemove(process.Id, out _) || _intentionalStop || _disposed;
-                    if (!expected && code != 0)
-                        _lastError = $"Start command exited with code {code}. See the output log.";
-                    Log($"Start command exited with code {code}.", code != 0 && !expected);
+                    lock (_consoleLogSync)
+                    {
+                        if (outputGeneration != _outputGeneration) return;
+                        if (frontendRunVersion is not null && frontendRunVersion != _managedFrontendRunVersion) return;
+                        if (!expected && code != 0)
+                            _lastError = $"Start command exited with code {code}. See the output log.";
+                        if (frontendRunVersion is not null && (expected || code != 0))
+                            _frontendRunActive = false;
+                    }
+                    Log($"Start command exited with code {code}.", code != 0 && !expected, outputGeneration: outputGeneration);
                 }
                 catch (InvalidOperationException) { }
             };
         Log(configuration is null ? $"> {command}" : $"> dotnet run · {configuration.Environment} configuration (values hidden)",
             kind: ServiceLogKind.Command);
-        if (!process.Start()) { process.Dispose(); throw new InvalidOperationException("Windows did not start the command."); }
+        try
+        {
+            if (!process.Start()) throw new InvalidOperationException("Windows did not start the command.");
+        }
+        catch
+        {
+            if (frontendRunVersion is not null) InvalidateFrontendRun();
+            process.Dispose();
+            throw;
+        }
+        if (detectUrl && configuration is not null) Interlocked.Increment(ref _managedApiRunVersion);
         var identity = new ProcessIdentity(process.Id, process.StartTime.ToUniversalTime().Ticks);
         _owned[identity.Id] = identity;
         _hasManagedProcess = true;
@@ -409,8 +490,11 @@ public sealed class ServiceRunner : IDisposable
         }
     }
 
-    private void ReceiveOutput(string? line, bool error, bool detectUrl, ApiLaunchConfiguration? configuration)
+    private void ReceiveOutput(string? line, bool error, bool detectUrl, ApiLaunchConfiguration? configuration,
+        long? outputGeneration = null, long? frontendRunVersion = null)
     {
+        if (outputGeneration is not null && outputGeneration != Interlocked.Read(ref _outputGeneration)) return;
+        if (frontendRunVersion is not null && frontendRunVersion != ManagedFrontendRunVersion) return;
         if (line is null) return;
         line = StripTerminalCodes(line);
         if (string.IsNullOrWhiteSpace(line)) return;
@@ -419,18 +503,97 @@ public sealed class ServiceRunner : IDisposable
             var discovered = DiscoverLocalUrl(line);
             if (discovered is not null)
             {
-                var previous = Volatile.Read(ref _detectedUrl);
-                // Prefer the configured protocol when a server reports both HTTP and HTTPS.
-                if (previous is null || (Uri.TryCreate(Profile.Url, UriKind.Absolute, out var preferred)
-                    && new Uri(discovered).Scheme == preferred.Scheme))
-                    Volatile.Write(ref _detectedUrl, discovered);
+                lock (_consoleLogSync)
+                {
+                    if (outputGeneration is not null && outputGeneration != _outputGeneration) return;
+                    if (frontendRunVersion is not null && frontendRunVersion != _managedFrontendRunVersion) return;
+                    var previous = Volatile.Read(ref _detectedUrl);
+                    // Prefer the configured protocol when a server reports both HTTP and HTTPS.
+                    if (previous is null || (Uri.TryCreate(Profile.Url, UriKind.Absolute, out var preferred)
+                        && new Uri(discovered).Scheme == preferred.Scheme))
+                        Volatile.Write(ref _detectedUrl, discovered);
+                }
             }
+            if (frontendRunVersion is { } runVersion)
+                ObserveFrontendBuildOutput(line, runVersion, outputGeneration);
         }
         line = SensitiveDataProtection.Redact(configuration?.Redact(line) ?? line);
-        Log(line.Length > 8192 ? line[..8192] + " … [line truncated]" : line, error, ServiceLogKind.Output);
+        Log(line.Length > 8192 ? line[..8192] + " … [line truncated]" : line, error, ServiceLogKind.Output, outputGeneration);
     }
 
     internal static string StripTerminalCodes(string line) => Ansi.Replace(line, "").Replace("\r", "");
+
+    private long BeginFrontendRun()
+    {
+        lock (_consoleLogSync)
+        {
+            var version = Interlocked.Increment(ref _managedFrontendRunVersion);
+            _frontendRunStopRevision = Volatile.Read(ref _stopRevision);
+            _frontendRunActive = true;
+            _frontendBuildSuccessful = false;
+            _frontendReadyEmitted = false;
+            _frontendBuildRevision = 0;
+            return version;
+        }
+    }
+
+    private void InvalidateFrontendRun()
+    {
+        lock (_consoleLogSync) _frontendRunActive = false;
+    }
+
+    private void ObserveFrontendBuildOutput(string line, long runVersion, long? outputGeneration)
+    {
+        lock (_consoleLogSync)
+        {
+            if (!_frontendRunActive || runVersion != _managedFrontendRunVersion ||
+                outputGeneration != _outputGeneration) return;
+            // stderr alone is not a failed build; frontend tools also use it for normal progress.
+            if (FrontendBuildFailed.IsMatch(line) || FrontendBuildStarted.IsMatch(line))
+            {
+                _frontendBuildSuccessful = false;
+                _frontendBuildRevision++;
+            }
+            else if (FrontendBuildSucceeded.IsMatch(line))
+            {
+                _frontendBuildSuccessful = true;
+                _frontendBuildRevision++;
+            }
+        }
+    }
+
+    private readonly record struct FrontendReadyAttempt(long RunVersion, long BuildRevision);
+
+    private FrontendReadyAttempt? PendingFrontendReadiness(Inspection inspection, IReadOnlyList<ListeningPort> listeners)
+    {
+        var ownedIds = inspection.Owned.Select(process => process.Id).ToHashSet();
+        if (!listeners.Any(listener => ownedIds.Contains(listener.ProcessId))) return null;
+        lock (_consoleLogSync)
+        {
+            if (_disposed || _intentionalStop || !_frontendRunActive || !_frontendBuildSuccessful ||
+                _frontendReadyEmitted || _lastError is not null || !FrontendServiceSupport.IsFrontend(Profile) ||
+                _frontendRunStopRevision != Volatile.Read(ref _stopRevision)) return null;
+            return new(_managedFrontendRunVersion, _frontendBuildRevision);
+        }
+    }
+
+    private void NotifyFrontendReady(string? url, int httpStatus, FrontendReadyAttempt? attempt)
+    {
+        if (string.IsNullOrWhiteSpace(url) || httpStatus is < 200 or >= 400 || attempt is not { } verified) return;
+        lock (_consoleLogSync)
+        {
+            // A rebuild/failure arriving during HTTP invalidates that probe, even if an old
+            // bundle still answered. A later refresh can verify the next successful build.
+            if (_disposed || _intentionalStop || !_frontendRunActive || !_frontendBuildSuccessful ||
+                _frontendReadyEmitted || _lastError is not null || !HasManagedProcess ||
+                Snapshot.State != ServiceState.Running || verified.RunVersion != _managedFrontendRunVersion ||
+                verified.BuildRevision != _frontendBuildRevision ||
+                _frontendRunStopRevision != Volatile.Read(ref _stopRevision)) return;
+            _frontendReadyEmitted = true;
+        }
+        try { FrontendReady?.Invoke(url, verified.RunVersion); }
+        catch (Exception) { /* Browser/UI subscribers must never break process supervision. */ }
+    }
 
     internal static string? DiscoverLocalUrl(string line)
     {
@@ -515,6 +678,7 @@ public sealed class ServiceRunner : IDisposable
             RefreshConsole(inspection, ids);
             return;
         }
+        if (inspection.Owned.Count == 0) InvalidateFrontendRun();
         // A stopped service may still have an old-port conflict. Its previous detected
         // address must not override the saved address after the user edits its port.
         if (ids.Length == 0) Volatile.Write(ref _detectedUrl, null);
@@ -549,12 +713,14 @@ public sealed class ServiceRunner : IDisposable
         }
         try
         {
+            var frontendAttempt = PendingFrontendReadiness(inspection, listeners);
             using var request = new HttpRequestMessage(HttpMethod.Get, uiUrl);
             using var response = await Http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead);
             var origin = inspection.Owned.Count > 0 ? "Started by launcher" : "Started outside launcher";
             var status = (int)response.StatusCode;
             Publish(ServiceState.Running, status >= 500 ? $"{origin}; HTTP {status} (server reports an error)" : $"{origin}; HTTP {status}", ids, uiUrl,
                 status >= 500 ? ServiceLogKind.Warning : ServiceLogKind.Success);
+            NotifyFrontendReady(uiUrl, status, frontendAttempt);
         }
         catch (Exception ex) when (ex is HttpRequestException or TaskCanceledException)
         {
@@ -618,6 +784,7 @@ public sealed class ServiceRunner : IDisposable
     private async Task<bool> StopCoreAsync(bool includeExternal, ConflictApproval? conflictApproval = null)
     {
         _intentionalStop = true;
+        InvalidateFrontendRun();
         try
         {
             var inspection = await InspectAsync(fresh: true);
@@ -696,6 +863,27 @@ public sealed class ServiceRunner : IDisposable
         finally { _intentionalStop = false; }
     }
 
+    private async Task<bool> StopAndClearConsoleAsync(ConflictApproval? conflictApproval = null)
+    {
+        var previousOutputGeneration = Interlocked.Read(ref _outputGeneration);
+        ResetConsoleForLifecycle();
+        var stopped = false;
+        try
+        {
+            stopped = await StopCoreAsync(includeExternal: true, conflictApproval: conflictApproval);
+            return stopped;
+        }
+        finally
+        {
+            // A failed stop can leave the original process alive. Resume its capture while
+            // retaining the new stop errors; successful restarts reject late old-process output.
+            if (!stopped)
+            {
+                lock (_consoleLogSync) Interlocked.Exchange(ref _outputGeneration, previousOutputGeneration);
+            }
+        }
+    }
+
     private static Task<List<string>> KillProcessesAsync(IReadOnlyList<InspectedProcess> targets) => Task.Run(async () =>
     {
         var errors = new List<string>();
@@ -756,7 +944,10 @@ public sealed class ServiceRunner : IDisposable
     {
         var previous = Snapshot;
         Volatile.Write(ref _snapshot, new(state, detail, ids.ToArray(), url, _hasManagedProcess));
-        if (previous.State == state && previous.Detail == detail) return;
+        // A new stop/restart clears earlier diagnostics, including an identical error from
+        // the previous attempt. Emit that current failure once in the fresh console buffer.
+        var repeatDiagnostic = _repeatDiagnosticAfterConsoleReset && state is ServiceState.Error or ServiceState.Conflict;
+        if (previous.State == state && previous.Detail == detail && !repeatDiagnostic) return;
         switch (state)
         {
             case ServiceState.Running:
@@ -764,9 +955,11 @@ public sealed class ServiceRunner : IDisposable
                 Log(detail, kind: runningLogKind ?? ServiceLogKind.Success);
                 break;
             case ServiceState.Conflict:
+                _repeatDiagnosticAfterConsoleReset = false;
                 Log(detail, kind: ServiceLogKind.Warning);
                 break;
             case ServiceState.Error:
+                _repeatDiagnosticAfterConsoleReset = false;
                 Log(detail, error: true);
                 break;
         }
@@ -779,9 +972,47 @@ public sealed class ServiceRunner : IDisposable
         catch (ObjectDisposedException) { }
     }
 
-    private void Log(string message, bool error = false, ServiceLogKind kind = ServiceLogKind.Information) =>
-        _logs.Writer.TryWrite(new(DateTime.Now, Profile.Id, SensitiveDataProtection.Redact(_launchConfiguration?.Redact(message) ?? message),
-            error, error && kind != ServiceLogKind.Output ? ServiceLogKind.Error : kind));
+    internal void RecordConsoleMessage(string message, ServiceLogKind kind) =>
+        Log(message, kind == ServiceLogKind.Error, kind);
+
+    internal void ClearConsoleOutput() => ResetConsoleOutput(discardPreviousProcessOutput: false);
+
+    private void ResetConsoleForLifecycle()
+    {
+        // Console apps retain their completed command history. Web services start a fresh view
+        // only once restart validation or conflict confirmation has succeeded.
+        if (!Profile.IsConsole) ResetConsoleOutput(discardPreviousProcessOutput: true);
+    }
+
+    private void ResetConsoleOutput(bool discardPreviousProcessOutput)
+    {
+        lock (_consoleLogSync)
+        {
+            if (discardPreviousProcessOutput)
+            {
+                Interlocked.Increment(ref _outputGeneration);
+                _repeatDiagnosticAfterConsoleReset = true;
+            }
+            Interlocked.Exchange(ref _consoleResetSequence, ++_consoleSequence);
+            // The UI subscriber queues work without waiting for the dispatcher. Notify before
+            // admitting new logs so clearing can never erase this operation's fresh output.
+            try { ConsoleOutputReset?.Invoke(); }
+            catch (Exception) { /* Console display must never break process supervision. */ }
+        }
+    }
+
+    private void Log(string message, bool error = false, ServiceLogKind kind = ServiceLogKind.Information,
+        long? outputGeneration = null)
+    {
+        var safeMessage = SensitiveDataProtection.Redact(_launchConfiguration?.Redact(message) ?? message);
+        lock (_consoleLogSync)
+        {
+            if (outputGeneration is not null && outputGeneration != _outputGeneration) return;
+            _logs.Writer.TryWrite(new(DateTime.Now, Profile.Id, safeMessage,
+                error, error && kind != ServiceLogKind.Output ? ServiceLogKind.Error : kind)
+            { ConsoleSequence = ++_consoleSequence });
+        }
+    }
 
     private async Task PumpLogsAsync()
     {

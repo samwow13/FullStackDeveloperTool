@@ -3,7 +3,9 @@ namespace FullStackLauncher.ProjectTasks;
 /// <summary>Local task content, kept separate from portable launcher and monitor settings.</summary>
 public sealed class ProjectTaskData
 {
-    public int Version { get; set; } = 2;
+    public int Version { get; set; } = 6;
+    // Global pause is independent of each queue's explicit, default-off enablement.
+    public bool PauseAllQueues { get; set; }
     public List<ProjectTaskNote> Notes { get; set; } = [];
     public List<ProjectQueueItem> QueueItems { get; set; } = [];
     public List<ProjectQueueConfiguration> Queues { get; set; } = [];
@@ -16,11 +18,35 @@ public sealed class ProjectTaskNote
     public string ProjectId { get; set; } = "";
     public string Name { get; set; } = "";
     public string Prompt { get; set; } = "";
+    public List<ProjectTaskNoteImage> Images { get; set; } = [];
     public int Order { get; set; }
     public bool IsCompleted { get; set; }
     public bool IsArchived { get; set; }
     public DateTimeOffset CreatedAt { get; set; } = DateTimeOffset.UtcNow;
     public DateTimeOffset UpdatedAt { get; set; } = DateTimeOffset.UtcNow;
+}
+
+/// <summary>An image owned by one note and saved atomically with its text.</summary>
+public sealed class ProjectTaskNoteImage
+{
+    public const int MaximumCount = 12;
+    public const int MaximumBytes = 8_000_000;
+    public const int MaximumTotalBytes = 24_000_000;
+    public const int MaximumPageUrlCharacters = 2_048;
+    public const int MaximumPageHtmlCharacters = 200_000;
+    public const int MaximumPageCssCharacters = 200_000;
+    public const int MaximumPageCaptureStatusCharacters = 240;
+    public string Id { get; set; } = Guid.NewGuid().ToString("N");
+    public string Caption { get; set; } = "";
+    public string MimeType { get; set; } = "image/png";
+    public string DataBase64 { get; set; } = "";
+    // Browser source is captured when the snip is made, regardless of whether
+    // the user includes it in a later queue prompt. Older images have no source.
+    public string PageUrl { get; set; } = "";
+    public string PageHtml { get; set; } = "";
+    public string PageCss { get; set; } = "";
+    public string PageCaptureStatus { get; set; } = "";
+    public bool IncludePageContextInPrompt { get; set; }
 }
 
 public sealed class ProjectQueueItem
@@ -47,7 +73,13 @@ public sealed class ProjectQueueConfiguration
     // not change this folder or enable a queue.
     public string AssignedFolder { get; set; } = "";
     public bool Enabled { get; set; }
+    // Optional user defaults. Empty means the UI must use a currently discovered
+    // model/effort choice and the runner must validate it before submission.
+    public string DefaultModelId { get; set; } = "";
+    public string DefaultReasoningEffort { get; set; } = "";
     public ProjectTaskIdentity? ExternalPredecessor { get; set; }
+    // Exact read-only observed terminal completion, not a semantic success claim.
+    public DateTimeOffset? ExternalPredecessorSatisfiedAt { get; set; }
     public ProjectQueueRecoveryState RecoveryState { get; set; } = ProjectQueueRecoveryState.None;
     public string StatusMessage { get; set; } = "";
 }
@@ -70,9 +102,15 @@ public sealed record ProjectTaskDispatchSnapshot
     public string QueueItemId { get; init; } = "";
     public string Name { get; init; } = "";
     public string Prompt { get; init; } = "";
+    public List<ProjectTaskNoteImage> Images { get; init; } = [];
+    // Unique per attempt. Only saved image attempts use an image staging folder.
+    public string ImageStagingId { get; init; } = "";
     public string ModelId { get; init; } = "";
     public string ReasoningEffort { get; init; } = "";
     public string Folder { get; init; } = "";
+    // Frozen summary from the exact prior successful queue attempt, if any.
+    // This is agent-reported context, not independent proof of correctness.
+    public string PredecessorHandoff { get; init; } = "";
 }
 
 /// <summary>
@@ -102,6 +140,15 @@ public sealed class ProjectTaskExecutionReceipt
     public DateTimeOffset? NotificationAttemptedAt { get; set; }
     public string NotificationError { get; set; } = "";
     public DateTimeOffset? CompletionHistoryClearedAt { get; set; }
+    // Presentation only. Queue recovery and exact-attempt evidence still use this receipt.
+    public DateTimeOffset? ActivityArchivedAt { get; set; }
+    public DateTimeOffset? ActivityDeletedAt { get; set; }
+    // Explicit human confirmation only releases the global uncertain-run hold.
+    // It does not change the recorded outcome or permit this item to resend.
+    public DateTimeOffset? QueueReviewCompletedAt { get; set; }
+    // Explicit Delete abandons queue tracking without claiming that Codex work
+    // stopped or succeeded. The attempt and its recorded outcome remain saved.
+    public DateTimeOffset? QueueAbandonedAt { get; set; }
     public string ConnectionDetails { get; set; } = "";
     public CodexDesktopAssociation DesktopAssociation { get; set; } = CodexDesktopAssociation.Unverified;
     // A manual review releases a diagnostic hold; it never changes the recorded outcome.

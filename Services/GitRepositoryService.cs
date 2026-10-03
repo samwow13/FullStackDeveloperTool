@@ -11,7 +11,7 @@ using FullStackLauncher.Models;
 namespace FullStackLauncher.Services;
 
 /// <summary>Explicit Git operations. Passive repository reads never contact a remote.</summary>
-public static class GitRepositoryService
+public static partial class GitRepositoryService
 {
     private const int OutputLimit = 8 * 1024 * 1024;
     private static readonly ConcurrentDictionary<string, SemaphoreSlim> RepositoryGates = new(StringComparer.OrdinalIgnoreCase);
@@ -22,6 +22,52 @@ public static class GitRepositoryService
 
     public static Task<GitRepositorySnapshot> ReadAsync(string folder, CancellationToken token = default) =>
         Task.Run(() => ReadCoreAsync(folder, token), token);
+
+    /// <summary>Explicitly trust only the reviewed checkout for this Windows user's Git configuration.</summary>
+    public static Task<string> TrustRepositoryAsync(string root, CancellationToken token = default) =>
+        Task.Run(async () =>
+        {
+            var fullRoot = RequireFolder(root);
+            var gate = RepositoryGates.GetOrAdd(fullRoot, _ => new SemaphoreSlim(1, 1));
+            await gate.WaitAsync(token).ConfigureAwait(false);
+            try
+            {
+                var metadata = await GitBranchReader.ReadAsync(fullRoot, token).ConfigureAwait(false);
+                var probe = await GitAsync(fullRoot, ["rev-parse", "--show-toplevel"], token).ConfigureAwait(false);
+                if (!string.Equals(TryGetUntrustedRoot(probe.Error, metadata.RepositoryPath), fullRoot, StringComparison.OrdinalIgnoreCase))
+                    throw new InvalidOperationException("This exact folder is no longer reporting the reviewed ownership problem. Refresh before changing trust.");
+                var safeRoot = fullRoot.Replace('\\', '/');
+                var existing = await GitAsync(fullRoot, ["config", "--global", "--get-all", "safe.directory"], token).ConfigureAwait(false);
+                if (existing.ExitCode is not (0 or 1)) ThrowCommandFailure(existing);
+                if (!SplitUrls(existing.Output).Contains(safeRoot, StringComparer.OrdinalIgnoreCase))
+                    EnsureSuccess(await GitAsync(fullRoot, ["config", "--global", "--add", "safe.directory", safeRoot], token).ConfigureAwait(false));
+                var confirmed = await GitAsync(fullRoot, ["rev-parse", "--show-toplevel"], token).ConfigureAwait(false);
+                if (confirmed.ExitCode != 0 || !string.Equals(RequireFolder(confirmed.Output.TrimEnd('\r', '\n')), fullRoot, StringComparison.OrdinalIgnoreCase))
+                    return "The exact folder trust entry was saved, but Git access is still unavailable. Refresh and review the remaining problem; no files or ownership were changed.";
+                return "This exact repository folder is now trusted in your user Git configuration. File ownership and repository contents were unchanged.";
+            }
+            finally { gate.Release(); }
+        }, token);
+
+    private static string? TryGetUntrustedRoot(string error, string? metadataRoot)
+    {
+        const string marker = "detected dubious ownership in repository at '";
+        var start = error.IndexOf(marker, StringComparison.Ordinal);
+        if (start < 0 || metadataRoot is null) return null;
+        start += marker.Length;
+        var lineEnd = error.IndexOf('\n', start);
+        if (lineEnd < 0) lineEnd = error.Length;
+        if (lineEnd <= start) return null;
+        var end = error.LastIndexOf('\'', lineEnd - 1, lineEnd - start);
+        if (end < start) return null;
+        try
+        {
+            var reported = RequireFolder(error[start..end]);
+            var observed = RequireFolder(metadataRoot);
+            return string.Equals(reported, observed, StringComparison.OrdinalIgnoreCase) ? observed : null;
+        }
+        catch (InvalidOperationException) { return null; }
+    }
 
     public static Task<GitRemoteComparison> ReadComparisonAsync(string root, string remote, string branch, CancellationToken token = default) =>
         InRepositoryAsync(root, token, async snapshot =>
@@ -92,11 +138,13 @@ public static class GitRepositoryService
             finally { gate.Release(); }
         }, token);
 
-    public static Task<string> SaveRemoteAsync(string root, string name, string url, bool replace, CancellationToken token = default) =>
+    public static Task<string> SaveRemoteAsync(string root, string name, string url, bool replace, CancellationToken token = default,
+        GitHostingProvider? provider = null) =>
         InRepositoryAsync(root, token, async snapshot =>
         {
+            await RequireNoPendingSyncAsync(root, token).ConfigureAwait(false);
             ValidateRemoteName(name);
-            var cleanUrl = ValidateRemoteUrl(url);
+            var cleanUrl = provider is { } selectedProvider ? GitConnectionService.ValidateUrl(selectedProvider, url) : ValidateRemoteUrl(url);
             var exists = snapshot.Remotes.Any(remote => remote.Name == name);
             if (exists != replace)
                 throw new InvalidOperationException(exists ? "That remote now exists. Refresh and explicitly choose to update it." : "That remote no longer exists. Refresh and add it again.");
@@ -109,7 +157,26 @@ public static class GitRepositoryService
                 if (push.ExitCode is not (0 or 1)) ThrowCommandFailure(push);
             }
             var args = replace ? new[] { "remote", "set-url", name, cleanUrl } : new[] { "remote", "add", name, cleanUrl };
-            return Result(await GitAsync(root, args, token).ConfigureAwait(false), "Remote saved. The repository has not been pushed.");
+            var saved = Result(await GitAsync(root, args, token).ConfigureAwait(false), "Remote saved. The repository has not been pushed.");
+            if (provider is { } hostingProvider)
+            {
+                try
+                {
+                    var currentUrl = await RequireSingleRemoteAsync(root, name, false, token).ConfigureAwait(false);
+                    if (!string.Equals(currentUrl, cleanUrl, StringComparison.Ordinal))
+                        throw new InvalidOperationException("The remote URL changed before its provider choice could be saved.");
+                    EnsureSuccess(await GitAsync(root,
+                        ["config", "--local", "--replace-all", $"remote.{name}.launcherProvider", hostingProvider.ToString()], token).ConfigureAwait(false));
+                    EnsureSuccess(await GitAsync(root,
+                        ["config", "--local", "--replace-all", $"remote.{name}.launcherProviderTarget", RemoteTargetFingerprint(cleanUrl)], token).ConfigureAwait(false));
+                }
+                catch (Exception exception) when (exception is InvalidOperationException or IOException or UnauthorizedAccessException or OperationCanceledException)
+                {
+                    // The remote save is confirmed. Keep that result even if optional provider metadata fails.
+                    return saved + "\nThe hosting provider choice was not confirmed. Config may ask you to choose the provider again. The remote save was not undone.\n" + Sanitize(exception.Message);
+                }
+            }
+            return saved;
         });
 
     public static Task<string> FetchAsync(string root, string remote, CancellationToken token = default) =>
@@ -124,6 +191,7 @@ public static class GitRepositoryService
     public static Task<string> PullAsync(string root, string remote, string branch, CancellationToken token = default) =>
         InRepositoryAsync(root, token, async snapshot =>
         {
+            await RequireNoPendingSyncAsync(root, token).ConfigureAwait(false);
             RequireCurrentBranch(snapshot, branch);
             RequireClean(snapshot);
             RequireNoOperation(snapshot);
@@ -136,6 +204,7 @@ public static class GitRepositoryService
     public static Task<string> PushAsync(string root, string remote, string branch, CancellationToken token = default) =>
         InRepositoryAsync(root, token, async snapshot =>
         {
+            await RequireNoPendingSyncAsync(root, token).ConfigureAwait(false);
             RequireCurrentBranch(snapshot, branch);
             RequireNoOperation(snapshot);
             await RequireSingleRemoteAsync(root, remote, true, token).ConfigureAwait(false);
@@ -143,70 +212,11 @@ public static class GitRepositoryService
         });
 
     public static Task<string> StageAllCommitAndPushAsync(string root, string message, string remote, string branch, CancellationToken token = default) =>
-        InRepositoryAsync(root, token, async snapshot =>
-        {
-            ValidateCommitMessage(message);
-            RequireNamedBranch(snapshot, branch);
-            RequireNoOperation(snapshot);
-            if (snapshot.Changes.Any(change => change.IsConflict)) throw new InvalidOperationException("Resolve all conflicts before committing.");
-            if (snapshot.Changes.Count == 0) throw new InvalidOperationException("There are no changes to commit. Use Push for existing local commits.");
-            await ValidateBranchAsync(root, branch, token).ConfigureAwait(false);
-            var destination = await RequireSingleRemoteAsync(root, remote, true, token).ConfigureAwait(false);
-            // Check identity before staging so a missing Git identity leaves the index alone.
-            EnsureSuccess(await GitAsync(root, ["var", "GIT_AUTHOR_IDENT"], token).ConfigureAwait(false));
-            EnsureSuccess(await GitAsync(root, ["var", "GIT_COMMITTER_IDENT"], token).ConfigureAwait(false));
-            var staged = false;
-            var committed = false;
-            try
-            {
-                EnsureSuccess(await GitAsync(root, ["add", "--all", "--", ":/"], token).ConfigureAwait(false));
-                staged = true;
-                var stagedSnapshot = await ReadCoreAsync(root, token).ConfigureAwait(false);
-                RequireExactRoot(root, stagedSnapshot);
-                RequireNamedBranch(stagedSnapshot, branch);
-                RequireNoOperation(stagedSnapshot);
-                if (stagedSnapshot.HeadCommit != snapshot.HeadCommit)
-                    throw new InvalidOperationException("The branch commit changed while staging. Review the staged changes before retrying.");
-                if (stagedSnapshot.Changes.Any(change => change.IsConflict))
-                    throw new InvalidOperationException("Resolve all conflicts before committing.");
-                if (!stagedSnapshot.Changes.Any(change => change.HasStaged))
-                    throw new InvalidOperationException("There are no staged file changes to commit. Changes inside submodules must be committed in their own repositories.");
-                await RequireUnchangedPushDestinationAsync(root, remote, destination, token).ConfigureAwait(false);
-                var tree = await GitAsync(root, ["write-tree"], token).ConfigureAwait(false);
-                EnsureSuccess(tree);
-                var stagedTree = tree.Output.Trim();
-                if (!IsObjectId(stagedTree)) throw new InvalidOperationException("The staged tree could not be verified. Review the index before committing.");
-                var commit = await GitAsync(root, ["commit", "--no-status", "--message", message], token).ConfigureAwait(false);
-                EnsureSuccess(commit);
-                committed = true;
-                var committedSnapshot = await ReadCoreAsync(root, token).ConfigureAwait(false);
-                RequireExactRoot(root, committedSnapshot);
-                RequireCurrentBranch(committedSnapshot, branch);
-                RequireNoOperation(committedSnapshot);
-                if (committedSnapshot.HeadCommit == snapshot.HeadCommit)
-                    throw new InvalidOperationException("Git reported a commit, but the new branch tip could not be verified. Inspect the local history before pushing.");
-                var identity = await GitAsync(root, ["show", "--no-patch", "--no-notes", "--no-show-signature", "--format=%T%x00%P", committedSnapshot.HeadCommit, "--"], token).ConfigureAwait(false);
-                EnsureSuccess(identity);
-                var fields = identity.Output.TrimEnd('\r', '\n').Split('\0');
-                if (fields.Length != 2 || fields[0] != stagedTree || fields[1] != snapshot.HeadCommit)
-                    throw new InvalidOperationException("The resulting commit differs from the staged tree or expected parent. Inspect the local history before pushing.");
-                await RequireUnchangedPushDestinationAsync(root, remote, destination, token).ConfigureAwait(false);
-                return "All changes committed. " + await PushCommitAsync(root, remote, branch, committedSnapshot.HeadCommit, token).ConfigureAwait(false);
-            }
-            catch (Exception exception) when (exception is InvalidOperationException or OperationCanceledException or IOException or UnauthorizedAccessException)
-            {
-                var state = committed
-                    ? "The commit was created locally, but pushing was not confirmed. Refresh and inspect the remote status; use Push for this commit when ready."
-                    : staged
-                        ? "All changes were staged, but the commit was not confirmed and nothing was pushed. Review the local history and staged changes before retrying."
-                        : "Staging was not confirmed; no commit or push was attempted. Refresh and review the index before retrying.";
-                throw new GitCommitPushException(state + "\n" + Sanitize(exception.Message), committed, exception);
-            }
-        });
-
+        CommitAllAndPushToBranchAsync(root, remote, branch, message, token);
     public static Task<string> MergeBranchAsync(string root, string branchName, string currentBranch, CancellationToken token = default, bool sourceIsRemote = false) =>
         InRepositoryAsync(root, token, async snapshot =>
         {
+            await RequireNoPendingSyncAsync(root, token).ConfigureAwait(false);
             RequireCurrentBranch(snapshot, currentBranch);
             RequireClean(snapshot);
             RequireNoOperation(snapshot);
@@ -243,6 +253,7 @@ public static class GitRepositoryService
     public static Task<string> CreateBranchAsync(string root, string name, CancellationToken token = default) =>
         InRepositoryAsync(root, token, async snapshot =>
         {
+            await RequireNoPendingSyncAsync(root, token).ConfigureAwait(false);
             await ValidateBranchAsync(root, name, token).ConfigureAwait(false);
             RequireNoOperation(snapshot);
             RequireClean(snapshot);
@@ -255,6 +266,7 @@ public static class GitRepositoryService
     public static Task<string> SwitchBranchAsync(string root, string name, CancellationToken token = default) =>
         InRepositoryAsync(root, token, async snapshot =>
         {
+            await RequireNoPendingSyncAsync(root, token).ConfigureAwait(false);
             RequireNoOperation(snapshot);
             RequireClean(snapshot);
             var local = snapshot.Branches.FirstOrDefault(branch => !branch.IsRemote && branch.Name == name);
@@ -277,6 +289,7 @@ public static class GitRepositoryService
     public static Task<string> StageAsync(string root, IReadOnlyList<string> paths, CancellationToken token = default) =>
         InRepositoryAsync(root, token, async snapshot =>
         {
+            await RequireNoPendingSyncAsync(root, token).ConfigureAwait(false);
             RequireNoOperation(snapshot);
             var selected = ValidatePaths(root, paths, snapshot, staged: false);
             return Result(await GitAsync(root, ["--literal-pathspecs", "add", "--", .. selected], token).ConfigureAwait(false), "Selected paths staged. Review the staged diff before committing.");
@@ -285,6 +298,7 @@ public static class GitRepositoryService
     public static Task<string> UnstageAsync(string root, IReadOnlyList<string> paths, CancellationToken token = default) =>
         InRepositoryAsync(root, token, async snapshot =>
         {
+            await RequireNoPendingSyncAsync(root, token).ConfigureAwait(false);
             RequireNoOperation(snapshot);
             var selected = ValidatePaths(root, paths, snapshot, staged: true);
             // On an unborn branch, remove only the selected index entries. --cached always
@@ -298,6 +312,7 @@ public static class GitRepositoryService
     public static Task<string> CommitAsync(string root, string message, CancellationToken token = default) =>
         InRepositoryAsync(root, token, async snapshot =>
         {
+            await RequireNoPendingSyncAsync(root, token).ConfigureAwait(false);
             RequireNoOperation(snapshot);
             if (snapshot.IsDetached) throw new InvalidOperationException("Switch to a local branch before committing here.");
             if (snapshot.Changes.Any(change => change.IsConflict)) throw new InvalidOperationException("Resolve all conflicts before committing.");
@@ -324,51 +339,7 @@ public static class GitRepositoryService
             return string.IsNullOrWhiteSpace(result.Output) ? "No diff in this view. Binary files and submodules may have limited textual output." : DisplayOutput(result.Output);
         });
 
-    public static Task<string> LookupAzureRemoteAsync(string folder, string organization, string project, string repositoryName, CancellationToken token = default) =>
-        Task.Run(async () =>
-        {
-            var organizationUrl = ValidateAzureOrganization(organization);
-            ValidateAzureName(project, "project");
-            ValidateAzureName(repositoryName, "repository");
-            var result = await AzureAsync(RequireFolder(folder),
-                ["repos", "show", "--organization", organizationUrl, "--project", project.Trim(), "--repository", repositoryName.Trim(), "--detect", "false", "--query", "remoteUrl", "--output", "tsv", "--only-show-errors"], token).ConfigureAwait(false);
-            EnsureSuccess(result);
-            return CleanAzureCloneUrl(result.Output.Trim(), organizationUrl);
-        }, token);
-
-    public static Task<string> CreateAzureRemoteAsync(string root, string remoteName, string organization, string project, string repositoryName, CancellationToken token = default) =>
-        InRepositoryAsync(root, token, async snapshot =>
-        {
-            ValidateRemoteName(remoteName);
-            if (snapshot.Remotes.Any(remote => remote.Name == remoteName)) throw new InvalidOperationException("That local remote already exists. Choose a new remote name before creating a repository.");
-            var organizationUrl = ValidateAzureOrganization(organization);
-            ValidateAzureName(project, "project");
-            ValidateAzureName(repositoryName, "repository");
-            var created = await AzureAsync(root,
-                ["repos", "create", "--organization", organizationUrl, "--project", project.Trim(), "--name", repositoryName.Trim(), "--detect", "false", "--query", "remoteUrl", "--output", "tsv", "--only-show-errors"], token).ConfigureAwait(false);
-            EnsureSuccess(created);
-            string cloneUrl;
-            try { cloneUrl = CleanAzureCloneUrl(created.Output.Trim(), organizationUrl); }
-            catch (InvalidOperationException)
-            {
-                throw new InvalidOperationException("Azure DevOps reported repository creation, but its clone URL could not be verified. Check the repository in Azure DevOps and use Look up existing; do not retry creation automatically.");
-            }
-            try
-            {
-                var current = await ReadCoreAsync(root, token).ConfigureAwait(false);
-                RequireExactRoot(root, current);
-                if (current.StateFingerprint != snapshot.StateFingerprint) throw new InvalidOperationException("The local repository changed while Azure DevOps was creating the remote repository.");
-                if (current.Remotes.Any(remote => remote.Name == remoteName)) throw new InvalidOperationException("The local remote name was added by another operation.");
-                EnsureSuccess(await GitAsync(root, ["remote", "add", remoteName, cloneUrl], token).ConfigureAwait(false));
-            }
-            catch (Exception exception) when (exception is InvalidOperationException or OperationCanceledException)
-            {
-                throw new InvalidOperationException($"Azure DevOps repository created at {cloneUrl}, but attaching the local remote was not confirmed. Refresh and attach this existing URL; do not create it again. {Sanitize(exception.Message)}");
-            }
-            return "Azure DevOps repository created and its local remote attached. Access follows the Azure project permissions. No commits were pushed.\n" + cloneUrl;
-        });
-
-    private static Task<T> InRepositoryAsync<T>(string root, CancellationToken token, Func<GitRepositorySnapshot, Task<T>> action) =>
+    internal static Task<T> InRepositoryAsync<T>(string root, CancellationToken token, Func<GitRepositorySnapshot, Task<T>> action) =>
         Task.Run(async () =>
         {
             var fullRoot = RequireFolder(root);
@@ -376,6 +347,7 @@ public static class GitRepositoryService
             await gate.WaitAsync(token).ConfigureAwait(false);
             try
             {
+                await using var operationLease = await AcquireRepositoryOperationLeaseAsync(fullRoot, token).ConfigureAwait(false);
                 var snapshot = await ReadCoreAsync(fullRoot, token).ConfigureAwait(false);
                 RequireExactRoot(fullRoot, snapshot);
                 if (ExpectedSnapshot.Value is { } expected && (expected.RepositoryRoot is null
@@ -394,6 +366,8 @@ public static class GitRepositoryService
         if (top.ExitCode != 0)
         {
             var metadata = await GitBranchReader.ReadAsync(fullFolder, token).ConfigureAwait(false);
+            if (TryGetUntrustedRoot(top.Error, metadata.RepositoryPath) is { } untrustedRoot)
+                throw new GitRepositoryTrustException(untrustedRoot);
             var bare = await GitAsync(fullFolder, ["rev-parse", "--is-bare-repository"], token).ConfigureAwait(false);
             if (bare.ExitCode == 0 && bare.Output.Trim() == "true")
                 throw new InvalidOperationException("Bare repositories have no working tree and are not supported in this workspace.");
@@ -462,14 +436,29 @@ public static class GitRepositoryService
             EnsureSuccess(pushResult);
             var fetchUrls = SplitUrls(fetchResult.Output);
             var pushUrls = SplitUrls(pushResult.Output);
-            remoteIdentity.Append(name).Append('\0').Append(fetchResult.Output).Append('\0').Append(pushResult.Output).Append('\0');
+            var providerResult = await GitAsync(root, ["config", "--local", "--get-all", $"remote.{name}.launcherProvider"], token).ConfigureAwait(false);
+            if (providerResult.ExitCode is not (0 or 1)) ThrowCommandFailure(providerResult);
+            var providerTarget = await GitAsync(root, ["config", "--local", "--get-all", $"remote.{name}.launcherProviderTarget"], token).ConfigureAwait(false);
+            if (providerTarget.ExitCode is not (0 or 1)) ThrowCommandFailure(providerTarget);
+            GitHostingProvider? provider = providerResult.Output.TrimEnd('\r', '\n') switch
+            {
+                "GitHub" => GitHostingProvider.GitHub,
+                "AzureDevOps" => GitHostingProvider.AzureDevOps,
+                _ => null
+            };
             var canCopy = fetchUrls.Length == 1 && pushUrls.Length == 1 && IsSafeRemoteUrl(fetchUrls[0]) && IsSafeRemoteUrl(pushUrls[0]);
+            var postPushResult = await GitAsync(root, ["config", "--local", "--get-all", $"remote.{name}.launcherPostPushLink"], token).ConfigureAwait(false);
+            if (postPushResult.ExitCode is not (0 or 1)) ThrowCommandFailure(postPushResult);
+            var postPush = canCopy ? ReadPostPushUrl(postPushResult.Output, pushUrls[0]) : (Url: (string?)"", Error: (string?)null);
+            if (!canCopy || providerTarget.Output.TrimEnd('\r', '\n') != RemoteTargetFingerprint(ValidateRemoteUrl(fetchUrls[0]))) provider = null;
+            remoteIdentity.Append(name).Append('\0').Append(fetchResult.Output).Append('\0').Append(pushResult.Output).Append('\0')
+                .Append(providerResult.Output).Append('\0').Append(providerTarget.Output).Append('\0').Append(postPushResult.Output).Append('\0');
             remotes.Add(new GitRemoteInfo
             {
                 Name = name,
                 FetchUrl = string.Join("\n", fetchUrls.Select(DisplayRemoteUrl)),
                 PushUrl = string.Join("\n", pushUrls.Select(DisplayRemoteUrl)),
-                UrlCanCopy = canCopy
+                UrlCanCopy = canCopy, Provider = provider, PostPushUrl = postPush.Url, PostPushLinkError = postPush.Error
             });
         }
         var operation = await ReadOperationStateAsync(root, token).ConfigureAwait(false);
@@ -486,6 +475,7 @@ public static class GitRepositoryService
             Folder = fullFolder, RepositoryRoot = root, IsRepository = true, Branch = branch, HeadCommit = unborn ? "" : head.Output.Trim(),
             IsDetached = detached, IsUnborn = unborn, Upstream = upstream, Ahead = ahead, Behind = behind, TrackingAvailable = trackingAvailable,
             StateFingerprint = fingerprint,
+            WorkingTreeFingerprint = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(status.Output + "\0" + indexEntries.Output))),
             Changes = changes, Branches = branches, Remotes = remotes, OperationState = operation
         };
     }
@@ -562,7 +552,7 @@ public static class GitRepositoryService
         return (files, added, deleted, binary);
     }
 
-    private static bool IsObjectId(string value) => value.Length is 40 or 64 && value.All(char.IsAsciiHexDigit);
+    private static bool IsObjectId(string? value) => value is { Length: 40 or 64 } && value.All(char.IsAsciiHexDigit);
 
     private static string StatusLabel(char status) => status switch
     {
@@ -620,8 +610,8 @@ public static class GitRepositoryService
 
     private static void ValidateCommitMessage(string message)
     {
-        if (string.IsNullOrWhiteSpace(message) || message.Length > 16_000 || message.Contains('\0'))
-            throw new InvalidOperationException("Enter a commit message of at most 16,000 characters.");
+        if (string.IsNullOrWhiteSpace(message) || message.Length > GitCommitMessage.MaximumLength || message.Contains('\0'))
+            throw new InvalidOperationException("Enter a commit message of at most 4,000 characters, without null characters.");
     }
 
     private static async Task RequireUnchangedPushDestinationAsync(string root, string remote, string destination, CancellationToken token)
@@ -694,13 +684,15 @@ public static class GitRepositoryService
 
     private static string[] SplitUrls(string text) => text.Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries);
 
+    private static string RemoteTargetFingerprint(string url) => Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(url)));
+
     private static bool IsSafeRemoteUrl(string url)
     {
         try { _ = ValidateRemoteUrl(url); return true; }
         catch (InvalidOperationException) { return false; }
     }
 
-    private static string ValidateRemoteUrl(string url)
+    internal static string ValidateRemoteUrl(string url)
     {
         if (string.IsNullOrWhiteSpace(url) || url != url.Trim() || url.Length > 4000 || url.Any(char.IsControl) || url.StartsWith('-') || url.Contains('\\'))
             throw new InvalidOperationException("Use a credential-free HTTPS or SSH Git clone URL.");
@@ -765,79 +757,24 @@ public static class GitRepositoryService
         { throw new InvalidOperationException("A selected path is outside the repository or is not a supported working-tree path."); }
     }
 
-    private static string ValidateAzureOrganization(string organization)
-    {
-        var value = organization.Trim().TrimEnd('/');
-        if (!value.Contains("://", StringComparison.Ordinal)) value = "https://dev.azure.com/" + value;
-        if (!Uri.TryCreate(value, UriKind.Absolute, out var uri) || uri.Scheme != "https" || !uri.IsDefaultPort || uri.UserInfo.Length != 0 || uri.Query.Length != 0 || uri.Fragment.Length != 0)
-            throw new InvalidOperationException("Enter an Azure organization URL such as https://dev.azure.com/your-organization.");
-        var modern = uri.Host.Equals("dev.azure.com", StringComparison.OrdinalIgnoreCase) && Regex.IsMatch(uri.AbsolutePath, "^/[A-Za-z0-9][A-Za-z0-9-]*$");
-        var legacy = Regex.IsMatch(uri.Host, "^[A-Za-z0-9][A-Za-z0-9-]*\\.visualstudio\\.com$", RegexOptions.IgnoreCase) && uri.AbsolutePath == "/";
-        if (!modern && !legacy) throw new InvalidOperationException("Use a hosted Azure DevOps organization at dev.azure.com or organization.visualstudio.com.");
-        return value;
-    }
-
-    private static void ValidateAzureName(string value, string kind)
-    {
-        if (string.IsNullOrWhiteSpace(value) || value.Length > 200 || value.Any(char.IsControl) || value.Trim().StartsWith('-'))
-            throw new InvalidOperationException($"Enter a valid Azure DevOps {kind} name or ID.");
-    }
-
-    private static string CleanAzureCloneUrl(string raw, string organization)
-    {
-        if (!Uri.TryCreate(raw, UriKind.Absolute, out var uri) || uri.Scheme != "https" || !uri.IsDefaultPort || uri.Query.Length != 0 || uri.Fragment.Length != 0 || uri.UserInfo.Contains(':'))
-            throw new InvalidOperationException("Azure DevOps did not return a supported credential-free HTTPS clone URL.");
-        var organizationUri = new Uri(organization);
-        var organizationName = organizationUri.Host.Equals("dev.azure.com", StringComparison.OrdinalIgnoreCase)
-            ? organizationUri.AbsolutePath.Trim('/') : organizationUri.Host.Split('.')[0];
-        var correctModern = uri.Host.Equals("dev.azure.com", StringComparison.OrdinalIgnoreCase) && uri.AbsolutePath.StartsWith("/" + organizationName + "/", StringComparison.OrdinalIgnoreCase);
-        var correctLegacy = uri.Host.Equals(organizationName + ".visualstudio.com", StringComparison.OrdinalIgnoreCase);
-        if ((!correctModern && !correctLegacy) || !uri.AbsolutePath.Contains("/_git/", StringComparison.Ordinal))
-            throw new InvalidOperationException("Azure DevOps returned a clone URL outside the selected organization.");
-        return ValidateRemoteUrl(new UriBuilder(uri) { UserName = "", Password = "" }.Uri.AbsoluteUri);
-    }
-
-    private static Task<CommandResult> GitAsync(string folder, IReadOnlyList<string> arguments, CancellationToken token, bool network = false)
+    internal static Task<CommandResult> GitAsync(string folder, IReadOnlyList<string> arguments, CancellationToken token, bool network = false,
+        bool interactive = false, string? standardInput = null, bool strictSsh = false)
     {
         var args = new List<string>
         {
-            "--no-pager", "-c", "color.ui=false", "-c", "credential.interactive=false", "-c", "protocol.allow=never",
-            "-c", "protocol.https.allow=always", "-c", "protocol.ssh.allow=always"
+            "--no-pager", "-c", "color.ui=false", "-c", "credential.interactive=" + (interactive ? "true" : "false"), "-c", "protocol.allow=never",
+            "-c", "protocol.https.allow=always", "-c", "protocol.ssh.allow=always", "-c", "http.sslVerify=true",
+            "-c", "credential.https://dev.azure.com.useHttpPath=true",
+            "-c", "credential.trace=false", "-c", "credential.traceSecrets=false", "-c", "credential.traceMsAuth=false"
         };
+        if (!interactive) args.AddRange(["-c", "core.askPass="]);
         args.AddRange(arguments);
-        return RunAsync("git.exe", args, folder, token, network ? TimeSpan.FromMinutes(3) : TimeSpan.FromSeconds(45), azure: false);
+        return RunAsync("git.exe", args, folder, token, network ? TimeSpan.FromMinutes(3) : TimeSpan.FromSeconds(45),
+            interactive: interactive, standardInput: standardInput, strictSsh: strictSsh);
     }
 
-    private static Task<CommandResult> AzureAsync(string folder, IReadOnlyList<string> arguments, CancellationToken token)
-    {
-        var (executable, prefix) = ResolveAzureExecutable();
-        return RunAsync(executable, [.. prefix, .. arguments], folder, token, TimeSpan.FromMinutes(3), azure: true);
-    }
-
-    private static (string Executable, string[] Prefix) ResolveAzureExecutable()
-    {
-        foreach (var item in (Environment.GetEnvironmentVariable("PATH") ?? "").Split(Path.PathSeparator, StringSplitOptions.RemoveEmptyEntries))
-        {
-            try
-            {
-                var directory = item.Trim().Trim('"');
-                if (!Path.IsPathFullyQualified(directory)) continue;
-                var native = Path.Combine(directory, "az.exe");
-                if (File.Exists(native)) return (native, []);
-                var shim = Path.Combine(directory, "az.cmd");
-                if (!File.Exists(shim) || new FileInfo(shim).Length > 32 * 1024) continue;
-                var script = File.ReadAllText(shim);
-                // The official Windows MSI launcher; never pass arbitrary arguments through cmd.exe.
-                if (!Regex.IsMatch(script, "(?i)%~dp0[\\\\/]?\\.\\.[\\\\/]python\\.exe\"?\\s+-IBm\\s+azure\\.cli\\s+%\\*")) continue;
-                var python = Path.GetFullPath(Path.Combine(directory, "..", "python.exe"));
-                if (File.Exists(python)) return (python, ["-IBm", "azure.cli"]);
-            }
-            catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or ArgumentException or NotSupportedException) { }
-        }
-        throw new InvalidOperationException("Azure CLI was not found in a supported installation. Install the official Azure CLI for Windows and its azure-devops extension, then sign in from the command line. Git credentials alone do not authorize Azure repository creation or lookup.");
-    }
-
-    private static async Task<CommandResult> RunAsync(string executable, IReadOnlyList<string> arguments, string folder, CancellationToken token, TimeSpan timeout, bool azure)
+    private static async Task<CommandResult> RunAsync(string executable, IReadOnlyList<string> arguments, string folder, CancellationToken token, TimeSpan timeout,
+        bool interactive = false, string? standardInput = null, bool strictSsh = false)
     {
         token.ThrowIfCancellationRequested();
         using var process = new Process();
@@ -855,21 +792,30 @@ public static class GitRepositoryService
             "GIT_GLOB_PATHSPECS", "GIT_NOGLOB_PATHSPECS", "GIT_ICASE_PATHSPECS", "GIT_QUARANTINE_PATH", "GIT_EXEC_PATH"
         };
         foreach (var key in start.Environment.Keys.ToArray())
-            if (repositoryVariables.Contains(key) || key.StartsWith("GIT_CONFIG", StringComparison.OrdinalIgnoreCase)) start.Environment.Remove(key);
+            if (repositoryVariables.Contains(key) || key.StartsWith("GIT_CONFIG", StringComparison.OrdinalIgnoreCase)
+                || key.StartsWith("GIT_TRACE", StringComparison.OrdinalIgnoreCase) || key.StartsWith("GCM_TRACE", StringComparison.OrdinalIgnoreCase)
+                || key is "GIT_CURL_VERBOSE" or "GIT_SSL_NO_VERIFY" or "GIT_ASKPASS" or "SSH_ASKPASS"
+                    or "GCM_PROVIDER" or "GCM_AUTHORITY" or "GCM_DEBUG" or "GCM_ALLOW_UNSAFE_REMOTES")
+                start.Environment.Remove(key);
         start.Environment["GIT_TERMINAL_PROMPT"] = "0";
-        start.Environment["GCM_INTERACTIVE"] = "Never";
+        start.Environment["GCM_INTERACTIVE"] = interactive ? "true" : "false";
+        start.Environment["GCM_GUI_PROMPT"] = interactive ? "true" : "false";
+        start.Environment["GCM_TRACE"] = "0";
+        start.Environment["GCM_TRACE_SECRETS"] = "0";
+        start.Environment["GCM_TRACE_MSAUTH"] = "0";
+        start.Environment["GCM_ALLOW_UNSAFE_REMOTES"] = "false";
+        start.Environment["GIT_SSL_NO_VERIFY"] = "false";
         start.Environment["GIT_OPTIONAL_LOCKS"] = "0";
         start.Environment["GIT_EDITOR"] = "true";
         start.Environment["GIT_SEQUENCE_EDITOR"] = "true";
         start.Environment["SSH_ASKPASS_REQUIRE"] = "never";
-        start.Environment["LC_ALL"] = "C";
-        if (azure)
+        if (strictSsh)
         {
-            start.Environment["AZ_INSTALLER"] = "MSI";
-            start.Environment["AZURE_EXTENSION_USE_DYNAMIC_INSTALL"] = "no";
-            start.Environment["AZURE_CORE_NO_COLOR"] = "true";
-            start.Environment["PYTHONIOENCODING"] = "utf-8";
+            start.Environment.Remove("GIT_SSH");
+            start.Environment["GIT_SSH_COMMAND"] = "ssh -oBatchMode=yes -oStrictHostKeyChecking=yes -oUpdateHostKeys=no -oAddKeysToAgent=no -oPermitLocalCommand=no -oClearAllForwardings=yes -oRequestTTY=no -oConnectTimeout=20";
+            start.Environment["GIT_SSH_VARIANT"] = "ssh";
         }
+        start.Environment["LC_ALL"] = "C";
         process.StartInfo = start;
         try
         {
@@ -877,40 +823,50 @@ public static class GitRepositoryService
         }
         catch (Exception exception) when (exception is Win32Exception or IOException)
         {
-            throw new InvalidOperationException(azure
-                ? "Azure CLI could not start. Install the official Azure CLI and azure-devops extension, and sign in from the command line."
-                : "Git could not start. Install Git for Windows and make git.exe available on PATH, then reopen this workspace.");
+            throw new InvalidOperationException("Git could not start. Install Git for Windows and make git.exe available on PATH, then reopen this workspace.");
         }
-        process.StandardInput.Close();
         using var linked = CancellationTokenSource.CreateLinkedTokenSource(token);
         linked.CancelAfter(timeout);
         var output = ReadBoundedAsync(process.StandardOutput, linked.Token);
         var error = ReadBoundedAsync(process.StandardError, linked.Token);
         try
         {
+            if (standardInput is not null)
+                await process.StandardInput.WriteAsync(standardInput.AsMemory(), linked.Token).ConfigureAwait(false);
+            process.StandardInput.Close();
             await process.WaitForExitAsync(linked.Token).ConfigureAwait(false);
             var stdout = await output.ConfigureAwait(false);
             var stderr = await error.ConfigureAwait(false);
             if (stdout.Truncated || stderr.Truncated)
-                throw new InvalidOperationException("Git or Azure CLI output exceeded the workspace limit. The command may have completed; refresh and inspect with the command line before retrying.");
+                throw new InvalidOperationException("Git output exceeded the workspace limit. The command may have completed; refresh and inspect with the command line before retrying.");
             var result = new CommandResult(process.ExitCode, stdout.Text, stderr.Text);
-            if (azure && result.ExitCode != 0)
-                return result with { Error = "Azure CLI needs the azure-devops extension and a signed-in account with access to this organization/project. Git credentials alone are insufficient.\n" + result.Error };
             return result;
         }
         catch (OperationCanceledException)
         {
-            TryKillOwnedProcess(process);
+            var processId = process.Id;
+            DateTime? startedAt = null;
+            try { startedAt = process.StartTime.ToUniversalTime(); }
+            catch (Exception) { /* An inaccessible identity must keep recovery paused. */ }
+            var exited = await StopOwnedProcessAsync(process).ConfigureAwait(false);
             await ObserveReadersAsync(output, error).ConfigureAwait(false);
-            throw new OperationCanceledException(token.IsCancellationRequested
-                ? "Operation canceled. Its local or remote outcome may be uncertain; refresh and inspect before retrying."
-                : "The command timed out. Its local or remote outcome may be uncertain; refresh and inspect before retrying.", token);
+            var message = token.IsCancellationRequested
+                ? "Operation canceled. Its local or remote outcome may be uncertain; refresh and inspect before retrying." + (exited ? "" : " The started Git process exit was not confirmed; verify it has stopped before any recovery action.")
+                : "The command timed out. Its local or remote outcome may be uncertain; refresh and inspect before retrying." + (exited ? "" : " The started Git process exit was not confirmed; verify it has stopped before any recovery action.");
+            if (!exited) throw new GitCommandExitUnconfirmedException(message, processId, startedAt, token);
+            throw new OperationCanceledException(message, token);
         }
-        catch (DecoderFallbackException)
+        catch (DecoderFallbackException exception)
         {
-            TryKillOwnedProcess(process);
+            await StopOwnedProcessAsync(process).ConfigureAwait(false);
             await ObserveReadersAsync(output, error).ConfigureAwait(false);
-            throw new InvalidOperationException("Git returned text or filenames that cannot be decoded safely. Inspect this repository with the command line.");
+            throw new InvalidOperationException("Git returned text or filenames that cannot be decoded safely. Verify the interrupted command has stopped and inspect this repository with the command line.", exception);
+        }
+        catch (IOException exception)
+        {
+            await StopOwnedProcessAsync(process).ConfigureAwait(false);
+            await ObserveReadersAsync(output, error).ConfigureAwait(false);
+            throw new InvalidOperationException("Communication with the Git process failed. Verify the interrupted command has stopped and refresh before retrying; no command output was retained in this error.", exception);
         }
     }
 
@@ -930,10 +886,15 @@ public static class GitRepositoryService
         return (text.ToString(), truncated);
     }
 
-    private static void TryKillOwnedProcess(Process process)
+    private static async Task<bool> StopOwnedProcessAsync(Process process)
     {
-        try { if (!process.HasExited) process.Kill(entireProcessTree: true); }
-        catch (Exception exception) when (exception is InvalidOperationException or Win32Exception or NotSupportedException) { }
+        try
+        {
+            if (!process.HasExited) process.Kill(entireProcessTree: true);
+            await process.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(5)).ConfigureAwait(false);
+            return process.HasExited;
+        }
+        catch (Exception exception) when (exception is InvalidOperationException or Win32Exception or NotSupportedException or TimeoutException) { return false; }
     }
 
     private static async Task ObserveReadersAsync(params Task[] readers)
@@ -989,5 +950,5 @@ public static class GitRepositoryService
     }
 
     private static string? NullIfEmpty(string value) => value.Length == 0 ? null : value;
-    private sealed record CommandResult(int ExitCode, string Output, string Error);
+    internal sealed record CommandResult(int ExitCode, string Output, string Error);
 }

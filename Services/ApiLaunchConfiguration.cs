@@ -5,6 +5,8 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using FullStackLauncher.Models;
+using Microsoft.Data.SqlClient;
+using Npgsql;
 
 namespace FullStackLauncher.Services;
 
@@ -12,21 +14,32 @@ namespace FullStackLauncher.Services;
 public sealed class ApiLaunchConfiguration
 {
     private readonly string[] _redactions;
+    private readonly AppliedDatabaseConnection? _singleLocalConnection;
 
     private ApiLaunchConfiguration(ProcessStartInfo startInfo, string environment, string fingerprint,
-        IEnumerable<string> redactions)
+        string? databaseIdentifier, AppliedDatabaseConnection? singleLocalConnection, IEnumerable<string> redactions)
     {
         StartInfo = startInfo;
         Environment = environment;
         Fingerprint = fingerprint;
+        DatabaseIdentifier = databaseIdentifier;
+        _singleLocalConnection = singleLocalConnection;
         _redactions = redactions.Where(value => value.Length > 0).Distinct(StringComparer.Ordinal)
             .OrderByDescending(value => value.Length).ToArray();
     }
 
     public ProcessStartInfo StartInfo { get; }
     public string Environment { get; }
+    /// <summary>A name from explicit launch overrides, never proof of an active database connection.</summary>
+    public string? DatabaseIdentifier { get; }
     // Only used to compare prepared launches in memory; never display or persist this value.
     public string Fingerprint { get; }
+
+    /// <summary>Only an unambiguous Local launch override can identify a discovered connection.</summary>
+    internal bool MatchesAppliedLocalDatabaseConnection(DatabaseConnectionSource source) =>
+        Environment == "Local" && _singleLocalConnection is not null &&
+        source.Provider == _singleLocalConnection.Provider &&
+        source.MatchesNormalizedConnection(_singleLocalConnection.ConnectionString);
 
     /// <summary>Read and validate everything before the caller stops an existing API process.</summary>
     public static ApiLaunchConfiguration Prepare(ServiceProfile profile, string directory, string environment)
@@ -127,8 +140,42 @@ public sealed class ApiLaunchConfiguration
         });
         var fingerprint = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(fingerprintContent)));
         return new ApiLaunchConfiguration(startInfo, environment, fingerprint,
+            ApiDatabaseIdentifier.FromConnectionOverrides(configurationValues),
+            environment == "Local" ? ReadSingleDatabaseConnection(configurationValues,
+                DatabaseConnectionSecurity.ReadProjectProvider(store.ProjectFilePath)) : null,
             FindRedactions(selected.Values).Concat(FindRedactions(configurationValues))
                 .Concat(inactive is null ? [] : FindRedactions(inactive.Values)));
+    }
+
+    private static AppliedDatabaseConnection? ReadSingleDatabaseConnection(IReadOnlyDictionary<string, string> values,
+        DatabaseProvider? projectProvider)
+    {
+        DbConnectionStringBuilder? unique = null;
+        DatabaseProvider? uniqueProvider = null;
+        foreach (var pair in values.Where(pair =>
+                     pair.Key.StartsWith("ConnectionStrings:", StringComparison.OrdinalIgnoreCase)))
+        {
+            try
+            {
+                var provider = DatabaseConnectionSecurity.DetectProvider(pair.Value, projectProvider);
+                if (provider is null) return null;
+                var normalized = DatabaseConnectionSecurity.NormalizeConnectionString(pair.Value, provider.Value);
+                DbConnectionStringBuilder candidate = provider == DatabaseProvider.SqlServer
+                    ? new SqlConnectionStringBuilder(normalized) : new NpgsqlConnectionStringBuilder(normalized);
+                if (unique is not null && (uniqueProvider != provider || !unique.EquivalentTo(candidate))) return null;
+                unique ??= candidate;
+                uniqueProvider ??= provider;
+            }
+            catch (ArgumentException) { return null; }
+        }
+        return unique is null || uniqueProvider is null ? null : new(uniqueProvider.Value, unique.ConnectionString);
+    }
+
+    // Provider and credentials belong to the immutable in-memory launch identity, never settings or logs.
+    private sealed class AppliedDatabaseConnection(DatabaseProvider provider, string connectionString)
+    {
+        public DatabaseProvider Provider { get; } = provider;
+        public string ConnectionString { get; } = connectionString;
     }
 
     public string Redact(string text)

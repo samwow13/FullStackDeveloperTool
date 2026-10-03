@@ -1,0 +1,25 @@
+<Window x:Class="FullStackLauncher.GitReleaseBranchWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="Choose release branch" Width="640" Height="490" MinWidth="440" MinHeight="360"
+        Background="{StaticResource BackgroundBrush}" Foreground="{StaticResource TextBrush}"
+        WindowStartupLocation="CenterOwner" Icon="/Assets/launcher.ico">
+    <Grid Margin="22">
+        <Grid.RowDefinitions><RowDefinition Height="*"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
+        <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
+            <StackPanel>
+                <TextBlock Text="Which branch should supply release changes?" FontSize="22" FontWeight="SemiBold" TextWrapping="Wrap"/>
+                <TextBlock x:Name="Context" TextWrapping="Wrap" Foreground="{StaticResource MutedBrush}" Margin="0,12,0,16"/>
+                <Label Content="_Search remote branches" Target="{Binding ElementName=Search}" Foreground="{StaticResource TextBrush}" Padding="0,0,0,6"/>
+                <TextBox x:Name="Search" TextChanged="Search_Changed" AutomationProperties.Name="Search remote release branches"/>
+                <ListBox x:Name="Branches" DisplayMemberPath="Name" SelectionChanged="Branch_Changed" Height="165" Margin="0,10,0,12" Background="#111923" BorderBrush="{StaticResource BorderBrush}" BorderThickness="1" AutomationProperties.Name="Branches currently on selected remote"/>
+                <TextBlock Text="Choose master, main, or your release branch. This is the source to merge into your current local branch. Merging does not push. Use Commit all &amp; push separately to name a destination branch and publish your work. You can change this saved source in the Git workspace." TextWrapping="Wrap" Foreground="{StaticResource MutedBrush}"/>
+                <TextBlock x:Name="EmptyNotice" Text="No branches match. Change the search, or cancel and check the remote." TextWrapping="Wrap" Foreground="#FFBC8B" Margin="0,10,0,0" Visibility="Collapsed"/>
+            </StackPanel>
+        </ScrollViewer>
+        <StackPanel Grid.Row="1" Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,18,0,0">
+            <Button Content="Cancel" IsCancel="True" Margin="0,0,8,0"/>
+            <Button x:Name="Submit" Content="Use this release branch" Click="Submit_Click" Style="{StaticResource PrimaryButton}" IsEnabled="False"/>
+        </StackPanel>
+    </Grid>
+</Window>

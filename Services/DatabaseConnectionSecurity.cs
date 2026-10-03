@@ -4,14 +4,137 @@ using System.Net;
 using System.Text.RegularExpressions;
 using System.Xml;
 using System.Xml.Linq;
+using FullStackLauncher.Models;
+using Microsoft.Data.SqlClient;
 using Npgsql;
 
 namespace FullStackLauncher.Services;
 
-/// <summary>Remote PostgreSQL connections must authenticate their server, including its hostname.</summary>
+/// <summary>Remote database connections must authenticate their server, including its hostname.</summary>
 public static class DatabaseConnectionSecurity
 {
     public const string RemoteTlsNotice = "Remote PostgreSQL connections use SSL Mode=VerifyFull and validate the server certificate and hostname. Install the server's trusted CA or set Root Certificate if needed; certificate checks cannot be disabled.";
+    public const string SqlServerTlsNotice = "Remote SQL Server connections require encryption and validate the server certificate and hostname. Install your organization's trusted CA and use the server name on its certificate; certificate checks cannot be disabled.";
+
+    public static string NormalizeConnectionString(string connectionString, DatabaseProvider provider) => provider switch
+    {
+        DatabaseProvider.PostgreSql => NormalizePostgresConnectionString(connectionString),
+        DatabaseProvider.SqlServer => NormalizeSqlServerConnectionString(connectionString),
+        _ => throw new ArgumentException("Choose a supported database provider.")
+    };
+
+    /// <summary>Only explicit provider keywords or a single known project provider resolve common-keyword strings.</summary>
+    public static DatabaseProvider? DetectProvider(string connectionString, DatabaseProvider? projectProvider = null)
+    {
+        try
+        {
+            var values = new DbConnectionStringBuilder { ConnectionString = connectionString };
+            var keys = values.Keys.Cast<string>().Select(Compact).ToHashSet(StringComparer.Ordinal);
+            var postgres = keys.Contains("host");
+            var sqlServer = keys.Overlaps(["initialcatalog", "integratedsecurity", "trustedconnection", "authentication",
+                "multipleactiveresultsets", "applicationintent", "attachdbfilename", "userinstance"]);
+            if (postgres && sqlServer) return null;
+            if (postgres) return DatabaseProvider.PostgreSql;
+            if (sqlServer) return DatabaseProvider.SqlServer;
+            // Data Source alone also names SQLite files; Server/Database/User ID are shared by providers.
+            if (projectProvider is not null && (keys.Contains("server") || keys.Contains("datasource")))
+                return projectProvider;
+            return null;
+        }
+        catch (ArgumentException) { return null; }
+    }
+
+    public static DatabaseProvider? ReadProjectProvider(string projectFilePath)
+    {
+        try
+        {
+            using var reader = XmlReader.Create(projectFilePath, new XmlReaderSettings
+            { DtdProcessing = DtdProcessing.Prohibit, XmlResolver = null, MaxCharactersInDocument = 1024 * 1024 });
+            var names = XDocument.Load(reader).Descendants().Where(element => element.Name.LocalName == "PackageReference")
+                .Select(element => (string?)element.Attribute("Include") ?? (string?)element.Attribute("Update") ?? "").ToArray();
+            var postgres = names.Any(name => name.Equals("Npgsql", StringComparison.OrdinalIgnoreCase)
+                || name.StartsWith("Npgsql.EntityFrameworkCore.PostgreSQL", StringComparison.OrdinalIgnoreCase));
+            var sqlServer = names.Any(name => name.Equals("Microsoft.Data.SqlClient", StringComparison.OrdinalIgnoreCase)
+                || name.Equals("System.Data.SqlClient", StringComparison.OrdinalIgnoreCase)
+                || name.Equals("Microsoft.EntityFrameworkCore.SqlServer", StringComparison.OrdinalIgnoreCase));
+            if (names.Any(name => name.Contains("Sqlite", StringComparison.OrdinalIgnoreCase)
+                || name.Contains("SQLite", StringComparison.OrdinalIgnoreCase)
+                || name.Contains("MySql", StringComparison.OrdinalIgnoreCase)
+                || name.StartsWith("Oracle.", StringComparison.OrdinalIgnoreCase))) return null;
+            return postgres == sqlServer ? null : postgres ? DatabaseProvider.PostgreSql : DatabaseProvider.SqlServer;
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or XmlException) { return null; }
+    }
+
+    public static string NormalizeSqlServerConnectionString(string connectionString)
+    {
+        try
+        {
+            var builder = new SqlConnectionStringBuilder(connectionString);
+            if (string.IsNullOrWhiteSpace(builder.DataSource) || builder.DataSource.Any(char.IsControl)
+                || !string.IsNullOrEmpty(builder.AttachDBFilename) || builder.UserInstance
+                || !string.IsNullOrEmpty(builder.FailoverPartner) || !string.IsNullOrEmpty(builder.HostNameInCertificate)
+                || !string.IsNullOrEmpty(builder.ServerCertificate)) throw new ArgumentException();
+            // Pin network connections to TCP. Aliased named pipes/shared memory and attached files do not
+            // provide the same explicit remote endpoint and hostname-validation contract.
+            builder.DataSource = NormalizeSqlServerEndpoint(builder.DataSource);
+            if (!IsSqlServerLoopback(builder.DataSource))
+            {
+                if (builder.Encrypt != SqlConnectionEncryptOption.Strict)
+                    builder.Encrypt = SqlConnectionEncryptOption.Mandatory;
+                builder.TrustServerCertificate = false;
+            }
+            builder.PersistSecurityInfo = false;
+            builder.ConnectTimeout = 15;
+            builder.CommandTimeout = 30;
+            builder.ConnectRetryCount = 0;
+            builder.Pooling = false;
+            builder.Enlist = false;
+            return builder.ConnectionString;
+        }
+        catch (Exception ex) when (ex is ArgumentException or NotSupportedException or FormatException or OverflowException)
+        {
+            throw new ArgumentException("The SQL Server connection is invalid or uses unsupported security options. Use a server name, optional named instance or TCP port, and a trusted certificate for remote connections. Attached files, LocalDB, failover partners and certificate-name overrides are not supported.");
+        }
+    }
+
+    public static bool IsSqlServerLoopback(string dataSource)
+    {
+        try
+        {
+            var endpoint = NormalizeSqlServerEndpoint(dataSource)[4..];
+            var host = endpoint.Split('\\')[0].Split(',')[0];
+            return IsLoopbackHost(host);
+        }
+        catch (ArgumentException) { return false; }
+    }
+
+    private static string NormalizeSqlServerEndpoint(string value)
+    {
+        var endpoint = value.Trim();
+        if (endpoint.StartsWith("tcp:", StringComparison.OrdinalIgnoreCase)) endpoint = endpoint[4..];
+        if (endpoint.Length == 0 || endpoint.Any(char.IsControl) || endpoint.Contains('/')
+            || endpoint.StartsWith("(localdb)", StringComparison.OrdinalIgnoreCase)
+            || endpoint.StartsWith("np:", StringComparison.OrdinalIgnoreCase)
+            || endpoint.StartsWith("lpc:", StringComparison.OrdinalIgnoreCase)
+            || endpoint.Count(character => character == ',') > 1
+            || endpoint.Count(character => character == '\\') > 1) throw new ArgumentException();
+        var parts = endpoint.Split(',');
+        if (parts.Length == 2 && (!int.TryParse(parts[1], out var port) || port is < 1 or > 65535))
+            throw new ArgumentException();
+        var addressParts = parts[0].Split('\\');
+        var host = addressParts[0].Trim();
+        if (host is "." || host.Equals("(local)", StringComparison.OrdinalIgnoreCase)) host = "localhost";
+        if (string.IsNullOrWhiteSpace(host) || !(host.StartsWith('[') && host.EndsWith(']')
+                && IPAddress.TryParse(host[1..^1], out _))
+            && host.Any(character => !char.IsLetterOrDigit(character) && character is not '-' and not '_' and not '.'))
+            throw new ArgumentException();
+        if (addressParts.Length == 2 && (string.IsNullOrWhiteSpace(addressParts[1])
+            || addressParts[1].Any(character => !char.IsLetterOrDigit(character) && character is not '_' and not '-' and not '$')))
+            throw new ArgumentException();
+        return "tcp:" + host + (addressParts.Length == 2 ? "\\" + addressParts[1] : "")
+            + (parts.Length == 2 ? "," + parts[1].Trim() : "");
+    }
 
     public static string NormalizePostgresConnectionString(string connectionString, bool useNpgsql10 = true)
     {

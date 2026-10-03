@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>FullStack Launcher Page Context</title>
+  <style>
+    body { max-width: 42rem; margin: 2rem auto; padding: 0 1rem; font: 15px/1.5 system-ui, sans-serif; color: #e9f1f8; background: #141d29; }
+    h1 { font-size: 1.4rem; margin-bottom: .5rem; }
+    p { color: #c1d0dc; }
+    label { display: block; font-weight: 600; margin: 1.3rem 0 .35rem; }
+    input { box-sizing: border-box; width: 100%; padding: .7rem; border-radius: .4rem; border: 1px solid #8294a3; color: #fff; background: #243448; font: inherit; }
+    button { padding: .6rem .9rem; margin: .9rem .45rem 0 0; border: 0; border-radius: .4rem; color: #fff; background: #286f64; font: inherit; cursor: pointer; }
+    button.secondary { background: #3a4c63; }
+    button:focus-visible, input:focus-visible { outline: 3px solid #79d5c5; outline-offset: 2px; }
+    #status { min-height: 1.6rem; }
+  </style>
+</head>
+<body>
+  <h1>FullStack Launcher Page Context</h1>
+  <p>Paste pairing code from Notes &amp; queue. This extension reads a tab only when Snip requests it. Captured source stays in your local note until you choose to include it in a prompt.</p>
+  <form id="pairingForm">
+    <label for="pairingCode">Pairing code</label>
+    <input id="pairingCode" type="password" inputmode="text" autocomplete="off" spellcheck="false" placeholder="64 hexadecimal characters" aria-describedby="status">
+    <button type="submit">Save pairing</button>
+    <button id="forget" class="secondary" type="button">Forget pairing</button>
+  </form>
+  <p id="status" role="status" aria-live="polite"></p>
+  <script src="options.js"></script>
+</body>
+</html>

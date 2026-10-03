@@ -8,8 +8,14 @@
   </PropertyGroup>
   <ItemGroup>
     <Compile Include="Program.cs" />
+    <Compile Include="CrmProxyLinkChecks.cs" />
+    <Compile Include="ApiPortEditPolicyChecks.cs" />
     <Compile Include="..\..\Models\LauncherSettings.cs" Link="Models\LauncherSettings.cs" />
     <Compile Include="..\..\Services\SettingsStore.cs" Link="Services\SettingsStore.cs" />
+    <Compile Include="..\..\Services\SensitiveDataProtection.cs" Link="Services\SensitiveDataProtection.cs" />
+    <Compile Include="..\..\Services\AngularDevProxyConfiguration.cs" Link="Services\AngularDevProxyConfiguration.cs" />
+    <Compile Include="..\..\Services\ApiPortEditPolicy.cs" Link="Services\ApiPortEditPolicy.cs" />
     <Compile Include="..\..\Services\DeveloperToolLauncher.cs" Link="Services\DeveloperToolLauncher.cs" />
+    <Content Include="Fixtures\CrmAngular\*.json" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 </Project>

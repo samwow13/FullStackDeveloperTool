@@ -1,7 +1,11 @@
+using System.Data.Common;
+using Microsoft.Data.SqlClient;
 using Npgsql;
 using FullStackLauncher.Services;
 
 namespace FullStackLauncher.Models;
+
+public enum DatabaseProvider { PostgreSql, SqlServer }
 
 public sealed class DatabaseConnectionSource
 {
@@ -11,22 +15,49 @@ public sealed class DatabaseConnectionSource
     public string Label { get; }
     public string Server { get; }
     public string DefaultDatabase { get; }
+    public DatabaseProvider Provider { get; }
+    public string ProviderLabel => Provider == DatabaseProvider.SqlServer ? "SQL Server" : "PostgreSQL";
+    public bool IsLoopback { get; }
+    public bool IsRemoteOnly { get; }
+    public bool IsSingleHost { get; }
 
-    public DatabaseConnectionSource(string id, string projectId, string label, string connectionString)
+    public DatabaseConnectionSource(string id, string projectId, string label, string connectionString,
+        DatabaseProvider? provider = null)
     {
-        var securedConnection = DatabaseConnectionSecurity.NormalizePostgresConnectionString(connectionString);
-        var builder = new NpgsqlConnectionStringBuilder(securedConnection);
-        if (string.IsNullOrWhiteSpace(builder.Host)) throw new ArgumentException("A PostgreSQL host is required.");
+        Provider = provider ?? DatabaseConnectionSecurity.DetectProvider(connectionString)
+            ?? throw new ArgumentException("Choose PostgreSQL or SQL Server for this connection. Its database provider could not be determined safely.");
+        var securedConnection = DatabaseConnectionSecurity.NormalizeConnectionString(connectionString, Provider);
         Id = id;
         ProjectId = projectId;
-        Label = DatabaseConnectionSecurity.IsLoopbackOnly(builder.Host) ? label : $"{label} · TLS VerifyFull";
-        Server = $"{builder.Host}:{builder.Port}";
-        DefaultDatabase = string.IsNullOrEmpty(builder.Database) ? builder.Username ?? "postgres" : builder.Database;
+        if (Provider == DatabaseProvider.PostgreSql)
+        {
+            var builder = new NpgsqlConnectionStringBuilder(securedConnection);
+            var hosts = builder.Host!.Split(',');
+            IsSingleHost = hosts.Length == 1;
+            IsLoopback = DatabaseConnectionSecurity.IsLoopbackOnly(builder.Host);
+            IsRemoteOnly = hosts.All(host => !string.IsNullOrWhiteSpace(host) &&
+                !DatabaseConnectionSecurity.IsLoopbackOnly(host));
+            Label = $"{label} · {ProviderLabel}" + (IsLoopback ? "" : " · TLS VerifyFull");
+            Server = $"{builder.Host}:{builder.Port}";
+            DefaultDatabase = string.IsNullOrEmpty(builder.Database) ? builder.Username ?? "postgres" : builder.Database;
+        }
+        else
+        {
+            var builder = new SqlConnectionStringBuilder(securedConnection);
+            IsSingleHost = true;
+            IsLoopback = DatabaseConnectionSecurity.IsSqlServerLoopback(builder.DataSource);
+            IsRemoteOnly = !IsLoopback;
+            Label = $"{label} · {ProviderLabel}" + (IsLoopback ? "" : " · Verified TLS");
+            Server = builder.DataSource;
+            DefaultDatabase = builder.InitialCatalog;
+        }
         _connectionString = securedConnection;
     }
 
     internal NpgsqlConnection CreateConnection(string? database = null)
     {
+        if (Provider != DatabaseProvider.PostgreSql)
+            throw new InvalidOperationException("This operation supports PostgreSQL connections only.");
         var builder = new NpgsqlConnectionStringBuilder(_connectionString)
         {
             Database = database ?? DefaultDatabase,
@@ -40,6 +71,40 @@ public sealed class DatabaseConnectionSource
             ApplicationName = "Full Stack Launcher schema browser"
         };
         return new NpgsqlConnection(builder.ConnectionString);
+    }
+
+    internal DbConnection CreateDbConnection(string? database = null) => Provider == DatabaseProvider.SqlServer
+        ? CreateSqlServerConnection(database) : CreateConnection(database);
+
+    internal SqlConnection CreateSqlServerConnection(string? database = null)
+    {
+        if (Provider != DatabaseProvider.SqlServer)
+            throw new InvalidOperationException("This operation supports SQL Server connections only.");
+        var builder = new SqlConnectionStringBuilder(_connectionString)
+        {
+            InitialCatalog = database ?? DefaultDatabase,
+            ConnectTimeout = 15,
+            CommandTimeout = 30,
+            ConnectRetryCount = 0,
+            Pooling = false,
+            PersistSecurityInfo = false,
+            Enlist = false,
+            ApplicationName = "Full Stack Launcher schema browser"
+        };
+        return new SqlConnection(builder.ConnectionString);
+    }
+
+    /// <summary>Compares the full normalized connection, including credentials, without exposing it.</summary>
+    internal bool MatchesNormalizedConnection(string normalizedConnection)
+    {
+        try
+        {
+            var applied = DatabaseConnectionSecurity.NormalizeConnectionString(normalizedConnection, Provider);
+            return Provider == DatabaseProvider.SqlServer
+                ? new SqlConnectionStringBuilder(_connectionString).EquivalentTo(new SqlConnectionStringBuilder(applied))
+                : new NpgsqlConnectionStringBuilder(_connectionString).EquivalentTo(new NpgsqlConnectionStringBuilder(applied));
+        }
+        catch (ArgumentException) { return false; }
     }
 
     public override string ToString() => Label;

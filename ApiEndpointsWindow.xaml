@@ -1,0 +1,130 @@
+<Window x:Class="FullStackLauncher.ApiEndpointsWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="API endpoints" Width="1080" Height="790" MinWidth="720" MinHeight="560"
+        WindowStartupLocation="CenterOwner" ResizeMode="CanResize" Icon="/Assets/launcher.ico"
+        Background="{StaticResource BackgroundBrush}" Foreground="{StaticResource TextBrush}"
+        Loaded="OnLoaded" Closed="OnClosed">
+    <Window.Resources>
+        <Style TargetType="DataGrid">
+            <Setter Property="Background" Value="{StaticResource SurfaceBrush}"/>
+            <Setter Property="Foreground" Value="{StaticResource TextBrush}"/>
+            <Setter Property="RowBackground" Value="{StaticResource SurfaceBrush}"/>
+            <Setter Property="AlternatingRowBackground" Value="{StaticResource CardBrush}"/>
+            <Setter Property="BorderBrush" Value="{StaticResource BorderBrush}"/>
+            <Setter Property="HorizontalGridLinesBrush" Value="{StaticResource BorderBrush}"/>
+            <Setter Property="GridLinesVisibility" Value="Horizontal"/>
+            <Setter Property="HeadersVisibility" Value="Column"/>
+            <Setter Property="AutoGenerateColumns" Value="False"/>
+            <Setter Property="IsReadOnly" Value="True"/>
+            <Setter Property="CanUserAddRows" Value="False"/>
+            <Setter Property="CanUserDeleteRows" Value="False"/>
+            <Setter Property="CanUserReorderColumns" Value="False"/>
+            <Setter Property="SelectionMode" Value="Single"/>
+            <Setter Property="EnableRowVirtualization" Value="True"/>
+            <Setter Property="EnableColumnVirtualization" Value="True"/>
+        </Style>
+        <Style TargetType="DataGridColumnHeader">
+            <Setter Property="Background" Value="#29374B"/>
+            <Setter Property="Foreground" Value="{StaticResource TextBrush}"/>
+            <Setter Property="Padding" Value="10,8"/>
+            <Setter Property="FontWeight" Value="SemiBold"/>
+            <Setter Property="BorderBrush" Value="{StaticResource BorderBrush}"/>
+            <Setter Property="BorderThickness" Value="0,0,1,1"/>
+        </Style>
+        <Style TargetType="DataGridCell">
+            <Setter Property="Padding" Value="8,6"/>
+            <Setter Property="Foreground" Value="{StaticResource TextBrush}"/>
+            <Setter Property="BorderThickness" Value="0"/>
+            <Style.Triggers>
+                <Trigger Property="IsSelected" Value="True"><Setter Property="Background" Value="#2B4B51"/><Setter Property="Foreground" Value="{StaticResource TextBrush}"/></Trigger>
+            </Style.Triggers>
+        </Style>
+        <Style TargetType="TabItem">
+            <Setter Property="Foreground" Value="{StaticResource TextBrush}"/>
+            <Setter Property="Background" Value="{StaticResource CardBrush}"/>
+            <Setter Property="Padding" Value="12,7"/>
+            <Setter Property="Template"><Setter.Value>
+                <ControlTemplate TargetType="TabItem">
+                    <Border x:Name="Tab" Background="{TemplateBinding Background}" BorderBrush="{StaticResource BorderBrush}" BorderThickness="1" Padding="{TemplateBinding Padding}">
+                        <ContentPresenter ContentSource="Header" TextElement.Foreground="{TemplateBinding Foreground}"/>
+                    </Border>
+                    <ControlTemplate.Triggers>
+                        <Trigger Property="IsSelected" Value="True"><Setter TargetName="Tab" Property="Background" Value="#2B4B51"/><Setter Property="Foreground" Value="{StaticResource AccentBrush}"/></Trigger>
+                    </ControlTemplate.Triggers>
+                </ControlTemplate>
+            </Setter.Value></Setter>
+        </Style>
+    </Window.Resources>
+    <Grid Margin="20">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="*"/>
+            <RowDefinition Height="Auto"/><RowDefinition Height="Auto"/>
+        </Grid.RowDefinitions>
+        <ScrollViewer Grid.Row="0" MaxHeight="290" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled" Margin="0,0,0,8">
+        <Grid>
+        <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
+        <StackPanel Margin="0,0,0,12">
+            <TextBlock Text="API ENDPOINT INVENTORY" Foreground="{StaticResource AccentBrush}" FontSize="10" FontWeight="Bold"/>
+            <TextBlock x:Name="ServiceHeading" FontSize="22" FontWeight="SemiBold" Margin="0,4,0,3" TextWrapping="Wrap"/>
+            <TextBlock x:Name="ProjectHeading" Foreground="{StaticResource MutedBrush}" TextWrapping="Wrap"/>
+        </StackPanel>
+        <WrapPanel Grid.Row="1" Margin="0,0,0,8">
+            <Button x:Name="SourceButton" Content="Scan _source" Click="ScanSourceClick" Margin="0,0,8,6" Padding="10,7" ToolTip="Read attributed controller declarations in this service folder without starting the API."/>
+            <Button x:Name="OpenApiButton" Content="OpenAPI _JSON…" Click="OpenApiClick" Margin="0,0,8,6" Padding="10,7" ToolTip="Read a local OpenAPI 3 or Swagger 2 JSON document. No URL is requested."/>
+            <Button x:Name="RefreshButton" Content="_Refresh" Click="RefreshClick" Margin="0,0,8,6" Padding="10,7" ToolTip="Read the selected source again to include newly added endpoints."/>
+            <Button x:Name="CancelButton" Content="_Cancel scan" Click="CancelClick" IsEnabled="False" Margin="0,0,8,6" Padding="10,7"/>
+        </WrapPanel>
+        <StackPanel Grid.Row="2" Margin="0,0,0,10">
+            <TextBlock x:Name="StatusText" Foreground="{StaticResource AccentBrush}" TextWrapping="Wrap" AutomationProperties.LiveSetting="Polite"/>
+            <TextBlock x:Name="SourceText" Foreground="{StaticResource MutedBrush}" TextWrapping="Wrap" FontSize="11" Margin="0,5,0,0"/>
+            <TextBlock x:Name="CountsText" FontSize="19" FontWeight="SemiBold" TextWrapping="Wrap" Margin="0,8,0,4"/>
+            <TextBlock x:Name="VerbsText" Foreground="{StaticResource AccentBrush}" FontWeight="SemiBold" TextWrapping="Wrap"/>
+            <TextBlock Text="Counts unique HTTP method + route-template pairs; repeated declarations merge. ALL means an unconstrained method. Controller action methods are a separate count."
+                       Foreground="{StaticResource MutedBrush}" TextWrapping="Wrap" FontSize="11" Margin="0,5,0,0"/>
+        </StackPanel>
+        <Border x:Name="WarningsPanel" Grid.Row="3" Visibility="Collapsed" BorderBrush="#6B5633" Background="#302A20" BorderThickness="1" CornerRadius="6" Padding="9" Margin="0,0,0,10">
+            <ScrollViewer MaxHeight="95" VerticalScrollBarVisibility="Auto"><TextBlock x:Name="WarningsText" Foreground="#FFD27A" TextWrapping="Wrap"/></ScrollViewer>
+        </Border>
+        </Grid>
+        </ScrollViewer>
+        <WrapPanel Grid.Row="1" Margin="0,0,0,8">
+            <Label Content="_Verb" Target="{Binding ElementName=VerbFilter}" Foreground="{StaticResource TextBrush}" Padding="0,5,8,0"/>
+            <ComboBox x:Name="VerbFilter" Width="128" SelectionChanged="FilterChanged" Margin="0,0,16,0" AutomationProperties.Name="HTTP method filter"/>
+            <Label Content="_Find" Target="{Binding ElementName=SearchText}" Foreground="{StaticResource TextBrush}" Padding="0,5,8,0"/>
+            <TextBox x:Name="SearchText" Width="260" TextChanged="SearchChanged" AutomationProperties.Name="Find route or controller action" ToolTip="Filter by route, controller, action or source filename."/>
+        </WrapPanel>
+        <TabControl x:Name="DetailsTabs" Grid.Row="2" Background="{StaticResource SurfaceBrush}" Foreground="{StaticResource TextBrush}" BorderBrush="{StaticResource BorderBrush}">
+            <TabItem Header="Endpoint operations">
+                <Grid>
+                    <DataGrid x:Name="OperationsGrid" SelectionChanged="OperationSelected" AutomationProperties.Name="API endpoint operations">
+                        <DataGrid.Columns>
+                            <DataGridTextColumn Header="HTTP method" Binding="{Binding HttpMethod, Mode=OneWay}" Width="110"/>
+                            <DataGridTextColumn Header="Route template" Binding="{Binding Route, Mode=OneWay}" Width="2*"/>
+                            <DataGridTextColumn Header="Declared by" Binding="{Binding OriginSummary, Mode=OneWay}" Width="*"/>
+                        </DataGrid.Columns>
+                    </DataGrid>
+                    <TextBlock x:Name="EmptyText" IsHitTestVisible="False" Text="Scanning source…" Foreground="{StaticResource MutedBrush}" HorizontalAlignment="Center" VerticalAlignment="Center" TextWrapping="Wrap" Margin="20"/>
+                </Grid>
+            </TabItem>
+            <TabItem Header="Controllers / tags">
+                <DataGrid x:Name="ControllersGrid" AutomationProperties.Name="API controller breakdown">
+                    <DataGrid.Columns>
+                        <DataGridTextColumn Header="Controller / OpenAPI tag" Binding="{Binding Name, Mode=OneWay}" Width="*"/>
+                        <DataGridTextColumn Header="Resolved action methods" Binding="{Binding ActionCount, Mode=OneWay}" Width="170"/>
+                        <DataGridTextColumn Header="Operations" Binding="{Binding OperationCount, Mode=OneWay}" Width="100"/>
+                        <DataGridTextColumn Header="HTTP method counts" Binding="{Binding Verbs, Mode=OneWay}" Width="2*"/>
+                    </DataGrid.Columns>
+                </DataGrid>
+            </TabItem>
+        </TabControl>
+        <TextBox x:Name="SelectedDetails" Grid.Row="3" IsReadOnly="True" TextWrapping="Wrap" Height="64" VerticalScrollBarVisibility="Auto" Margin="0,10,0,0" AutomationProperties.Name="Selected endpoint source details"/>
+        <Grid Grid.Row="4" Margin="0,12,0,0">
+            <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+            <TextBlock Text="Static source declarations and local metadata only. Refresh after changes; runtime registration and environment can differ."
+                       Foreground="{StaticResource MutedBrush}" FontSize="11" TextWrapping="Wrap" VerticalAlignment="Center" Margin="0,0,12,0"/>
+            <Button x:Name="CopyButton" Grid.Column="1" Content="Copy _inventory" Click="CopyClick" IsEnabled="False" Margin="0,0,8,0" Padding="10,7"/>
+            <Button Grid.Column="2" Content="Close" Click="CloseClick" Padding="10,7"/>
+        </Grid>
+    </Grid>
+</Window>

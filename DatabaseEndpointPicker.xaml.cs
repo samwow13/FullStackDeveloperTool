@@ -53,7 +53,7 @@ public partial class DatabaseEndpointPicker : UserControl
         _loading?.Cancel();
         DatabasePicker.ItemsSource = null;
         DatabasePicker.Text = Source?.DefaultDatabase ?? "";
-        ServerLabel.Text = Source?.Server ?? "Configured sources and saved connections";
+        ServerLabel.Text = Source is { } source ? $"{source.ProviderLabel} · {source.Server}" : "Configured sources and saved connections";
         ServerLabel.ToolTip = ServerLabel.Text;
         Notice.Text = "Enter a database name or load the databases visible to this role.";
         EndpointChanged?.Invoke(this, EventArgs.Empty);
@@ -69,16 +69,16 @@ public partial class DatabaseEndpointPicker : UserControl
         Notice.Text = "Loading databases…";
         try
         {
-            var catalog = await PostgresSchemaReader.ReadDatabasesAsync(source, request.Token);
+            var catalog = await DatabaseSchemaReader.ReadDatabasesAsync(source, request.Token);
             request.Token.ThrowIfCancellationRequested();
             // Keep a manually entered database even when catalog discovery is restricted.
             var currentDatabase = Database;
             DatabasePicker.ItemsSource = catalog.Databases;
-            DatabasePicker.Text = currentDatabase;
+            DatabasePicker.Text = string.IsNullOrWhiteSpace(currentDatabase) ? catalog.CurrentDatabase : currentDatabase;
             Notice.Text = catalog.Warning ?? $"{catalog.Databases.Count} databases visible to this role.";
         }
         catch (OperationCanceledException) { if (ReferenceEquals(Source, source)) Notice.Text = "Database listing canceled or timed out."; }
-        catch (Exception ex) { if (ReferenceEquals(Source, source)) Notice.Text = PostgresSchemaReader.DescribeError(ex); }
+        catch (Exception ex) { if (ReferenceEquals(Source, source)) Notice.Text = DatabaseSchemaReader.DescribeError(ex); }
         finally { if (ReferenceEquals(_loading, request)) { _loading = null; LoadButton.IsEnabled = true; } }
     }
 

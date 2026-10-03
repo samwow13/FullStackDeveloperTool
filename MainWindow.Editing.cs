@@ -87,6 +87,38 @@ public partial class MainWindow
     private static bool PortWasEdited(ViewModels.ServiceViewModel service) =>
         service.DraftPort.Trim() != (ServicePortConfiguration.GetPort(service.Profile)?.ToString() ?? "");
 
+    private ViewModels.ServiceViewModel[] DependentAngularFrontends(ViewModels.ServiceViewModel api)
+    {
+        var profiles = Services.Select(service => service.Profile).ToArray();
+        var dependentIds = ApiPortEditPolicy.DependentAngularFrontends(api.Profile, profiles)
+            .Select(profile => profile.Id).ToHashSet(StringComparer.OrdinalIgnoreCase);
+        return Services.Where(service => dependentIds.Contains(service.Profile.Id)).ToArray();
+    }
+
+    private void RefreshLinkedPortAvailability()
+    {
+        var services = Services.ToArray();
+        var profiles = services.Select(service => service.Profile).ToArray();
+        var byId = services.ToDictionary(service => service.Profile.Id, StringComparer.OrdinalIgnoreCase);
+        foreach (var api in Services)
+        {
+            var frontends = DependentAngularFrontends(api);
+            var explicitlyLinked = frontends.Any(frontend =>
+                string.Equals(frontend.Profile.ApiTargetServiceId, api.Profile.Id, StringComparison.OrdinalIgnoreCase));
+            var blockingProfile = ApiPortEditPolicy.FirstBlockingService(api.Profile, profiles,
+                profile => byId[profile.Id].IsStoppedForPortEdit);
+            var frontendBlocker = blockingProfile is not null &&
+                !blockingProfile.Id.Equals(api.Profile.Id, StringComparison.OrdinalIgnoreCase)
+                    ? blockingProfile : null;
+            var frontendNames = string.Join(", ", frontends.Select(frontend => frontend.Name));
+            api.SetPortEditDependencyStatus(frontendBlocker is null ? null
+                    : $"Stop Angular frontend {frontendBlocker.Name} and wait for a successful process check before changing this API port.",
+                frontends.Length == 0 ? null : explicitlyLinked
+                    ? $"Linked to {frontendNames}. Saving a new API port updates the development proxy. Start the API and linked frontends afterward."
+                    : $"Automatic port matching may update development proxies for {frontendNames}. Start affected services afterward.");
+        }
+    }
+
     private async Task<bool> SaveProjectEditsAsync()
     {
         if (!CanSaveProjectEdits || SelectedProject is not { } selected) return false;
@@ -117,15 +149,25 @@ public partial class MainWindow
         try
         {
             var portChanges = services.Where(PortWasEdited).ToArray();
-            // Use fresh evidence before changing endpoint detection for a stopped service.
-            await Task.WhenAll(portChanges.Select(service => service.Runner.RefreshForProfileEditAsync()));
+            var dependentFrontends = portChanges.SelectMany(DependentAngularFrontends)
+                .Distinct().ToArray();
+            // Every frontend that may receive a development proxy update must be stopped.
+            var inspected = portChanges.Concat(dependentFrontends).Distinct().ToArray();
+            await Task.WhenAll(inspected.Select(service => service.Runner.RefreshForProfileEditAsync()));
             if (!ReferenceEquals(selected, SelectedProject) || !services.SequenceEqual(Services))
                 throw new InvalidOperationException("The selected project changed. Reopen editing before saving.");
+            foreach (var service in inspected) service.Update();
+            var profiles = services.Select(service => service.Profile).ToArray();
+            var byId = services.ToDictionary(service => service.Profile.Id, StringComparer.OrdinalIgnoreCase);
             foreach (var service in portChanges)
             {
-                service.Update();
-                if (!service.IsStoppedForPortEdit)
-                    throw new InvalidOperationException($"Stop {service.Name} before changing its port. Your edits are still here.");
+                var blocker = ApiPortEditPolicy.FirstBlockingService(service.Profile, profiles,
+                    profile => byId[profile.Id].IsStoppedForPortEdit);
+                if (blocker is null) continue;
+                var blockerName = byId[blocker.Id].Name;
+                if (blocker.Id.Equals(service.Profile.Id, StringComparison.OrdinalIgnoreCase))
+                    throw new InvalidOperationException($"Stop {blockerName} before changing its port. Your edits are still here.");
+                throw new InvalidOperationException($"Stop Angular frontend {blockerName} before changing its API port. Your edits are still here.");
             }
 
             // Clone at save time to preserve unrelated selections/preferences saved while editing.
@@ -170,7 +212,7 @@ public partial class MainWindow
                 ? $"Saved {selected.Name}. Updated ports will be used on the next start."
                 : $"Saved {selected.Name}.";
             if (proxyChanges.UpdatedFileCount > 0)
-                Notice += " Angular's local API proxy was updated. Restart the frontend if it is running to load the new API port.";
+                Notice += " Angular's local API proxy was updated. Start the linked frontend to load the new API port.";
             EditModeToggle.Focus();
             return true;
         }

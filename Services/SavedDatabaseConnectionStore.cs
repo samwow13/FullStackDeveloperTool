@@ -5,7 +5,6 @@ using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using FullStackLauncher.Models;
-using Npgsql;
 
 namespace FullStackLauncher.Services;
 
@@ -13,11 +12,13 @@ namespace FullStackLauncher.Services;
 public sealed class SavedDatabaseConnectionStore
 {
     private const int MaximumFileBytes = 4 * 1024 * 1024;
-    private static readonly byte[] Header = Encoding.ASCII.GetBytes("FSLDBC01");
+    private static readonly byte[] LegacyHeader = Encoding.ASCII.GetBytes("FSLDBC01");
+    private static readonly byte[] Header = Encoding.ASCII.GetBytes("FSLDBC02");
     private static readonly JsonSerializerOptions JsonOptions = new()
     {
         PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
-        UnmappedMemberHandling = JsonUnmappedMemberHandling.Disallow
+        UnmappedMemberHandling = JsonUnmappedMemberHandling.Disallow,
+        Converters = { new JsonStringEnumConverter<DatabaseProvider>(allowIntegerValues: false) }
     };
 
     public string StorePath { get; }
@@ -45,12 +46,15 @@ public sealed class SavedDatabaseConnectionStore
     }
 
     /// <summary>Called only after an explicit successful connection. Re-read under the writer lock to retain other windows' saves.</summary>
-    public DatabaseConnectionSource Save(string label, string connectionString)
+    public DatabaseConnectionSource Save(string label, string connectionString, DatabaseProvider? provider = null)
     {
         try
         {
-            connectionString = DatabaseConnectionSecurity.NormalizePostgresConnectionString(connectionString);
-            var candidate = new SavedConnection { Id = $"saved/{Guid.NewGuid():N}", Label = label.Trim(), ConnectionString = connectionString };
+            provider ??= DatabaseConnectionSecurity.DetectProvider(connectionString)
+                ?? throw new ArgumentException("Choose the database provider before saving this connection.");
+            connectionString = DatabaseConnectionSecurity.NormalizeConnectionString(connectionString, provider.Value);
+            var candidate = new SavedConnection { Id = $"saved/{Guid.NewGuid():N}", Label = label.Trim(),
+                ConnectionString = connectionString, Provider = provider };
             Validate(candidate);
             var lockName = "Local\\FullStackLauncher.DatabaseConnections." + Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(StorePath.ToUpperInvariant())));
             using var mutex = new Mutex(false, lockName);
@@ -66,13 +70,13 @@ public sealed class SavedDatabaseConnectionStore
                 using var writerLock = new FileStream(StorePath + ".lock", FileMode.OpenOrCreate,
                     FileAccess.ReadWrite, FileShare.None);
                 var data = Read(out var revision); // Malformed/unreadable libraries must never be overwritten.
-                var builder = new NpgsqlConnectionStringBuilder(connectionString);
                 var existing = data.Connections.FirstOrDefault(item => item.Label.Equals(candidate.Label, StringComparison.OrdinalIgnoreCase)
-                    && new NpgsqlConnectionStringBuilder(item.ConnectionString).EquivalentTo(builder));
+                    && item.Provider == provider && ToSource(item).MatchesNormalizedConnection(connectionString));
                 if (existing is not null) return ToSource(existing);
                 if (data.Connections.Count >= 500)
                     throw new SavedDatabaseConnectionException("The saved connection library has reached its 500-connection limit.");
                 data.Connections.Add(candidate);
+                data.Version = 2;
                 Write(data, revision);
                 return ToSource(candidate);
             }
@@ -106,15 +110,20 @@ public sealed class SavedDatabaseConnectionStore
         var content = ReadBytes();
         revision = content is null ? null : SHA256.HashData(content);
         if (content is null) return new();
-        if (content.Length <= Header.Length || !content.AsSpan(0, Header.Length).SequenceEqual(Header)) throw new InvalidDataException();
+        if (content.Length <= Header.Length) throw new InvalidDataException();
+        var legacy = content.AsSpan(0, Header.Length).SequenceEqual(LegacyHeader);
+        if (!legacy && !content.AsSpan(0, Header.Length).SequenceEqual(Header)) throw new InvalidDataException();
         var plaintext = Transform(content[Header.Length..], protect: false);
         try
         {
             var library = JsonSerializer.Deserialize<SavedLibrary>(plaintext, JsonOptions) ?? throw new InvalidDataException();
-            if (library.Version != 1 || library.Connections is null || library.Connections.Count > 500) throw new InvalidDataException();
+            if (library.Version != (legacy ? 1 : 2) || library.Connections is null || library.Connections.Count > 500)
+                throw new InvalidDataException();
             var ids = new HashSet<string>(StringComparer.Ordinal);
             foreach (var entry in library.Connections)
             {
+                if (entry is null || legacy && entry.Provider is not null) throw new InvalidDataException();
+                if (legacy) entry.Provider = DatabaseProvider.PostgreSql;
                 Validate(entry);
                 if (!ids.Add(entry.Id)) throw new InvalidDataException();
             }
@@ -125,6 +134,10 @@ public sealed class SavedDatabaseConnectionStore
 
     private void Write(SavedLibrary library, byte[]? revision)
     {
+        // Version 1 remains readable without touching disk. An explicit save upgrades all existing
+        // entries in place, preserving their identities and encrypting temporary/backup bytes too.
+        foreach (var entry in library.Connections)
+            entry.ConnectionString = DatabaseConnectionSecurity.NormalizeConnectionString(entry.ConnectionString, entry.Provider!.Value);
         var plaintext = JsonSerializer.SerializeToUtf8Bytes(library, JsonOptions);
         byte[] ciphertext;
         try { ciphertext = Transform(plaintext, protect: true); }
@@ -159,11 +172,13 @@ public sealed class SavedDatabaseConnectionStore
         if (entry is null || entry.Id is null || !entry.Id.StartsWith("saved/", StringComparison.Ordinal)
             || !Guid.TryParseExact(entry.Id[6..], "N", out _) || string.IsNullOrWhiteSpace(entry.Label)
             || entry.Label.Length > 100 || entry.Label.Any(char.IsControl) || string.IsNullOrWhiteSpace(entry.ConnectionString)
-            || entry.ConnectionString.Length > 32768) throw new InvalidDataException();
+            || entry.ConnectionString.Length > 32768 || entry.Provider is null || !Enum.IsDefined(entry.Provider.Value))
+            throw new InvalidDataException();
         _ = ToSource(entry);
     }
 
-    private static DatabaseConnectionSource ToSource(SavedConnection entry) => new(entry.Id, "", $"{entry.Label} · Saved connection", entry.ConnectionString);
+    private static DatabaseConnectionSource ToSource(SavedConnection entry) => new(entry.Id, "", $"{entry.Label} · Saved connection",
+        entry.ConnectionString, entry.Provider);
 
     private static bool IsStoreError(Exception ex) => ex is IOException or UnauthorizedAccessException or JsonException
         or CryptographicException or ArgumentException or System.Security.SecurityException or OverflowException;
@@ -216,7 +231,7 @@ public sealed class SavedDatabaseConnectionStore
     {
         public SavedLibrary() { }
         [JsonRequired]
-        public int Version { get; set; } = 1;
+        public int Version { get; set; } = 2;
         [JsonRequired]
         public List<SavedConnection> Connections { get; set; } = [];
     }
@@ -227,6 +242,7 @@ public sealed class SavedDatabaseConnectionStore
         public string Id { get; set; } = "";
         public string Label { get; set; } = "";
         public string ConnectionString { get; set; } = "";
+        public DatabaseProvider? Provider { get; set; }
     }
 }
 

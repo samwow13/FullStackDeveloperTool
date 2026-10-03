@@ -65,22 +65,34 @@
         <Grid Margin="0,0,0,12">
             <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
             <TextBlock Text="{Binding ProjectTitle}" FontSize="25" FontWeight="SemiBold" TextTrimming="CharacterEllipsis" ToolTip="{Binding ProjectTitle}" VerticalAlignment="Center" Margin="0,0,12,0"/>
-            <Button Grid.Column="1" Content="Refresh local status" Click="Refresh_Click" IsEnabled="{Binding IsIdle}" VerticalAlignment="Center" ToolTip="Refresh local status. Fetch to update the remote comparison."/>
+            <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center">
+                <Button Content="_Config" Click="Config_Click" IsEnabled="{Binding IsIdle}" Margin="0,0,8,0" ToolTip="Choose the project folder and active remote, reconnect, or add GitHub and Azure DevOps connections."/>
+                <Button Content="Refresh local status" Click="Refresh_Click" IsEnabled="{Binding IsIdle}" ToolTip="Refresh local status. Fetch to update the remote comparison."/>
+            </StackPanel>
         </Grid>
         <Border Grid.Row="1" Style="{StaticResource Card}" Padding="13" Margin="0,0,0,12">
             <StackPanel>
-                <Grid IsEnabled="{Binding IsIdle}"><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="14"/><ColumnDefinition Width="180"/></Grid.ColumnDefinitions>
-                    <StackPanel><Label Content="_Folder" Target="{Binding ElementName=FolderPicker}" Padding="0,0,0,5"/><ComboBox x:Name="FolderPicker" ItemsSource="{Binding Folders}" DisplayMemberPath="Display" SelectionChanged="Folder_Changed" AutomationProperties.Name="Project or service folder"/></StackPanel>
-                    <StackPanel Grid.Column="2"><Label Content="_Remote" Target="{Binding ElementName=RemotePicker}" Padding="0,0,0,5"/><ComboBox x:Name="RemotePicker" ItemsSource="{Binding Remotes}" DisplayMemberPath="Name" SelectionChanged="Remote_Changed" AutomationProperties.Name="Git remote"/></StackPanel>
+                <Grid><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="20"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+                    <StackPanel>
+                        <TextBlock Text="Current branch" Foreground="{StaticResource MutedBrush}" Margin="0,0,0,5"/>
+                        <TextBlock Text="{Binding BranchLabel}" Foreground="{StaticResource AccentBrush}" FontSize="16" FontWeight="SemiBold" TextTrimming="CharacterEllipsis" ToolTip="{Binding BranchLabel}" VerticalAlignment="Center"/>
+                    </StackPanel>
+                    <StackPanel Grid.Column="2">
+                        <Label Content="Publish _branch" Target="{Binding ElementName=PublishBranchName}" Padding="0,0,0,5"/>
+                        <TextBox x:Name="PublishBranchName" Text="{Binding PublishBranchDraft, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" IsEnabled="{Binding CanEditPublishBranch}" MaxLength="240" HorizontalScrollBarVisibility="Auto" AutomationProperties.Name="Branch for next commit all and push" ToolTip="Choose the current branch or enter a new destination. Editing only changes this draft; Commit all &amp; push reviews and applies it."/>
+                    </StackPanel>
                 </Grid>
-                <Grid Margin="0,9,0,0"><Grid.ColumnDefinitions><ColumnDefinition Width="Auto"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
-                    <TextBlock Text="{Binding BranchLabel}" Foreground="{StaticResource AccentBrush}" FontWeight="SemiBold" Margin="0,0,18,0" MaxWidth="330" TextTrimming="CharacterEllipsis" ToolTip="{Binding BranchLabel}"/>
-                    <TextBlock Grid.Column="1" Text="{Binding RepositoryLabel}" Style="{StaticResource Hint}" TextWrapping="NoWrap" TextTrimming="CharacterEllipsis" ToolTip="{Binding RepositoryLabel}" VerticalAlignment="Center"/>
+                <TextBlock Text="{Binding PublishBranchHint}" Style="{StaticResource Hint}" FontSize="12" Margin="0,6,0,0" AutomationProperties.LiveSetting="Polite"/>
+                <Grid Margin="0,9,0,0"><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+                    <TextBlock Text="{Binding RepositoryLabel}" Style="{StaticResource Hint}" TextWrapping="NoWrap" TextTrimming="CharacterEllipsis" ToolTip="{Binding RepositoryLabel}" VerticalAlignment="Center"/>
+                    <TextBlock Grid.Column="1" Text="{Binding ActiveRemoteLabel}" Foreground="{StaticResource MutedBrush}" Margin="16,0,0,0" MaxWidth="180" TextTrimming="CharacterEllipsis" VerticalAlignment="Center">
+                        <TextBlock.ToolTip><StackPanel MaxWidth="420"><TextBlock Text="{Binding ActiveRemoteLabel}" TextWrapping="Wrap"/><TextBlock Text="{Binding RemoteSummary}" TextWrapping="Wrap" Margin="0,5,0,0"/></StackPanel></TextBlock.ToolTip>
+                    </TextBlock>
                 </Grid>
                 <TextBlock Text="{Binding OperationLabel}" Foreground="#FFBC8B" TextWrapping="Wrap"/>
             </StackPanel>
         </Border>
-        <TabControl x:Name="WorkspaceTabs" Grid.Row="2" IsEnabled="{Binding IsIdle}">
+        <TabControl x:Name="WorkspaceTabs" Grid.Row="2" IsEnabled="{Binding IsIdle}" Visibility="{Binding WorkspaceVisibility}">
             <TabItem x:Name="WorkTab" Header="_Overview">
                 <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
                     <StackPanel Margin="0,0,8,0">
@@ -93,8 +105,82 @@
                         <TextBlock Text="{Binding ComparisonDetail}" Style="{StaticResource Hint}" FontSize="12" Margin="0,8,0,18"/>
                         <Border Style="{StaticResource Card}" BorderBrush="#346259" Background="#172A29" Margin="0,0,0,18">
                             <StackPanel>
-                                <Button Content="Commit all &amp; push…" Click="CommitAllPush_Click" IsEnabled="{Binding CanCommitAllPush}" Style="{StaticResource PrimaryButton}" HorizontalAlignment="Left" Padding="20,11" FontSize="15" ToolTip="Enter a commit message, then stage every change, commit, and push to the selected remote." ToolTipService.ShowOnDisabled="True"/>
+                                <Border x:Name="PublishFeedbackCard" Visibility="Collapsed" Background="#102923" BorderBrush="#386C5E" BorderThickness="1" CornerRadius="10" Padding="16" Margin="0,0,0,16"
+                                        Loaded="PublishFeedback_Loaded" Unloaded="PublishFeedback_Unloaded" IsVisibleChanged="PublishFeedback_IsVisibleChanged">
+                                    <Grid>
+                                        <Grid.ColumnDefinitions><ColumnDefinition Width="76"/><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+                                        <Grid Width="64" Height="64" HorizontalAlignment="Left" VerticalAlignment="Top" IsHitTestVisible="False">
+                                            <Canvas x:Name="PublishBurst" Width="64" Height="64" Opacity="0" RenderTransformOrigin="0.5,0.5">
+                                                <Canvas.RenderTransform><ScaleTransform x:Name="PublishBurstScale"/></Canvas.RenderTransform>
+                                                <Line X1="32" Y1="4" X2="32" Y2="10" Stroke="#9FFFE0" StrokeThickness="2" StrokeStartLineCap="Round" StrokeEndLineCap="Round"/>
+                                                <Line X1="50" Y1="13" X2="54" Y2="9" Stroke="#C2DACF" StrokeThickness="2" StrokeStartLineCap="Round" StrokeEndLineCap="Round"/>
+                                                <Line X1="54" Y1="32" X2="60" Y2="32" Stroke="#67E7C1" StrokeThickness="2" StrokeStartLineCap="Round" StrokeEndLineCap="Round"/>
+                                                <Line X1="50" Y1="50" X2="54" Y2="54" Stroke="#E1D7A4" StrokeThickness="2" StrokeStartLineCap="Round" StrokeEndLineCap="Round"/>
+                                                <Line X1="32" Y1="54" X2="32" Y2="60" Stroke="#9FFFE0" StrokeThickness="2" StrokeStartLineCap="Round" StrokeEndLineCap="Round"/>
+                                                <Line X1="14" Y1="50" X2="10" Y2="54" Stroke="#C2DACF" StrokeThickness="2" StrokeStartLineCap="Round" StrokeEndLineCap="Round"/>
+                                                <Line X1="4" Y1="32" X2="10" Y2="32" Stroke="#67E7C1" StrokeThickness="2" StrokeStartLineCap="Round" StrokeEndLineCap="Round"/>
+                                                <Line X1="10" Y1="10" X2="14" Y2="14" Stroke="#E1D7A4" StrokeThickness="2" StrokeStartLineCap="Round" StrokeEndLineCap="Round"/>
+                                            </Canvas>
+                                            <Grid x:Name="PublishWorkingIcon">
+                                                <Ellipse Width="46" Height="46" Stroke="#284B40" StrokeThickness="3"/>
+                                                <Path Data="M 32,9 A 23,23 0 0 1 55,32" Stroke="#78E7C5" StrokeThickness="3" StrokeStartLineCap="Round" StrokeEndLineCap="Round">
+                                                    <Path.RenderTransform><RotateTransform x:Name="PublishSpinnerRotate" CenterX="32" CenterY="32"/></Path.RenderTransform>
+                                                </Path>
+                                            </Grid>
+                                            <Grid x:Name="PublishSuccessIcon" Visibility="Collapsed" RenderTransformOrigin="0.5,0.5">
+                                                <Grid.RenderTransform><ScaleTransform x:Name="PublishSuccessScale"/></Grid.RenderTransform>
+                                                <Ellipse Width="46" Height="46" Fill="#203E33" Stroke="#76E5BD" StrokeThickness="1.5"/>
+                                                <Path Data="M 21,32 L 29,40 L 44,24" Stroke="#A4FFE0" StrokeThickness="3.5" StrokeStartLineCap="Round" StrokeEndLineCap="Round" StrokeLineJoin="Round"/>
+                                            </Grid>
+                                            <Grid x:Name="PublishUnconfirmedIcon" Visibility="Collapsed">
+                                                <Ellipse Width="46" Height="46" Fill="#3D3020" Stroke="#C7A36C" StrokeThickness="1.5"/>
+                                                <TextBlock Text="!" FontSize="30" FontWeight="SemiBold" Foreground="#FFE0A9" HorizontalAlignment="Center" VerticalAlignment="Center" Margin="0,-2,0,0"/>
+                                            </Grid>
+                                        </Grid>
+                                        <StackPanel Grid.Column="1" VerticalAlignment="Center">
+                                            <TextBlock x:Name="PublishFeedbackHeading" FontSize="19" FontWeight="SemiBold" Foreground="#BBFCE5" TextWrapping="Wrap" AutomationProperties.LiveSetting="Polite"/>
+                                            <TextBlock x:Name="PublishFeedbackDestination" Foreground="#A9C8BD" TextWrapping="Wrap" FontSize="12" Margin="0,5,0,0"/>
+                                            <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled" MaxHeight="100" Margin="0,8,0,0">
+                                                <TextBlock x:Name="PublishFeedbackDetail" Foreground="#D9EEE7" TextWrapping="Wrap"/>
+                                            </ScrollViewer>
+                                            <StackPanel x:Name="PublishLinkPanel" Visibility="Collapsed" Margin="0,12,0,0">
+                                                <TextBlock TextWrapping="Wrap">
+                                                    <Hyperlink x:Name="PublishLink" Click="PublishLinkOpen_Click" Foreground="#BBFCE5" Cursor="Hand" ToolTip="Open this link in Chrome" AutomationProperties.Name="Open after-push link in Chrome">
+                                                        <Run x:Name="PublishLinkText"/>
+                                                    </Hyperlink>
+                                                </TextBlock>
+                                                <WrapPanel Margin="0,8,0,0">
+                                                    <Button x:Name="PublishLinkOpen" Content="Open Azure" Click="PublishLinkOpen_Click" Style="{StaticResource PrimaryButton}" Padding="16,9" Margin="0,0,8,0" ToolTip="Open the saved link in Chrome"/>
+                                                    <Button Content="Copy link" Click="PublishLinkCopy_Click" Padding="12,9" AutomationProperties.Name="Copy after-push link"/>
+                                                </WrapPanel>
+                                                <TextBlock x:Name="PublishLinkStatus" Foreground="#D9EEE7" TextWrapping="Wrap" Margin="0,6,0,0" AutomationProperties.LiveSetting="Polite"/>
+                                            </StackPanel>
+                                        </StackPanel>
+                                        <Button x:Name="PublishFeedbackDismiss" Grid.Column="2" Content="Dismiss" Click="PublishFeedbackDismiss_Click" VerticalAlignment="Top" Padding="9,5" Margin="12,0,0,0" Visibility="Collapsed" AutomationProperties.Name="Dismiss publish result" ToolTip="Hide this result. Git history and activity stay available."/>
+                                    </Grid>
+                                </Border>
+                                <WrapPanel>
+                                    <Button Content="Commit all &amp; push…" Click="CommitAllPush_Click" IsEnabled="{Binding CanCommitAllPush}" Style="{StaticResource PrimaryButton}" Padding="20,11" FontSize="15" Margin="0,0,10,8" ToolTip="Review your latest created branch, choose the current or a new destination branch, and commit all changes with an automatic message before pushing." ToolTipService.ShowOnDisabled="True"/>
+                                    <WrapPanel>
+                                        <Button Content="Merge release into current branch…" Click="SyncRelease_Click" IsEnabled="{Binding CanPrepareSync}" Padding="20,11" FontSize="15" Margin="0,0,10,8" ToolTip="Fetch and merge your chosen release branch into the current local branch. Preserve local work and show conflicts. No branch is created or pushed." ToolTipService.ShowOnDisabled="True" AutomationProperties.Name="Merge release into current local branch"/>
+                                        <Button Content="Git-only conflict test" Click="CheckReleaseMerge_Click" IsEnabled="{Binding CanCheckReleaseMerge}" Padding="14,11" FontSize="15" Margin="0,0,0,8" ToolTip="Check your current committed branch against the latest selected release using Git only. Show conflicts without merging, staging, committing, pushing or changing local files. Uncommitted edits are excluded." ToolTipService.ShowOnDisabled="True" AutomationProperties.Name="Test release merge conflicts with Git only"/>
+                                    </WrapPanel>
+                                </WrapPanel>
                                 <TextBlock Text="{Binding CommitAvailabilityText}" Style="{StaticResource Hint}" Margin="0,9,0,0"/>
+                                <TextBlock Text="{Binding PowerAvailabilityText}" Style="{StaticResource Hint}" Margin="0,9,0,0"/>
+                                <WrapPanel Margin="0,12,0,0">
+                                    <TextBlock Text="{Binding ReleaseSourceLabel}" TextWrapping="Wrap" Foreground="{StaticResource AccentBrush}" VerticalAlignment="Center" Margin="0,0,12,8"/>
+                                    <Button Content="Change release branch…" Click="ChangeReleaseBranch_Click" IsEnabled="{Binding CanChangeReleaseBranch}" Padding="10,6" Margin="0,0,0,8"/>
+                                </WrapPanel>
+                            </StackPanel>
+                        </Border>
+                        <Border Style="{StaticResource Card}" BorderBrush="#A07850" Background="#30291F" Visibility="{Binding SyncRecoveryVisibility}" Margin="0,0,0,18">
+                            <StackPanel>
+                                <TextBlock Text="{Binding SyncRecoverySummary}" TextWrapping="Wrap" Foreground="#FFE0BC"/>
+                                <WrapPanel Margin="0,12,0,0">
+                                    <Button Content="Conflicts / recovery details…" Click="SyncDetails_Click" Style="{StaticResource Action}"/>
+                                    <Button Content="Clear merge tracking…" Click="DismissSync_Click" IsEnabled="{Binding CanDismissSync}" Style="{StaticResource Action}" ToolTip="Clear only the launcher's record after Git has no active operation. Files, branches and commits stay in place."/>
+                                </WrapPanel>
                             </StackPanel>
                         </Border>
                         <WrapPanel>
@@ -136,48 +222,114 @@
                     </DataGrid>
                 </StackPanel></ScrollViewer>
             </TabItem>
-            <TabItem x:Name="SetupTab" Header="Repository set_up">
-                <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled"><StackPanel Margin="0,0,8,0">
-                    <Border Style="{StaticResource Card}" Margin="0,0,0,18">
-                        <StackPanel>
-                            <TextBlock Text="Initialize repository" FontSize="17" FontWeight="SemiBold"/>
-                            <Label Content="_Initial branch" Target="{Binding ElementName=InitialBranch}"/>
-                            <Grid><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
-                                <TextBox x:Name="InitialBranch" Text="main" IsEnabled="{Binding CanInitialize}"/>
-                                <Button Grid.Column="1" Content="Initialize" Click="Initialize_Click" IsEnabled="{Binding CanInitialize}" Margin="10,0,0,0"/>
-                            </Grid>
-                        </StackPanel>
-                    </Border>
-                    <TextBlock Text="Remote connection" FontSize="17" FontWeight="SemiBold"/>
-                    <Grid><Grid.ColumnDefinitions><ColumnDefinition Width="160"/><ColumnDefinition Width="12"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
-                        <StackPanel><Label Content="Remote na_me" Target="{Binding ElementName=RemoteName}"/><TextBox x:Name="RemoteName" Text="origin" MaxLength="160" TextChanged="RemoteDraft_Changed"/></StackPanel>
-                        <StackPanel Grid.Column="2"><Label Content="Clone _URL" Target="{Binding ElementName=RemoteUrl}"/><TextBox x:Name="RemoteUrl" MaxLength="2048" TextChanged="RemoteDraft_Changed"/></StackPanel>
-                    </Grid>
-                    <TextBlock Text="HTTPS or SSH URL without credentials. Uses your existing Git sign-in." Style="{StaticResource Hint}" FontSize="12" Margin="0,7,0,10"/>
-                    <WrapPanel Margin="0,0,0,14">
-                        <Button Content="Save remote…" Click="SaveRemote_Click" IsEnabled="{Binding IsRepository}" Style="{StaticResource Action}"/>
-                        <Button Content="Copy repository URL" Click="CopyUrl_Click" IsEnabled="{Binding CanCopyUrl}" Style="{StaticResource Action}"/>
-                    </WrapPanel>
-                    <Expander Header="Azure DevOps">
-                        <Border Style="{StaticResource Card}" Margin="0,10,0,0">
-                            <StackPanel>
-                                <TextBlock Text="Requires Azure CLI with the azure-devops extension and an authenticated account." Style="{StaticResource Hint}" FontSize="12"/>
-                                <Label Content="_Organization URL" Target="{Binding ElementName=AzureOrganization}"/><TextBox x:Name="AzureOrganization" MaxLength="250" ToolTip="https://dev.azure.com/your-organization"/>
-                                <Grid><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="12"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
-                                    <StackPanel><Label Content="Azure _project" Target="{Binding ElementName=AzureProject}"/><TextBox x:Name="AzureProject" MaxLength="250"/></StackPanel>
-                                    <StackPanel Grid.Column="2"><Label Content="Repositor_y name" Target="{Binding ElementName=AzureRepository}"/><TextBox x:Name="AzureRepository" MaxLength="250"/></StackPanel>
-                                </Grid>
-                                <WrapPanel Margin="0,12,0,0">
-                                    <Button Content="Find repository" Click="AzureLookup_Click" Style="{StaticResource Action}"/>
-                                    <Button Content="Create &amp; connect…" Click="AzureCreate_Click" Style="{StaticResource Action}" IsEnabled="{Binding IsRepository}"/>
-                                </WrapPanel>
-                            </StackPanel>
-                        </Border>
-                    </Expander>
-                </StackPanel></ScrollViewer>
-            </TabItem>
             <TabItem Header="_Activity"><TextBox Text="{Binding ActivityText, Mode=OneWay}" Style="{StaticResource CodeReadout}" TextWrapping="Wrap" AutomationProperties.Name="Git command activity"/></TabItem>
         </TabControl>
+        <Border Grid.Row="2" Style="{StaticResource Card}" Visibility="{Binding SetupVisibility}" Padding="22">
+            <Grid>
+                <Grid.RowDefinitions><RowDefinition Height="*"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
+                <ScrollViewer x:Name="SetupScroll" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled" IsEnabled="{Binding IsIdle}">
+                    <StackPanel Margin="0,0,8,0">
+                        <Grid Margin="0,0,0,20"><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="14"/><ColumnDefinition Width="180"/></Grid.ColumnDefinitions>
+                            <StackPanel><Label Content="_Folder" Target="{Binding ElementName=FolderPicker}" Padding="0,0,0,5"/><ComboBox x:Name="FolderPicker" ItemsSource="{Binding Folders}" DisplayMemberPath="Display" SelectionChanged="Folder_Changed" AutomationProperties.Name="Project or service folder in Git Config"/></StackPanel>
+                            <StackPanel Grid.Column="2"><Label Content="Active _remote" Target="{Binding ElementName=RemotePicker}" Padding="0,0,0,5"/><ComboBox x:Name="RemotePicker" ItemsSource="{Binding Remotes}" DisplayMemberPath="Name" SelectionChanged="Remote_Changed" IsEnabled="{Binding CanSelectRemote}" AutomationProperties.Name="Active Git remote in Config" ToolTip="Choose the active remote for this workspace. Connection setup drafts must be completed or canceled first."/></StackPanel>
+                        </Grid>
+                        <StackPanel Margin="0,0,0,18">
+                            <TextBlock Text="{Binding SetupProgress}" Foreground="{StaticResource AccentBrush}" FontWeight="SemiBold" Margin="0,0,0,5"/>
+                            <TextBlock Text="{Binding SetupTitle}" FontSize="23" FontWeight="SemiBold" TextWrapping="Wrap"/>
+                            <TextBlock Text="{Binding SetupDescription}" Style="{StaticResource Hint}" Margin="0,7,0,0"/>
+                        </StackPanel>
+                        <StackPanel Visibility="{Binding LocalStepVisibility}">
+                            <TextBlock Text="{Binding LocalSetupMessage}" TextWrapping="Wrap" Margin="0,0,0,14"/>
+                            <StackPanel Visibility="{Binding CanInitialize, Converter={StaticResource BoolToVisibility}}">
+                                <Label Content="_Initial branch" Target="{Binding ElementName=InitialBranch}"/>
+                                <TextBox x:Name="InitialBranch" Text="main" MaxLength="240" AutomationProperties.Name="Initial branch name"/>
+                            </StackPanel>
+                            <WrapPanel Margin="0,12,0,0">
+                                <Button Content="_Trust this folder…" Click="TrustFolder_Click" Visibility="{Binding CanTrustFolder, Converter={StaticResource BoolToVisibility}}" Style="{StaticResource Action}"/>
+                                <Button x:Name="SetupRetry" Content="_Retry folder check" Click="LocalRetry_Click" Style="{StaticResource Action}"/>
+                            </WrapPanel>
+                        </StackPanel>
+                        <StackPanel Visibility="{Binding ConnectionsStepVisibility}">
+                            <Label Content="Connections for this _repository" Target="{Binding ElementName=ConnectionPicker}" Padding="0,0,0,8"/>
+                            <ListBox x:Name="ConnectionPicker" ItemsSource="{Binding Remotes}" SelectionMode="Single" SelectionChanged="Connection_Changed" MinHeight="100" MaxHeight="220" Background="#111923" BorderBrush="{StaticResource BorderBrush}" BorderThickness="1" Padding="5" AutomationProperties.Name="Connections for this repository">
+                                <ListBox.ItemTemplate>
+                                    <DataTemplate>
+                                        <StackPanel>
+                                            <TextBlock Text="{Binding Name}" FontWeight="SemiBold" TextWrapping="Wrap"/>
+                                            <TextBlock Text="{Binding FetchUrl}" Style="{StaticResource Hint}" FontSize="12" Margin="0,4,0,0"/>
+                                        </StackPanel>
+                                    </DataTemplate>
+                                </ListBox.ItemTemplate>
+                            </ListBox>
+                            <TextBlock Text="Choose the active connection for this workspace and agent change summaries, reconnect, or add another destination." Style="{StaticResource Hint}" Margin="0,10,0,12"/>
+                            <WrapPanel>
+                                <Button Content="_Use selected connection" Click="UseConnection_Click" Style="{StaticResource Action}"/>
+                                <Button Content="_Reconnect selected…" Click="Reconnect_Click" Style="{StaticResource Action}"/>
+                                <Button Content="_Add connection…" Click="AddConnection_Click" Style="{StaticResource Action}"/>
+                                <Button Content="After-push _link…" Click="PostPushLinkConfig_Click" Style="{StaticResource Action}" ToolTip="Customize the link opened in Chrome after a successful push on the selected connection."/>
+                            </WrapPanel>
+                        </StackPanel>
+                        <StackPanel Visibility="{Binding ProviderStepVisibility}">
+                            <TextBlock Text="{Binding ProviderLabel}" Foreground="{StaticResource AccentBrush}" FontWeight="SemiBold" TextWrapping="Wrap" Margin="0,0,0,12"/>
+                            <Button x:Name="GitHubChoice" Click="GitHubProvider_Click" HorizontalContentAlignment="Stretch" Padding="18,15" Margin="0,0,0,12" AutomationProperties.Name="Choose GitHub">
+                                <StackPanel>
+                                    <AccessText Text="_GitHub" FontSize="18" FontWeight="SemiBold"/>
+                                    <TextBlock Text="Connect a personal, organization, or GitHub Enterprise repository." TextWrapping="Wrap" Foreground="{StaticResource MutedBrush}" Margin="0,6,0,0"/>
+                                </StackPanel>
+                            </Button>
+                            <Button Click="AzureProvider_Click" HorizontalContentAlignment="Stretch" Padding="18,15" AutomationProperties.Name="Choose Azure DevOps">
+                                <StackPanel>
+                                    <AccessText Text="_Azure DevOps" FontSize="18" FontWeight="SemiBold"/>
+                                    <TextBlock Text="Connect an Azure Repos repository in your Azure DevOps Services organization." TextWrapping="Wrap" Foreground="{StaticResource MutedBrush}" Margin="0,6,0,0"/>
+                                </StackPanel>
+                            </Button>
+                        </StackPanel>
+                        <StackPanel Visibility="{Binding DestinationStepVisibility}">
+                            <TextBlock Text="{Binding DestinationHint}" Style="{StaticResource Hint}" Margin="0,0,0,14"/>
+                            <Label Content="Repository clone _URL" Target="{Binding ElementName=RemoteUrl}"/>
+                            <TextBox x:Name="RemoteUrl" MaxLength="2048" TextChanged="RemoteDraft_Changed" HorizontalScrollBarVisibility="Auto" AutomationProperties.Name="Repository clone URL"/>
+                            <TextBlock Text="Use the repository's HTTPS or SSH clone URL. Do not include a password or access token." Style="{StaticResource Hint}" FontSize="12" Margin="0,7,0,12"/>
+                            <Label Content="Connection _name" Target="{Binding ElementName=RemoteName}"/>
+                            <TextBox x:Name="RemoteName" Text="origin" MaxLength="160" TextChanged="RemoteDraft_Changed" AutomationProperties.Name="Connection name"/>
+                            <TextBlock Text="Use a distinct name for each destination. Git saves this name as a remote in this repository." Style="{StaticResource Hint}" FontSize="12" Margin="0,7,0,0"/>
+                        </StackPanel>
+                        <StackPanel Visibility="{Binding AuthenticationStepVisibility}">
+                            <TextBlock Text="{Binding AuthDestination}" FontWeight="SemiBold" TextWrapping="Wrap" Margin="0,0,0,12"/>
+                            <TextBlock Text="{Binding AuthenticationHint}" Style="{StaticResource Hint}" Margin="0,0,0,16"/>
+                            <WrapPanel>
+                                <Button x:Name="SetupSignIn" Content="{Binding SignInLabel}" Click="SignIn_Click" Style="{StaticResource Action}" AutomationProperties.Name="Sign in to repository provider"/>
+                                <Button Content="_Verify connection" Click="VerifyConnection_Click" Style="{StaticResource Action}"/>
+                            </WrapPanel>
+                            <TextBlock Text="{Binding AuthenticationMessage}" TextWrapping="Wrap" Foreground="{StaticResource AccentBrush}" Margin="0,10,0,0"/>
+                            <Expander Header="Use a different Azure account" Visibility="{Binding AzureAccountHelpVisibility}" Margin="0,16,0,0">
+                                <StackPanel Margin="0,10,0,0">
+                                    <TextBox Text="{Binding AzureAccountHelpText, Mode=OneWay}" Style="{StaticResource CodeReadout}" TextWrapping="Wrap" MaxHeight="200" AutomationProperties.Name="Azure account selection instructions"/>
+                                    <Button Content="Open account guide" Click="AccountHelp_Click" HorizontalAlignment="Left" Margin="0,10,0,0"/>
+                                </StackPanel>
+                            </Expander>
+                        </StackPanel>
+                        <StackPanel Visibility="{Binding ReviewStepVisibility}">
+                            <Border Background="#111923" BorderBrush="{StaticResource BorderBrush}" BorderThickness="1" CornerRadius="6" Padding="16">
+                                <TextBlock Text="{Binding SetupReview}" TextWrapping="Wrap"/>
+                            </Border>
+                        </StackPanel>
+                        <StackPanel Visibility="{Binding CompleteStepVisibility}">
+                            <TextBlock Text="{Binding CompletionMessage}" TextWrapping="Wrap" Margin="0,0,0,18"/>
+                            <Button Content="_Add another connection…" Click="AddConnection_Click" Style="{StaticResource Action}" HorizontalAlignment="Left"/>
+                        </StackPanel>
+                        <Expander Header="Setup _details" IsExpanded="False" Margin="0,14,0,0">
+                            <TextBox Text="{Binding ActivityText, Mode=OneWay}" Style="{StaticResource CodeReadout}" TextWrapping="Wrap" Height="100" Margin="0,8,0,0" AutomationProperties.Name="Git setup details"/>
+                        </Expander>
+                    </StackPanel>
+                </ScrollViewer>
+                <Grid Grid.Row="1" Margin="0,18,0,0" IsEnabled="{Binding IsIdle}">
+                    <Grid.ColumnDefinitions><ColumnDefinition Width="Auto"/><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+                    <Button Content="_Use local workspace" Click="LocalWorkspace_Click" IsEnabled="{Binding IsRepository}" Margin="0,0,12,0"/>
+                    <Button Grid.Column="2" Content="_Back" Click="SetupBack_Click" IsEnabled="{Binding CanSetupBack}" Margin="0,0,8,0"/>
+                    <Button x:Name="SetupContinue" Grid.Column="3" Content="{Binding SetupNextLabel}" Click="SetupNext_Click" IsEnabled="{Binding CanSetupNext}" Style="{StaticResource PrimaryButton}" MinWidth="105"/>
+                </Grid>
+            </Grid>
+        </Border>
         <Grid Grid.Row="3" Margin="0,12,0,0"><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
             <TextBlock Text="{Binding StatusText}" TextWrapping="Wrap" VerticalAlignment="Center" Margin="0,0,12,0" Foreground="{StaticResource AccentBrush}"/>
             <Button Grid.Column="1" Content="Cancel operation" Click="Cancel_Click" IsEnabled="{Binding IsBusy}" Margin="0,0,8,0"/>

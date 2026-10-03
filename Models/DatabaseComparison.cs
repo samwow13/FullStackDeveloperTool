@@ -14,7 +14,10 @@ public sealed record DatabaseMigrationHistory(bool IsAvailable, string? TableNam
 
 public sealed record DatabaseSchemaSnapshot(string SourceId, string Server, string Database, string ServerVersion,
     DateTimeOffset CapturedAtUtc, IReadOnlyList<DatabaseSchemaObject> Objects,
-    DatabaseMigrationHistory MigrationHistory, IReadOnlyList<string> Warnings, IReadOnlyList<string> Coverage);
+    DatabaseMigrationHistory MigrationHistory, IReadOnlyList<string> Warnings, IReadOnlyList<string> Coverage)
+{
+    public DatabaseProvider Provider { get; init; } = DatabaseProvider.PostgreSql;
+}
 
 public sealed record DatabaseSchemaDifference(string Kind, string Schema, string Name, DatabaseSchemaChange Change,
     string? SourceDefinition, string? TargetDefinition)
@@ -35,6 +38,6 @@ public sealed record DatabaseSchemaComparison(DatabaseSchemaSnapshot Source, Dat
     public bool CanCompareMigrationHistory => Source.MigrationHistory.IsAvailable && Target.MigrationHistory.IsAvailable;
     public IReadOnlyList<string> Warnings => Source.Warnings.Concat(Target.Warnings)
         .Concat(string.Equals(Source.ServerVersion, Target.ServerVersion, StringComparison.Ordinal)
-            ? [] : new[] { "The PostgreSQL versions differ. Some reported changes may reflect version-specific definitions or defaults." })
+            ? [] : new[] { $"The {(Source.Provider == DatabaseProvider.SqlServer ? "SQL Server" : "PostgreSQL")} versions differ. Some reported changes may reflect version-specific definitions or defaults." })
         .Distinct(StringComparer.Ordinal).ToArray();
 }

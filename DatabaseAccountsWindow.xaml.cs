@@ -103,6 +103,11 @@ public partial class DatabaseAccountsWindow : Window
     private async Task ConnectAsync()
     {
         if (_busy || Endpoint.Source is not { } source || !Endpoint.IsReady) return;
+        if (source.Provider != DatabaseProvider.PostgreSql)
+        {
+            StatusText.Text = "Application account tools support PostgreSQL only. Use the explorer or schema comparison for SQL Server.";
+            return;
+        }
         var database = Endpoint.Database;
         InvalidateAccounts();
         Search.Clear();
@@ -308,7 +313,10 @@ public partial class DatabaseAccountsWindow : Window
     {
         if (ApplyButton is null) return;
         ConnectionInputs.IsEnabled = !_busy;
-        ConnectButton.IsEnabled = !_busy && Endpoint.IsReady;
+        ConnectButton.IsEnabled = !_busy && Endpoint.IsReady && Endpoint.Source?.Provider == DatabaseProvider.PostgreSql;
+        ConnectButton.ToolTip = "Application account tools support recognized PostgreSQL schemas only.";
+        if (!_busy && Endpoint.Source?.Provider == DatabaseProvider.SqlServer)
+            StatusText.Text = "Application account tools support PostgreSQL only. Use the explorer or schema comparison for SQL Server.";
         ReloadButton.IsEnabled = !_busy;
         AccountGrid.IsEnabled = !_busy && _ready; Search.IsEnabled = !_busy && _ready;
         NewButton.IsEnabled = !_busy && _ready && _schema is { CanCreate: true }; Editor.IsEnabled = !_busy && _ready;

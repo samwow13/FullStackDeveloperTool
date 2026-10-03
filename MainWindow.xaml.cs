@@ -3,6 +3,7 @@ using System.ComponentModel;
 using System.Diagnostics;
 using System.IO;
 using System.Runtime.InteropServices;
+using System.Text.Json;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Controls.Primitives;
@@ -42,6 +43,13 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         ? $"{Services.Count(service => service.IsRunning)} running · {Services.Count(service => service.Runner.Snapshot.State == ServiceState.Completed)} completed · {Services.Count} apps"
         : $"{Services.Count(x => x.IsRunning)} / {Services.Count} services online";
     public bool CanBatch => !IsEditing && !_batchBusy && !_forceStopBatchBusy && !_closing && Services.Count > 0 && Services.All(x => !x.IsBusy && !x.IsStopping);
+    public bool AllServicesRunning => Services.Count > 0 && Services.All(service => service.ShowRunningDot);
+    public bool CanStartBatch => CanBatch && !_closeRequested && Services.Any(service => service.CanStart);
+    public string StartAllDescription => AllServicesRunning
+        ? "All services are already running. No start is needed."
+        : CanStartBatch ? "Start only services that are stopped. Running services stay running."
+        : Services.Count == 0 ? "No services are configured for this project."
+        : "Start is unavailable while services are checking, starting, busy, blocked, or being edited. Review each service's status.";
     public bool CanStopBatch => !_closing && !_forceStopBatchBusy && Services.Any(x => x.CanForceStop);
     public bool CanEdit => SelectedProject is not null && !_savingProjectEdits && !_batchBusy && !_forceStopBatchBusy && !_closing && Services.All(x => !x.IsBusy && !x.IsStopping);
     public string Notice { get => _notice; private set { _notice = value; Changed(nameof(Notice)); } }
@@ -54,8 +62,6 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     public bool ProjectsVisible { get => _settings.Layout.ProjectsVisible; set => SetSectionVisibility(nameof(ProjectsVisible), value); }
     public bool ToolsVisible { get => _settings.Layout.ToolsVisible; set => SetSectionVisibility(nameof(ToolsVisible), value); }
     public bool ServicesVisible { get => _settings.Layout.ServicesVisible; set => SetSectionVisibility(nameof(ServicesVisible), value); }
-    public bool ConsoleVisible { get => _settings.Layout.ConsoleVisible; set => SetSectionVisibility(nameof(ConsoleVisible), value); }
-    public bool DatabaseVisible { get => _settings.Layout.DatabaseVisible; set => SetSectionVisibility(nameof(DatabaseVisible), value); }
     public event PropertyChangedEventHandler? PropertyChanged;
     private void Changed(string name) => PropertyChanged?.Invoke(this, new(name));
 
@@ -78,20 +84,28 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         VisibleProjectItems = CollectionViewSource.GetDefaultView(ProjectItems);
         VisibleProjectItems.Filter = item => item is ProjectViewModel project && project.IsArchived == ShowArchivedProjects;
         InitializeComponent();
+        InitializeSectionsMenu();
+        InitializeNextCommitSettings();
         _consoleTimer.Tick += (_, _) => FlushConsoleOutput();
+        _copyErrorsFeedbackTimer.Tick += (_, _) => CloseCopyErrorsFeedback();
+        Deactivated += (_, _) => CloseCopyErrorsFeedback();
+        LocationChanged += (_, _) => CloseCopyErrorsFeedback();
+        Closed += (_, _) => CloseCopyErrorsFeedback();
         _layoutReady = true;
         ApplyLayout();
         DataContext = this;
+        InitializeQueueActivity();
         InitializeLongRunningTaskMode();
-        DatabasePanel.DatabaseSelected += SaveDatabaseSelection;
-        DatabasePanel.HideRequested += (_, _) =>
-        {
-            DatabaseVisible = false;
-            DatabaseToggle.Focus();
-        };
-        _timer.Tick += async (_, _) => await Task.WhenAll(RefreshAsync(), RefreshProjectBranchesAsync());
-        Activated += async (_, _) => await RefreshProjectBranchesAsync();
+        InitializeNextCommitReminder();
+        InitializeDashboardGitComparison();
+        _timer.Tick += async (_, _) => await Task.WhenAll(RefreshAsync(), RefreshProjectBranchesAsync(), RefreshNextCommitAsync());
+        Activated += async (_, _) => await Task.WhenAll(RefreshProjectBranchesAsync(), RefreshNextCommitAsync());
         Closed += (_, _) => _branchLifetime.Cancel();
+        Closed += (_, _) => _gitWarmupLifetime.Cancel();
+        Closed += (_, _) => _nextCommitLifetime.Cancel();
+        Closed += (_, _) => _sourceLineCountLifetime.Cancel();
+        Closed += (_, _) => _frontendBrowserLifetime.Cancel();
+        InitializeFrontendBrowserAccess();
         SourceInitialized += (_, _) =>
         {
             var enabled = 1;
@@ -101,6 +115,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
 
     private async void Window_Loaded(object sender, RoutedEventArgs e)
     {
+        StartGitConnectionWarmup();
         await RefreshProjectListAsync(Projects.FirstOrDefault(x => x.Id == _settings.SelectedProjectId));
         if (!string.IsNullOrWhiteSpace(_store.LoadWarning))
         {
@@ -120,8 +135,11 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         var created = project.Services.Select(profile =>
         {
             var runner = new ServiceRunner(profile, _store.ResolveWorkingDirectory(project, profile));
-            runner.LogReceived += log => QueueLog(project.Id, profile.Name, log);
-            return new ServiceViewModel(runner);
+            runner.LogReceived += log => QueueLog(project.Id, runner, profile.Name, log);
+            runner.ConsoleOutputReset += () => QueueConsoleReset(project.Id, runner);
+            var service = new ServiceViewModel(runner);
+            runner.FrontendReady += (url, generation) => QueueFrontendBrowserOpen(project, service, url, generation);
+            return service;
         }).ToList();
         _runners.Add(project.Id, created);
         return created;
@@ -146,40 +164,32 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         if (project is null)
         {
             SelectedProject = null;
+            ResetNextCommitProject();
             _projectTasksWindow?.ShowProject(null, "");
+            NotifyQueueActivityChanged();
             Services.Clear();
-            foreach (var name in new[] { nameof(SelectedProject), nameof(SelectedProjectItem), nameof(RootPath), nameof(ConsoleLines) }) Changed(name);
+            foreach (var name in new[] { nameof(SelectedProject), nameof(SelectedProjectItem), nameof(RootPath) }) Changed(name);
             UpdateActions();
-            await DatabasePanel.ShowProjectAsync(null, Projects, _store);
             return;
         }
         SelectedProject = project;
+        ResetNextCommitProject();
         _projectTasksWindow?.ShowProject(project, _store.ResolveRoot(project));
+        NotifyQueueActivityChanged();
         Services.Clear();
         foreach (var service in GetRunners(project)) Services.Add(service);
+        _ = LoadServiceLineCountsAsync(project, Services.ToArray());
         if (saveSelection)
         {
             _settings.SelectedProjectId = project.Id;
             try { _store.Save(_settings); }
             catch (Exception ex) { Notice = $"Settings could not be saved: {ex.Message}"; }
         }
-        foreach (var name in new[] { nameof(SelectedProject), nameof(SelectedProjectItem), nameof(RootPath), nameof(Summary), nameof(CanBatch), nameof(CanStopBatch), nameof(CanEdit), nameof(ConsoleLines) }) Changed(name);
+        foreach (var name in new[] { nameof(SelectedProject), nameof(SelectedProjectItem), nameof(RootPath), nameof(Summary), nameof(CanBatch), nameof(CanStopBatch), nameof(CanEdit) }) Changed(name);
+        NotifyStartAllChanged();
         UpdateArchiveActions();
         _ = RefreshProjectBranchesAsync();
-        await Task.WhenAll(RefreshAsync(), DatabasePanel.ShowProjectAsync(project, Projects, _store));
-    }
-
-    private void SaveDatabaseSelection(ProjectProfile project, DatabaseSelection selection)
-    {
-        if (project.Database?.SourceId == selection.SourceId && project.Database.DatabaseName == selection.DatabaseName) return;
-        var previous = project.Database;
-        project.Database = selection;
-        try { _store.Save(_settings); }
-        catch (Exception ex)
-        {
-            project.Database = previous;
-            Notice = $"The database is available for this session, but its selection could not be saved: {ex.Message}";
-        }
+        await RefreshAsync();
     }
 
     private async Task RefreshAsync()
@@ -201,6 +211,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
                 catch (Exception ex) { if (!_closeRequested && !_closing) Notice = $"Status check: {ex.Message}"; }
                 if (_closeRequested || _closing) return;
                 service.Update();
+                _ = service.RefreshApiDatabaseAsync();
             }));
             if (_closeRequested || _closing) return;
             LastChecked = $"Checked {DateTime.Now:HH:mm:ss}";
@@ -211,14 +222,25 @@ public partial class MainWindow : Window, INotifyPropertyChanged
 
     private void UpdateActions()
     {
+        RefreshLinkedPortAvailability();
+        RefreshServiceConsoleWindows();
+        RefreshApiEndpointWindows();
         Changed(nameof(Summary)); Changed(nameof(CanBatch)); Changed(nameof(CanStopBatch)); Changed(nameof(CanEdit));
         Changed(nameof(CanChangeProject)); Changed(nameof(CanEditDetails)); Changed(nameof(CanSaveProjectEdits));
         Changed(nameof(CanRemoveProject)); Changed(nameof(CanCancelProjectEdits));
         Changed(nameof(ProductionNotice)); Changed(nameof(HasProductionNotice));
+        NotifyStartAllChanged();
         UpdateArchiveActions();
     }
 
-    private async void ApiSecrets_Click(object sender, RoutedEventArgs e)
+    private void NotifyStartAllChanged()
+    {
+        Changed(nameof(AllServicesRunning));
+        Changed(nameof(CanStartBatch));
+        Changed(nameof(StartAllDescription));
+    }
+
+    private void ApiSecrets_Click(object sender, RoutedEventArgs e)
     {
         if (ServiceFrom(sender) is not { CanConfigureApi: true } service || _closing || _batchBusy) return;
         ApiSecretsWindow editor;
@@ -240,7 +262,6 @@ public partial class MainWindow : Window, INotifyPropertyChanged
             }
             Notice = "API configuration saved. Use Local or Prod to restart with the selected values.";
             UpdateActions();
-            await DatabasePanel.ShowProjectAsync(SelectedProject, Projects, _store);
         }
     }
 
@@ -264,13 +285,13 @@ public partial class MainWindow : Window, INotifyPropertyChanged
             UpdateActions();
             await runner.ApplyConfigurationAsync(configuration);
         }, $"Applying {environment} configuration");
-        await DatabasePanel.ShowProjectAsync(SelectedProject, Projects, _store);
     }
 
-    private async Task RunActionAsync(ServiceViewModel service, Func<ServiceRunner, Task> action, string verb)
+    private async Task<bool> RunActionAsync(ServiceViewModel service, Func<ServiceRunner, Task> action, string verb)
     {
-        if (IsEditing || service.IsBusy || service.IsStopping || _closing || _forceStopBatchBusy) return;
-        RevealServiceConsole(service);
+        if (IsEditing || _savingProjectEdits || service.IsBusy || service.IsStopping || _closing || _forceStopBatchBusy || _closeRequested) return false;
+        var agentAction = verb == "Starting" ? "start" : verb == "Restarting" || verb.StartsWith("Applying ", StringComparison.Ordinal) ? "restart" : null;
+        if (agentAction != null) RecordAgentBridgeEvent(service, agentAction, "requested");
         RecordServiceMessage(service, $"{verb}…", ServiceLogKind.Information);
         service.IsBusy = true;
         UpdateActions();
@@ -281,11 +302,16 @@ public partial class MainWindow : Window, INotifyPropertyChanged
             await service.Runner.RefreshAsync();
             var snapshot = service.Runner.Snapshot;
             Notice = $"{service.Name}: {snapshot.Detail}";
+            if (agentAction != null) RecordAgentBridgeEvent(service, agentAction,
+                snapshot.State is ServiceState.Error or ServiceState.Conflict ? "failed" : "completed");
+            return snapshot.State is not (ServiceState.Error or ServiceState.Conflict);
         }
         catch (Exception ex)
         {
             Notice = $"{service.Name}: {ex.Message}";
             RecordServiceMessage(service, ex.Message, ServiceLogKind.Error);
+            if (agentAction != null) RecordAgentBridgeEvent(service, agentAction, "failed");
+            return false;
         }
         finally { service.IsBusy = false; UpdateActions(); }
     }
@@ -313,7 +339,11 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     private async void CleanService_Click(object sender, RoutedEventArgs e) { if (ServiceFrom(sender) is { } s) await RunActionAsync(s, r => r.CleanAsync(), "Cleaning"); }
     private async void SetupService_Click(object sender, RoutedEventArgs e) { if (ServiceFrom(sender) is { } s) await RunActionAsync(s, r => r.SetupAsync(), "Installing dependencies"); }
     private async void StopService_Click(object sender, RoutedEventArgs e) { if (ServiceFrom(sender) is { } s) await StopActionAsync(s); }
-    private async void StartAll_Click(object sender, RoutedEventArgs e) => await RunBatchAsync(r => r.StartAsync(), "Starting", s => s.CanStart);
+    private async void StartAll_Click(object sender, RoutedEventArgs e)
+    {
+        if (!CanStartBatch) return;
+        await RunBatchAsync(r => r.StartAsync(), "Starting", s => s.CanStart);
+    }
     private async void RestartAll_Click(object sender, RoutedEventArgs e) => await RunBatchAsync(r => r.RestartAsync(), "Restarting", s => s.CanRestart);
     private async void StopAll_Click(object sender, RoutedEventArgs e) => await ForceStopAllAsync();
     private async void Refresh_Click(object sender, RoutedEventArgs e)
@@ -335,13 +365,27 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     {
         if (_projectTasksWindow == null)
         {
-            _projectTasksWindow = new() { Owner = this };
+            _projectTasksWindow = new(CaptureProjectApplicationStates) { Owner = this };
             _projectTasksWindow.Closed += (_, _) => _projectTasksWindow = null;
         }
         _projectTasksWindow.ShowProject(SelectedProject, SelectedProject == null ? "" : _store.ResolveRoot(SelectedProject));
         _projectTasksWindow.Show();
         if (_projectTasksWindow.WindowState == WindowState.Minimized) _projectTasksWindow.WindowState = WindowState.Normal;
         _projectTasksWindow.Activate();
+    }
+
+    private IReadOnlyList<ProjectTasks.ProjectApplicationState> CaptureProjectApplicationStates(string projectId)
+    {
+        var project = Projects.FirstOrDefault(candidate => candidate.Id == projectId);
+        if (project == null) return [];
+        _runners.TryGetValue(project.Id, out var runners);
+        return project.Services.Select(profile =>
+        {
+            var snapshot = runners?.FirstOrDefault(service => service.Profile.Id == profile.Id)?.Runner.Snapshot;
+            return new ProjectTasks.ProjectApplicationState(profile.Name, profile.Kind,
+                snapshot?.State.ToString() ?? "Unavailable", snapshot?.Detail ?? "No status available",
+                snapshot?.ActiveUrl);
+        }).ToArray();
     }
 
     private void CodexAlerts_Click(object sender, RoutedEventArgs e) => OpenCodexMonitor("show");
@@ -377,6 +421,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
                 arguments.Add("--default-project");
                 arguments.Add(RootPath);
             }
+            AddQueueStoreSettingsArgument(arguments);
             var start = CodexMonitor.MonitorRuntime.CreateStart(arguments.ToArray());
             Process.Start(start)?.Dispose();
             Notice = "Codex alerts opened. The monitor keeps its watched projects; add or remove folders there.";
@@ -432,7 +477,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     private async Task StopActionAsync(ServiceViewModel service, bool includeConflicts = false)
     {
         if (service.IsStopping || _closing || _savingProjectEdits) return;
-        RevealServiceConsole(service);
+        RecordAgentBridgeEvent(service, "stop", "requested");
         RecordServiceMessage(service, "Force stop requested…", ServiceLogKind.Information);
         service.IsStopping = true;
         UpdateActions();
@@ -444,58 +489,86 @@ public partial class MainWindow : Window, INotifyPropertyChanged
                     MessageBoxResult.No) == MessageBoxResult.Yes);
             else await service.Runner.ForceStopAsync();
             Notice = $"{service.Name}: {service.Runner.Snapshot.Detail}";
+            var snapshot = service.Runner.Snapshot;
+            RecordAgentBridgeEvent(service, "stop", (snapshot.State is ServiceState.Stopped or ServiceState.Completed) &&
+                !service.Runner.HasManagedProcess && snapshot.ProcessIds.Count == 0 ? "completed" : "failed");
         }
         catch (Exception ex)
         {
             Notice = $"Could not stop {service.Name}: {ex.Message}";
             RecordServiceMessage(service, ex.Message, ServiceLogKind.Error);
+            RecordAgentBridgeEvent(service, "stop", "failed");
         }
         finally { service.IsStopping = false; UpdateActions(); }
     }
 
     private void OpenUrl_Click(object sender, RoutedEventArgs e)
     {
-        if (ServiceFrom(sender) is not { CanOpen: true } service) return;
+        if (ServiceFrom(sender) is not { HasLiveUrl: true } service) return;
         try
         {
-            if (!Uri.TryCreate(service.Url, UriKind.Absolute, out var uri) || uri.Scheme is not ("http" or "https") || !uri.IsLoopback)
+            if (!Uri.TryCreate(service.LiveUrl, UriKind.Absolute, out var uri) || uri.Scheme is not ("http" or "https") || !uri.IsLoopback)
                 throw new InvalidOperationException("Only a local HTTP or HTTPS service address can be opened.");
             Process.Start(new ProcessStartInfo(uri.AbsoluteUri) { UseShellExecute = true });
         }
         catch (Exception ex) { Notice = $"Could not open URL: {ex.Message}"; }
     }
 
-    private async void AddProject_Click(object sender, RoutedEventArgs e) => await AddProjectAsync(consoleApp: false);
+    private void CopyServiceUrl_Click(object sender, RoutedEventArgs e)
+    {
+        if (ServiceFrom(sender) is not { HasLiveUrl: true } service) return;
+        try
+        {
+            if (!Uri.TryCreate(service.LiveUrl, UriKind.Absolute, out var uri) || uri.Scheme is not ("http" or "https") || !uri.IsLoopback)
+                throw new InvalidOperationException("Only a local HTTP or HTTPS service address can be copied.");
+            Clipboard.SetText(uri.AbsoluteUri);
+            Notice = $"Copied {service.Name} address.";
+        }
+        catch (Exception ex) { Notice = $"Could not copy URL: {ex.Message}"; }
+    }
 
-    private async void AddConsoleProject_Click(object sender, RoutedEventArgs e) => await AddProjectAsync(consoleApp: true);
+    private async void AddProject_Click(object sender, RoutedEventArgs e) => await AddProjectAsync();
 
-    private async Task AddProjectAsync(bool consoleApp)
+    private async Task AddProjectAsync()
     {
         if (!CanChangeProject) return;
-        var profile = new ProjectProfile
+        var setup = new NewProjectWindow(_store.BaseDirectory, _settings.Projects) { Owner = this };
+        if (setup.ShowDialog() != true) return;
+        if (setup.ExistingProjectId is { } existingProjectId)
         {
-            Name = consoleApp ? "My console project" : "My full stack project",
-            RootPath = _store.BaseDirectory,
-            Services = consoleApp ?
-            [
-                new() { Name = "Console app", Kind = "Console", WorkingDirectory = ".", StartCommand = "dotnet run", Url = "", UiPath = "" }
-            ] :
-            [
-                new() { Name = "Backend API", Kind = ".NET", WorkingDirectory = ".", StartCommand = "dotnet run", CleanCommand = "dotnet clean", SetupCommand = "dotnet restore", Url = "http://localhost:5000", UiPath = "/swagger" },
-                new() { Name = "Frontend", Kind = "Angular", WorkingDirectory = ".", StartCommand = "npm start -- --port 4200", CleanCommand = "npm exec -- ng cache clean", SetupCommand = "npm install", Url = "http://localhost:4200" }
-            ]
-        };
-        var editor = new ProfileEditorWindow(profile, _store.BaseDirectory) { Owner = this };
+            var existing = Projects.FirstOrDefault(project =>
+                project.Id.Equals(existingProjectId, StringComparison.OrdinalIgnoreCase));
+            if (existing is null)
+            {
+                Notice = "The saved project is no longer available. Reopen New project and scan again.";
+                return;
+            }
+            _showArchivedProjects = existing.IsArchived;
+            await RefreshProjectListAsync(existing);
+            return;
+        }
+        var profile = setup.Result;
+        var editor = new ProfileEditorWindow(profile, _store.BaseDirectory, _settings.Projects) { Owner = this };
         if (editor.ShowDialog() != true) return;
         var result = editor.Result;
-        _settings.Projects.Add(result);
-        try { _store.Save(_settings); }
+        AngularDevProxyConfiguration proxyChanges;
+        try
+        {
+            proxyChanges = AngularDevProxyConfiguration.Prepare(new ProjectProfile
+            {
+                Id = result.Id, Name = result.Name, RootPath = result.RootPath
+            }, result, _store);
+            _settings.Projects.Add(result);
+            proxyChanges.SaveWithSettings(() => _store.Save(_settings));
+        }
         catch (Exception ex) { _settings.Projects.Remove(result); ShowSaveError(ex); return; }
         Projects.Add(result);
         ProjectItems.Add(new(result, GetRunners(result)));
         _showArchivedProjects = false;
         await RefreshProjectListAsync(result);
         Notice = $"Saved {result.Name}.";
+        if (proxyChanges.UpdatedFileCount > 0)
+            Notice += " Angular's development API proxy was updated. Start the frontend to use the saved API target.";
     }
 
     private async void OpenProjectDetails()
@@ -506,24 +579,112 @@ public partial class MainWindow : Window, INotifyPropertyChanged
             Notice = "Stop this project's services before changing its paths or commands.";
             return;
         }
-        var editor = new ProfileEditorWindow(selected, _store.BaseDirectory) { Owner = this };
-        if (editor.ShowDialog() != true) return;
-        var result = editor.Result;
-        var index = _settings.Projects.IndexOf(selected);
-        _settings.Projects[index] = result;
-        try { _store.Save(_settings); }
-        catch (Exception ex) { _settings.Projects[index] = selected; ShowSaveError(ex); return; }
-        if (_runners.Remove(selected.Id, out var old)) foreach (var service in old) service.Runner.Dispose();
-        Projects[Projects.IndexOf(selected)] = result;
-        _refreshingProjectList = true;
+        // A modal dialog still pumps the dispatcher. Keep dashboard and bridge service
+        // actions blocked until fresh process checks and the settings/proxy save finish.
+        SetProjectEditMode(true);
+        var settingsSaved = false;
         try
         {
-            var itemIndex = ProjectItems.IndexOf(ProjectItems.First(item => item.Profile == selected));
-            ProjectItems[itemIndex] = new(result, GetRunners(result));
+            var editor = new ProfileEditorWindow(selected, _store.BaseDirectory, _settings.Projects) { Owner = this };
+            if (editor.ShowDialog() != true) return;
+            var result = editor.Result;
+            var services = Services.ToArray();
+            SetSavingProjectEdits(true);
+            await Task.WhenAll(services.Select(service => service.Runner.RefreshForProfileEditAsync()));
+            if (!ReferenceEquals(selected, SelectedProject) || !services.SequenceEqual(Services))
+                throw new InvalidOperationException("The selected project changed while its settings were open. Reopen project settings and retry.");
+            foreach (var service in services)
+            {
+                service.Update();
+                if (service.IsBusy || service.IsStopping || service.Runner.HasManagedProcess ||
+                    !service.Runner.HasVerifiedNoServiceProcesses || service.Runner.Snapshot.ProcessIds.Count != 0)
+                    throw new InvalidOperationException($"Stop {service.Name} and complete a fresh process check before saving project settings.");
+            }
+            var changedApiIds = selected.Services.Where(api =>
+                SettingsStore.IsLinkableApiService(api) &&
+                result.Services.FirstOrDefault(next => next.Id.Equals(api.Id, StringComparison.OrdinalIgnoreCase)) is { } next &&
+                new Uri(api.Url).GetLeftPart(UriPartial.Authority) !=
+                new Uri(next.Url).GetLeftPart(UriPartial.Authority))
+                .Select(api => api.Id).ToHashSet(StringComparer.OrdinalIgnoreCase);
+            foreach (var apiId in changedApiIds)
+            {
+                var previousApi = selected.Services.Single(api => api.Id.Equals(apiId, StringComparison.OrdinalIgnoreCase));
+                var nextApi = result.Services.Single(api => api.Id.Equals(apiId, StringComparison.OrdinalIgnoreCase));
+                var beforeAddress = new Uri(previousApi.Url);
+                var afterAddress = new Uri(nextApi.Url);
+                if (!_store.ResolveWorkingDirectory(selected, previousApi).Equals(
+                    _store.ResolveWorkingDirectory(result, nextApi), StringComparison.OrdinalIgnoreCase))
+                    throw new InvalidOperationException("Save the API folder change first, then edit its address with both services stopped.");
+                foreach (var frontend in result.Services.Where(service =>
+                    string.Equals(service.ApiTargetServiceId, apiId, StringComparison.OrdinalIgnoreCase)))
+                {
+                    var previous = selected.Services.FirstOrDefault(service =>
+                        service.Id.Equals(frontend.Id, StringComparison.OrdinalIgnoreCase));
+                    if (previous is null || !_store.ResolveWorkingDirectory(selected, previous).Equals(
+                        _store.ResolveWorkingDirectory(result, frontend), StringComparison.OrdinalIgnoreCase))
+                        throw new InvalidOperationException("Save the Angular service and its folder first, then edit the linked API address with both services stopped.");
+                }
+                if (beforeAddress.Port != afterAddress.Port)
+                {
+                    var conflict = _settings.Projects.Where(project => project.Id != selected.Id)
+                        .SelectMany(project => project.Services).Concat(result.Services)
+                        .FirstOrDefault(other => !other.Id.Equals(apiId, StringComparison.OrdinalIgnoreCase) &&
+                            ServicePortConfiguration.GetPort(other) == afterAddress.Port);
+                    if (conflict is not null)
+                        throw new InvalidOperationException($"Port {afterAddress.Port} is already assigned to {conflict.Name}. Choose another API port.");
+                }
+                if (nextApi.ApiConfiguration is null && nextApi.StartCommand == previousApi.StartCommand)
+                {
+                    if (beforeAddress.Scheme != afterAddress.Scheme || beforeAddress.Host != afterAddress.Host)
+                        throw new InvalidOperationException("Update the API start command together with its HTTP scheme or host in project settings.");
+                    var rewritten = JsonSerializer.Deserialize<ServiceProfile>(JsonSerializer.Serialize(previousApi))!;
+                    ServicePortConfiguration.Apply(rewritten, _store.ResolveWorkingDirectory(selected, previousApi),
+                        afterAddress.Port.ToString(System.Globalization.CultureInfo.InvariantCulture));
+                    nextApi.StartCommand = rewritten.StartCommand;
+                }
+            }
+
+            var candidateSettings = JsonSerializer.Deserialize<LauncherSettings>(JsonSerializer.Serialize(_settings))!;
+            var index = candidateSettings.Projects.FindIndex(project => project.Id == selected.Id);
+            if (index < 0) throw new InvalidOperationException("The selected project was removed while its settings were open.");
+            candidateSettings.Projects[index] = result;
+            var proxyChanges = AngularDevProxyConfiguration.Prepare(selected, result, _store);
+            proxyChanges.SaveWithSettings(() => _store.Save(candidateSettings));
+            settingsSaved = true;
+
+            _settings.Projects[_settings.Projects.IndexOf(selected)] = result;
+            if (_runners.Remove(selected.Id, out var old)) foreach (var service in old) service.Runner.Dispose();
+            Projects[Projects.IndexOf(selected)] = result;
+            _refreshingProjectList = true;
+            try
+            {
+                var previousItem = ProjectItems.First(item => item.Profile == selected);
+                var itemIndex = ProjectItems.IndexOf(previousItem);
+                ProjectItems[itemIndex] = new(result, GetRunners(result))
+                {
+                    IsDetailsExpanded = previousItem.IsDetailsExpanded
+                };
+            }
+            finally { _refreshingProjectList = false; }
+            await RefreshProjectListAsync(result);
+            Notice = $"Saved {result.Name}.";
+            if (proxyChanges.UpdatedFileCount > 0)
+                Notice += " Angular's development API proxy was updated. Start the frontend to use the saved API target.";
         }
-        finally { _refreshingProjectList = false; }
-        await RefreshProjectListAsync(result);
-        Notice = $"Saved {result.Name}.";
+        catch (Exception ex)
+        {
+            if (settingsSaved)
+            {
+                Notice = $"Project settings were saved, but the dashboard could not refresh: {ex.Message}";
+                MessageBox.Show(this, Notice, "Refresh failed", MessageBoxButton.OK, MessageBoxImage.Error);
+            }
+            else ShowSaveError(ex);
+        }
+        finally
+        {
+            if (_savingProjectEdits) SetSavingProjectEdits(false);
+            if (IsEditing) SetProjectEditMode(false);
+        }
     }
 
     private void ShowSaveError(Exception ex)
@@ -554,7 +715,6 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         _refreshingProjectList = true;
         try { ProjectItems.Remove(ProjectItems.First(item => item.Profile == selected)); }
         finally { _refreshingProjectList = false; }
-        _logs.Remove(selected.Id);
         await RefreshProjectListAsync(saveSelection: false);
         Notice = $"Removed the saved profile for {selected.Name}.";
     }
@@ -564,22 +724,20 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         var current = property switch
         {
             nameof(ProjectsVisible) => ProjectsVisible, nameof(ToolsVisible) => ToolsVisible,
-            nameof(ServicesVisible) => ServicesVisible, nameof(ConsoleVisible) => ConsoleVisible,
-            nameof(DatabaseVisible) => DatabaseVisible, _ => visible
+            nameof(ServicesVisible) => ServicesVisible, nameof(NextCommitVisible) => NextCommitVisible, _ => visible
         };
         if (current == visible) return;
-        RememberPanelSizes();
         switch (property)
         {
             case nameof(ProjectsVisible): _settings.Layout.ProjectsVisible = visible; break;
             case nameof(ToolsVisible): _settings.Layout.ToolsVisible = visible; break;
             case nameof(ServicesVisible): _settings.Layout.ServicesVisible = visible; break;
-            case nameof(ConsoleVisible): _settings.Layout.ConsoleVisible = visible; break;
-            case nameof(DatabaseVisible): _settings.Layout.DatabaseVisible = visible; break;
+            case nameof(NextCommitVisible): _settings.Layout.NextCommitVisible = visible; break;
         }
         ApplyLayout();
         Changed(property);
         SaveLayout();
+        if (property == nameof(NextCommitVisible) && visible) _ = RefreshNextCommitAsync();
     }
 
     private void ApplyLayout()
@@ -595,39 +753,16 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         ToolsRow.Height = !ToolsVisible ? new GridLength(0) : ProjectsVisible ? GridLength.Auto : new GridLength(1, GridUnitType.Star);
         ToolsScroller.MaxHeight = ProjectsVisible ? 250 : double.PositiveInfinity;
 
-        var upperVisible = ServicesVisible || ConsoleVisible;
-        var columnsSplit = ServicesVisible && ConsoleVisible;
         ServicesPanel.Visibility = Display(ServicesVisible);
         BatchControlsPanel.Visibility = Display(ServicesVisible || IsEditing);
-        ConsolePanel.Visibility = Display(ConsoleVisible);
-        ServicesColumn.MinWidth = ServicesVisible ? 320 : 0;
-        ConsoleColumn.MinWidth = ConsoleVisible ? 240 : 0;
-        ServicesColumn.Width = ServicesVisible ? new GridLength(columnsSplit ? 1 - _settings.Layout.ConsoleShare : 1, GridUnitType.Star) : new GridLength(0);
-        ConsoleColumn.Width = ConsoleVisible ? new GridLength(columnsSplit ? _settings.Layout.ConsoleShare : 1, GridUnitType.Star) : new GridLength(0);
-        ConsoleDividerColumn.Width = new GridLength(columnsSplit ? 10 : 0);
-        ConsoleDivider.Visibility = Display(columnsSplit);
-        ServiceConsoleGrid.Visibility = Display(upperVisible);
-
-        var rowsSplit = upperVisible && DatabaseVisible;
-        ServiceConsoleRow.MinHeight = upperVisible ? 140 : 0;
-        DatabaseRow.MinHeight = DatabaseVisible ? (IsEditing ? 140 : 270) : 0;
-        ServiceConsoleRow.Height = upperVisible ? new GridLength(rowsSplit ? _settings.Layout.ServicesHeightShare : 1, GridUnitType.Star) : new GridLength(0);
-        DatabaseRow.Height = DatabaseVisible ? new GridLength(rowsSplit ? 1 - _settings.Layout.ServicesHeightShare : 1, GridUnitType.Star) : new GridLength(0);
-        WorkspaceDividerRow.Height = new GridLength(rowsSplit ? 10 : 0);
-        WorkspaceDivider.Visibility = Display(rowsSplit);
-        DatabaseSection.Visibility = Display(DatabaseVisible);
-        EmptyWorkspace.Visibility = Display(!upperVisible && !DatabaseVisible);
-        // Give the empty-state message a real row even when every workspace section is hidden.
-        if (!upperVisible && !DatabaseVisible) ServiceConsoleRow.Height = new GridLength(1, GridUnitType.Star);
-    }
-
-    private void RememberPanelSizes()
-    {
-        if (!_layoutReady || !IsLoaded) return;
-        if (ServicesVisible && ConsoleVisible && ServicesColumn.ActualWidth + ConsoleColumn.ActualWidth > 0)
-            _settings.Layout.ConsoleShare = ConsoleColumn.ActualWidth / (ServicesColumn.ActualWidth + ConsoleColumn.ActualWidth);
-        if ((ServicesVisible || ConsoleVisible) && DatabaseVisible && ServiceConsoleRow.ActualHeight + DatabaseRow.ActualHeight > 0)
-            _settings.Layout.ServicesHeightShare = ServiceConsoleRow.ActualHeight / (ServiceConsoleRow.ActualHeight + DatabaseRow.ActualHeight);
+        EmptyWorkspace.Visibility = Display(!ServicesVisible);
+        NextCommitPanel.Visibility = Display(NextCommitVisible);
+        NextCommitSplitter.Visibility = Display(NextCommitVisible);
+        NextCommitColumn.MinWidth = NextCommitVisible ? 280 : 0;
+        if (!NextCommitVisible) NextCommitColumn.Width = new GridLength(0);
+        else if (NextCommitColumn.Width.Value == 0) NextCommitColumn.Width = new GridLength(402);
+        NextCommitSplitterColumn.Width = new GridLength(NextCommitVisible ? 10 : 0);
+        RepositionSectionsMenu();
     }
 
     private void SaveLayout()
@@ -642,36 +777,13 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         if (sender is not Button { Tag: string section }) return;
         SetSectionVisibility(section + "Visible", false);
         // Keep keyboard focus on a visible control that can immediately reopen the section.
-        (section switch
-        {
-            "Projects" => ProjectsToggle, "Tools" => ToolsToggle, "Services" => ServicesToggle,
-            "Console" => ConsoleToggle, "Database" => DatabaseToggle, _ => null
-        })?.Focus();
+        SectionsMenuToggle.Focus();
     }
 
-    private void ResetLayout_Click(object sender, RoutedEventArgs e)
+    private void ShowServices_Click(object sender, RoutedEventArgs e)
     {
-        _settings.Layout = new WorkspaceLayout();
-        ApplyLayout();
-        foreach (var property in new[] { nameof(ProjectsVisible), nameof(ToolsVisible), nameof(ServicesVisible), nameof(ConsoleVisible), nameof(DatabaseVisible) }) Changed(property);
-        Notice = "All sections are visible. Panel sizes restored.";
-        SaveLayout();
-        ProjectsToggle.Focus();
-    }
-
-    private void LayoutDivider_DragCompleted(object sender, DragCompletedEventArgs e)
-    {
-        if (e.Canceled) return;
-        // Preview splitters commit their GridLengths during DragCompleted; arrange before reading actual sizes.
-        UpdateLayout();
-        RememberPanelSizes();
-        SaveLayout();
-    }
-
-    private void LayoutDivider_LostKeyboardFocus(object sender, KeyboardFocusChangedEventArgs e)
-    {
-        RememberPanelSizes();
-        SaveLayout();
+        ServicesVisible = true;
+        SectionsMenuToggle.Focus();
     }
 
     [DllImport("dwmapi.dll")]
