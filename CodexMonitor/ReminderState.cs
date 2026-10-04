@@ -7,7 +7,8 @@ public enum AgentRunState
     Completed,
     Failed,
     Unknown,
-    Idle
+    Idle,
+    NeedsInput
 }
 
 public sealed record AgentSnapshot(
@@ -17,7 +18,12 @@ public sealed record AgentSnapshot(
     AgentRunState State,
     string? ParentId = null,
     string? LatestTurnId = null,
-    DateTimeOffset? CompletedAt = null);
+    DateTimeOffset? CompletedAt = null)
+{
+    // Passive tracking identity only; never infer status from an identity or timestamp.
+    public string? ActivityIdentity { get; init; }
+    public DateTimeOffset? ActivityStartedAt { get; init; }
+}
 
 public sealed record ReminderUpdate(
     string Status,
@@ -54,9 +60,10 @@ public sealed class ReminderState
 
         var running = agents.Count(agent => agent.State == AgentRunState.Running);
         var waiting = agents.Count(agent => agent.State == AgentRunState.Waiting);
-        _lastActiveCount = running + waiting;
+        var needsInput = agents.Count(agent => agent.State == AgentRunState.NeedsInput);
+        _lastActiveCount = running + waiting + needsInput;
         _lastActiveIds.Clear();
-        foreach (var agent in agents.Where(agent => agent.State is AgentRunState.Running or AgentRunState.Waiting))
+        foreach (var agent in agents.Where(agent => agent.State is AgentRunState.Running or AgentRunState.Waiting or AgentRunState.NeedsInput))
             _lastActiveIds.Add(agent.Id);
 
         ReminderUpdate Result(string status, bool sound = false) =>
@@ -96,11 +103,13 @@ public sealed class ReminderState
             _dismissed = false;
             foreach (var agent in agents)
             {
-                if (agent.State is AgentRunState.Running or AgentRunState.Waiting or AgentRunState.Unknown)
+                if (agent.State is AgentRunState.Running or AgentRunState.Waiting or AgentRunState.NeedsInput or AgentRunState.Unknown)
                     _batchIds.Add(agent.Id);
             }
 
-            return Result(waiting > 0
+            return Result(needsInput > 0
+                ? $"{running} running; {waiting} queued or waiting; {needsInput} need an answer."
+                : waiting > 0
                 ? $"{running} running; {waiting} queued or waiting."
                 : $"Watching {running} running Codex task(s).");
         }

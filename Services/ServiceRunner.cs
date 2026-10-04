@@ -5,18 +5,23 @@ using System.Net.Http;
 using System.Text.RegularExpressions;
 using System.Threading.Channels;
 using FullStackLauncher.Models;
+using Microsoft.Win32.SafeHandles;
 
 namespace FullStackLauncher.Services;
 
 /// <summary>
-/// Runs explicitly configured local commands. Normal shutdown should await StopManagedAsync before
-/// Dispose; Dispose also performs a best-effort kill of owned trees. Externally launched services
+/// Runs explicitly configured local commands. Stop shutdown awaits StopManagedAsync before Dispose.
+/// Keep-running shutdown prepares retained identities and output, then disposes without termination. Externally launched services
 /// are stopped only through explicit stop, restart, or confirmed conflict recovery.
 /// </summary>
 public sealed class ServiceRunner : IDisposable
 {
+    // Every saved service has a runner, including unselected projects. Register command
+    // folders before commands start so another service cannot adopt their child processes.
+    private static readonly ConcurrentDictionary<Guid, string> CommandFolders = new();
+    private readonly Guid _runnerId = Guid.NewGuid();
     private static readonly Regex Ansi = new(@"\x1B(?:\][^\x07]*(?:\x07|\x1B\\)|\[[0-?]*[ -/]*[@-~])", RegexOptions.Compiled);
-    private static readonly Regex StartupUrl = new(@"(?:Now listening on:|\bLocal:|(?:listening|running|started|ready)\s+(?:at|on)\s*:?|open your browser on)\s*(?<url>https?://[^\s<>""']+)", RegexOptions.Compiled | RegexOptions.IgnoreCase);
+    private static readonly Regex StartupUrl = new(@"(?:Now listening on:|\bLocal:|(?:listening|running|started|ready)\s+(?:at|on)\s*:?|open your browser on|is being served at|Waiting for connection from Dart debug extension at)\s*(?<url>https?://[^\s<>""']+)", RegexOptions.Compiled | RegexOptions.IgnoreCase);
     private static readonly Regex FrontendBuildSucceeded = new(
         @"\b(?:application bundle generation complete|compiled successfully|successfully compiled|compiled with warnings|build succeeded)\b|\bVITE\s+v\S+\s+ready in\s+\d|^\s*(?:[✓✔√]\s*)?(?:Ready in\s+\d|Compiled\s+.+\s+in\s+\d)",
         RegexOptions.NonBacktracking | RegexOptions.IgnoreCase, TimeSpan.FromMilliseconds(100));
@@ -46,8 +51,17 @@ public sealed class ServiceRunner : IDisposable
     private long _outputGeneration;
     private bool _repeatDiagnosticAfterConsoleReset;
     private Process? _startProcess;
+    private Process? _maintenanceProcess;
+    private string? _maintenanceLabel;
+    private ServiceOutputCapture? _startOutputCapture;
+    private ServiceOutputCapture? _maintenanceOutputCapture;
     private ConsoleProcessSession? _consoleSession;
     private ConsoleProcessSession? _maintenanceSession;
+    private readonly Dictionary<string, SafeFileHandle> _retainedJobs = [];
+    private readonly HashSet<ProcessIdentity> _recoveredRoots = [];
+    private bool _runtimeLoaded;
+    private volatile bool _preparingKeepRunning;
+    private bool _keepRunningPrepared;
     private bool _consoleWasStopped;
     private CancellationTokenSource? _operationCancellation;
     private ServiceSnapshot _snapshot = new(ServiceState.Checking, "Waiting for the first process and endpoint check", []);
@@ -69,18 +83,24 @@ public sealed class ServiceRunner : IDisposable
     private bool _frontendRunActive;
     private bool _frontendBuildSuccessful;
     private bool _frontendReadyEmitted;
+    private long _managedFlutterRunVersion;
+    private bool _flutterRunActive;
+    private bool _flutterWebBuildSuccessful;
+    private bool _flutterBuildFailed;
+    private string _flutterStartupDetail = "Starting Flutter; waiting for the app window";
+    private readonly HashSet<ProcessIdentity> _readyFlutterApps = [];
+    private ProcessIdentity[] _flutterAppProcessIdentities = [];
     public string? AppliedConfigurationEnvironment => HasManagedProcess && _apiProcessLaunched ? _launchConfiguration?.Environment : null;
     public string? AppliedDatabaseIdentifier => HasManagedProcess && _apiProcessLaunched ? _launchConfiguration?.DatabaseIdentifier : null;
     public long ManagedApiRunVersion => Interlocked.Read(ref _managedApiRunVersion);
-    internal bool MatchesAppliedLocalDatabaseConnection(DatabaseConnectionSource source) =>
-        source is not null && Snapshot.State == ServiceState.Running && HasManagedProcess &&
-        _apiProcessLaunched && _launchConfiguration?.MatchesAppliedLocalDatabaseConnection(source) == true;
+    internal int StopRevision => Volatile.Read(ref _stopRevision);
     public bool ConfigurationNeedsRestart { get; set; }
 
     public ServiceRunner(ServiceProfile profile, string workingDirectory)
     {
         Profile = profile;
         WorkingDirectory = Path.GetFullPath(workingDirectory);
+        if (profile.IsGenericConsole || profile.IsCommandApi) CommandFolders[_runnerId] = WorkingDirectory;
         if (profile.IsConsole) _snapshot = new(ServiceState.Checking, "Waiting for the first process check", []);
         _ = PumpLogsAsync();
     }
@@ -88,13 +108,17 @@ public sealed class ServiceRunner : IDisposable
     public event Action<ServiceLog>? LogReceived;
     internal event Action<string, long>? FrontendReady;
     internal event Action? ConsoleOutputReset;
+    internal event Action? SnapshotChanged;
     internal long ConsoleResetSequence => Interlocked.Read(ref _consoleResetSequence);
     internal long ManagedFrontendRunVersion => Interlocked.Read(ref _managedFrontendRunVersion);
     public ServiceProfile Profile { get; }
     public string WorkingDirectory { get; }
     public ServiceSnapshot Snapshot => Volatile.Read(ref _snapshot);
     public bool HasManagedProcess => _hasManagedProcess;
+    public bool UsesManagedProcessTrackingOnly => Profile.IsGenericConsole || Profile.IsCommandApi || CommandFolders.Any(folder =>
+        folder.Key != _runnerId && SettingsStore.WorkingFoldersOverlap(WorkingDirectory, folder.Value));
     public bool HasVerifiedNoServiceProcesses => _hasVerifiedNoServiceProcesses;
+    internal IReadOnlyList<ProcessIdentity> FlutterAppProcessIdentities => Volatile.Read(ref _flutterAppProcessIdentities);
 
     internal bool CanOpenReadyFrontend(long runVersion)
     {
@@ -147,13 +171,25 @@ public sealed class ServiceRunner : IDisposable
         }
     }
 
-    public Task ApplyConfigurationAsync(ApiLaunchConfiguration configuration) => WithGateAsync(async () =>
+    public Task ApplyConfigurationAsync(ApiLaunchConfiguration configuration)
     {
-        // The UI preflights and saves the selection before entering the process operation.
-        if (await StopAndClearConsoleAsync()) await StartCoreAsync(configuration);
-    });
+        CancelMaintenance();
+        var revision = Volatile.Read(ref _stopRevision);
+        return WithGateAsync(async () =>
+        {
+            // The UI preflights and saves the selection before entering the process operation.
+            RequireCurrentRestart();
+            if (await StopAndClearConsoleAsync()) await StartCoreAsync(configuration, RequireCurrentRestart);
+        });
 
-    private ApiLaunchConfiguration? PrepareConfiguration() => !Profile.IsConsole && Profile.ApiConfiguration is { } selection
+        void RequireCurrentRestart()
+        {
+            if (revision != Volatile.Read(ref _stopRevision))
+                throw new InvalidOperationException("Restart canceled by a subsequent service stop.");
+        }
+    }
+
+    private ApiLaunchConfiguration? PrepareConfiguration() => !Profile.UsesProcessSession && Profile.ApiConfiguration is { } selection
         ? ApiLaunchConfiguration.Prepare(Profile, WorkingDirectory, selection.Environment) : null;
 
     public async Task ForceStopAsync(Func<string, bool>? confirmConflict = null)
@@ -254,6 +290,98 @@ public sealed class ServiceRunner : IDisposable
             throw new InvalidOperationException(_lastError ?? "Launcher-owned processes could not be stopped. Keep the launcher open and try again.");
     }
 
+    public async Task PrepareKeepRunningAsync()
+    {
+        if (_disposed) return;
+        _preparingKeepRunning = true;
+        // Maintenance normally owns the gate until completion. Relinquish only its wait;
+        // its process, child job and output stay alive for this explicit keep-running choice.
+        try { Volatile.Read(ref _operationCancellation)?.Cancel(); }
+        catch (ObjectDisposedException) { }
+        await _gate.WaitAsync();
+        try
+        {
+            if (_disposed) return;
+            var inspection = await InspectAsync(fresh: true);
+            if (inspection.Inventory.InspectionError is not null)
+                throw new InvalidOperationException(inspection.Inventory.InspectionError + " Services were not detached. Keep the launcher open and try again.");
+            await Task.Run(() =>
+            {
+                _startOutputCapture?.PrepareKeepRunning();
+                _maintenanceOutputCapture?.PrepareKeepRunning();
+                _consoleSession?.PrepareKeepRunning();
+                _maintenanceSession?.PrepareKeepRunning();
+            });
+            // Runtime staging can take time. Capture the latest children before committing recovery data.
+            inspection = await InspectAsync(fresh: true);
+            if (inspection.Inventory.InspectionError is not null)
+                throw new InvalidOperationException(inspection.Inventory.InspectionError + " Services were not detached. Keep the launcher open and try again.");
+            await Task.Run(() =>
+            {
+                var jobs = _retainedJobs.Keys.Concat(new[] { _consoleSession?.JobName, _maintenanceSession?.JobName }.OfType<string>());
+                ServiceRuntimeStore.Save(Profile.Id, WorkingDirectory, inspection.Owned.Select(p => p.Identity), jobs);
+            });
+            _keepRunningPrepared = true;
+        }
+        finally { _gate.Release(); }
+    }
+
+    public async Task CancelKeepRunningPreparationAsync()
+    {
+        if (_disposed || (!_preparingKeepRunning && !_keepRunningPrepared)) return;
+        await _gate.WaitAsync();
+        try
+        {
+            await Task.Run(() =>
+            {
+                // Attempt every rollback even when Windows rejects one handle operation.
+                var failures = new List<Exception>();
+                foreach (var cancel in new Action[] {
+                    () => _startOutputCapture?.CancelKeepRunningPreparation(),
+                    () => _maintenanceOutputCapture?.CancelKeepRunningPreparation(),
+                    () => _consoleSession?.CancelKeepRunningPreparation(),
+                    () => _maintenanceSession?.CancelKeepRunningPreparation() })
+                    try { cancel(); }
+                    catch (Exception ex) when (ex is not OutOfMemoryException) { failures.Add(ex); }
+                if (failures.Count > 0) throw new InvalidOperationException("Services remain running, but output retention could not be fully reset. Keep the launcher open and try closing again.", failures[0]);
+            });
+        }
+        finally
+        {
+            _preparingKeepRunning = false;
+            _keepRunningPrepared = false;
+            _gate.Release();
+        }
+    }
+
+    public void DisposeKeepingServicesRunning()
+    {
+        if (_disposed) return;
+        // Final disposal runs off the dispatcher. An operation's pending final refresh may
+        // still own the gate after close preparation, so never release native handles concurrently.
+        _gate.Wait();
+        try
+        {
+            if (_disposed) return;
+            if (!_keepRunningPrepared) throw new InvalidOperationException("Services must be prepared before leaving them running.");
+            _disposed = true;
+            _intentionalStop = true;
+            InvalidateFrontendRun();
+            _consoleSession?.DisposeKeepingRunning();
+            _maintenanceSession?.DisposeKeepingRunning();
+            _startOutputCapture?.DisposeKeepingRunning();
+            _maintenanceOutputCapture?.DisposeKeepingRunning();
+            foreach (var job in _retainedJobs.Values) job.Dispose();
+            _retainedJobs.Clear();
+            _owned.Clear();
+            _startProcess?.Dispose();
+            _maintenanceProcess?.Dispose();
+            _logs.Writer.TryComplete();
+            CommandFolders.TryRemove(_runnerId, out _);
+        }
+        finally { _gate.Release(); }
+    }
+
     private async Task WithGateAsync(Func<Task> operation)
     {
         if (_disposed) return;
@@ -274,7 +402,7 @@ public sealed class ServiceRunner : IDisposable
 
     private async Task StartCoreAsync(ApiLaunchConfiguration? configuration, Action? beforeStart = null)
     {
-        if (Profile.IsConsole) configuration = null;
+        if (Profile.UsesProcessSession) configuration = null;
         if (!Profile.IsConsole && NormalizeLocalUri(Profile.Url) is null)
             throw new InvalidOperationException("Set a valid local HTTP or HTTPS URL in project settings.");
         var inspection = await InspectAsync(fresh: true);
@@ -304,12 +432,15 @@ public sealed class ServiceRunner : IDisposable
             await Task.Run(previousSession.Dispose);
         }
         _startProcess?.Dispose();
+        _startOutputCapture?.Dispose();
+        _startOutputCapture = null;
         // Inspection and output draining yield. Respect a stop or dashboard override
         // that arrived during those awaits before launching another process.
         beforeStart?.Invoke();
         _startProcess = await Task.Run(() => StartCommand(Profile.StartCommand, detectUrl: true, configuration));
         ConfigurationNeedsRestart = false;
-        Publish(ServiceState.Starting, Profile.IsConsole ? "Starting console command" : "Starting; waiting for the local HTTP endpoint",
+        Publish(ServiceState.Starting, FlutterRuntimeStatus.IsNative(Profile) ? "Starting Flutter; waiting for the app window"
+            : Profile.IsConsole ? "Starting console command" : "Starting; waiting for the local HTTP endpoint",
             [_startProcess.Id], BuildUiUrl());
         // Capture early descendants immediately; subsequent refreshes keep identities even if the shell exits.
         var started = await InspectAsync(fresh: true);
@@ -332,14 +463,17 @@ public sealed class ServiceRunner : IDisposable
         _lastError = null;
         using var cancellation = new CancellationTokenSource();
         Volatile.Write(ref _operationCancellation, cancellation);
-        if (stopRevision != Volatile.Read(ref _stopRevision)) cancellation.Cancel();
+        if (_preparingKeepRunning || stopRevision != Volatile.Read(ref _stopRevision)) cancellation.Cancel();
         if (cancellation.IsCancellationRequested)
         {
             Interlocked.CompareExchange(ref _operationCancellation, null, cancellation);
             return;
         }
-        using var process = await Task.Run(() => StartCommand(command, detectUrl: false));
+        var process = await Task.Run(() => StartCommand(command, detectUrl: false));
+        _maintenanceProcess = process;
+        _maintenanceLabel = label;
         var maintenanceSession = _maintenanceSession;
+        var retainedForExit = false;
         Publish(ServiceState.Busy, $"{label} in progress", [process.Id], BuildUiUrl());
         try
         {
@@ -352,17 +486,22 @@ public sealed class ServiceRunner : IDisposable
         }
         catch (OperationCanceledException)
         {
-            if (maintenanceSession is not null) await Task.Run(maintenanceSession.Stop);
-            await KillProcessesAsync(ProcessInspector.Descendants((await ProcessInspector.ReadAsync(true, includePorts: !Profile.IsConsole)).Processes,
-                [new ProcessIdentity(process.Id, process.StartTime.ToUniversalTime().Ticks)]));
-            Log($"{label} stopped.");
+            retainedForExit = _preparingKeepRunning;
+            if (retainedForExit) Log($"{label} remains running while the launcher prepares to close.");
+            else
+            {
+                if (maintenanceSession is not null) await Task.Run(maintenanceSession.Stop);
+                await KillProcessesAsync(ProcessInspector.Descendants((await ProcessInspector.ReadAsync(true, includePorts: !Profile.IsConsole)).Processes,
+                    [new ProcessIdentity(process.Id, process.StartTime.ToUniversalTime().Ticks)]));
+                Log($"{label} stopped.");
+            }
         }
         finally
         {
             Interlocked.CompareExchange(ref _operationCancellation, null, cancellation);
             try
             {
-                if (maintenanceSession is not null)
+                if (!retainedForExit && maintenanceSession is not null)
                 {
                     // A canceled/failed maintenance command must not leave descendants or output readers behind.
                     try
@@ -377,16 +516,28 @@ public sealed class ServiceRunner : IDisposable
                     }
                 }
             }
-            finally { await RefreshCoreAsync(); }
+            finally
+            {
+                if (!retainedForExit)
+                {
+                    _maintenanceProcess = null;
+                    _maintenanceLabel = null;
+                    _maintenanceOutputCapture?.Dispose();
+                    _maintenanceOutputCapture = null;
+                    process.Dispose();
+                }
+                await RefreshCoreAsync();
+            }
         }
     }
 
     private Process StartCommand(string command, bool detectUrl, ApiLaunchConfiguration? configuration = null)
     {
-        if (Profile.IsConsole) return StartConsoleCommand(command, isStart: detectUrl);
+        if (Profile.UsesProcessSession) return StartConsoleCommand(command, isStart: detectUrl);
         var outputGeneration = Interlocked.Read(ref _outputGeneration);
         var frontendRunVersion = detectUrl && FrontendServiceSupport.IsFrontend(Profile)
             ? BeginFrontendRun() : (long?)null;
+        var flutterRunVersion = detectUrl && FlutterRuntimeStatus.IsWeb(Profile) ? BeginFlutterRun() : (long?)null;
         var process = new Process
         {
             StartInfo = new ProcessStartInfo
@@ -406,8 +557,6 @@ public sealed class ServiceRunner : IDisposable
         if (configuration is not null) process.StartInfo = configuration.StartInfo;
         _apiProcessLaunched = detectUrl && configuration is not null;
         if (detectUrl) _launchConfiguration = configuration;
-        process.OutputDataReceived += (_, e) => ReceiveOutput(e.Data, false, detectUrl, configuration, outputGeneration, frontendRunVersion);
-        process.ErrorDataReceived += (_, e) => ReceiveOutput(e.Data, true, detectUrl, configuration, outputGeneration, frontendRunVersion);
         if (detectUrl)
             process.Exited += (_, _) =>
             {
@@ -419,6 +568,7 @@ public sealed class ServiceRunner : IDisposable
                     {
                         if (outputGeneration != _outputGeneration) return;
                         if (frontendRunVersion is not null && frontendRunVersion != _managedFrontendRunVersion) return;
+                        if (flutterRunVersion is not null && flutterRunVersion != _managedFlutterRunVersion) return;
                         if (!expected && code != 0)
                             _lastError = $"Start command exited with code {code}. See the output log.";
                         if (frontendRunVersion is not null && (expected || code != 0))
@@ -445,15 +595,19 @@ public sealed class ServiceRunner : IDisposable
         _owned[identity.Id] = identity;
         _hasManagedProcess = true;
         process.StandardInput.Close();
-        process.BeginOutputReadLine();
-        process.BeginErrorReadLine();
+        var capture = new ServiceOutputCapture(process, (line, error) =>
+            ReceiveOutput(line, error, detectUrl, configuration, outputGeneration, frontendRunVersion, flutterRunVersion));
+        if (detectUrl) _startOutputCapture = capture;
+        else _maintenanceOutputCapture = capture;
         return process;
     }
 
     private Process StartConsoleCommand(string command, bool isStart)
     {
+        var outputGeneration = Interlocked.Read(ref _outputGeneration);
         Log($"> {command}", kind: ServiceLogKind.Command);
         var session = ConsoleProcessSession.Create(command, WorkingDirectory);
+        var flutterRunVersion = isStart && FlutterRuntimeStatus.IsNative(Profile) ? BeginFlutterRun() : (long?)null;
         if (isStart) _consoleSession = session;
         else _maintenanceSession = session;
         _launchConfiguration = null;
@@ -470,15 +624,19 @@ public sealed class ServiceRunner : IDisposable
                 {
                     var code = process.ExitCode;
                     var expected = _expectedExits.TryRemove(process.Id, out _) || _intentionalStop || _disposed || _consoleWasStopped;
-                    if (!ReferenceEquals(_consoleSession, session)) return;
-                    if (!expected && code != 0) _lastError = $"Command exited with code {code}. See the output log.";
-                    Log($"Console command exited with code {code}.", code != 0 && !expected,
-                        code == 0 && !expected ? ServiceLogKind.Success : ServiceLogKind.Information);
+                    lock (_consoleLogSync)
+                    {
+                        if (!ReferenceEquals(_consoleSession, session) || outputGeneration != _outputGeneration) return;
+                        if (!expected && code != 0) _lastError = $"Command exited with code {code}. See the output log.";
+                    }
+                    Log($"{(Profile.IsCommandApi ? "API" : "Console")} command exited with code {code}.", code != 0 && !expected,
+                        code == 0 && !expected ? ServiceLogKind.Success : ServiceLogKind.Information, outputGeneration);
                 }
                 catch (InvalidOperationException) { }
             };
             process.EnableRaisingEvents = true;
-            session.Resume((line, error) => ReceiveOutput(line, error, detectUrl: false, configuration: null));
+            session.Resume((line, error) => ReceiveOutput(line, error, detectUrl: isStart && Profile.IsCommandApi, configuration: null,
+                outputGeneration: outputGeneration, flutterRunVersion: flutterRunVersion));
             return process;
         }
         catch
@@ -491,13 +649,15 @@ public sealed class ServiceRunner : IDisposable
     }
 
     private void ReceiveOutput(string? line, bool error, bool detectUrl, ApiLaunchConfiguration? configuration,
-        long? outputGeneration = null, long? frontendRunVersion = null)
+        long? outputGeneration = null, long? frontendRunVersion = null, long? flutterRunVersion = null)
     {
         if (outputGeneration is not null && outputGeneration != Interlocked.Read(ref _outputGeneration)) return;
         if (frontendRunVersion is not null && frontendRunVersion != ManagedFrontendRunVersion) return;
+        if (flutterRunVersion is not null && flutterRunVersion != Interlocked.Read(ref _managedFlutterRunVersion)) return;
         if (line is null) return;
         line = StripTerminalCodes(line);
         if (string.IsNullOrWhiteSpace(line)) return;
+        if (flutterRunVersion is { } flutterVersion) ObserveFlutterOutput(line, flutterVersion);
         if (detectUrl)
         {
             var discovered = DiscoverLocalUrl(line);
@@ -522,6 +682,64 @@ public sealed class ServiceRunner : IDisposable
     }
 
     internal static string StripTerminalCodes(string line) => Ansi.Replace(line, "").Replace("\r", "");
+
+    private long BeginFlutterRun()
+    {
+        lock (_consoleLogSync)
+        {
+            _flutterRunActive = true;
+            _flutterWebBuildSuccessful = false;
+            _flutterBuildFailed = false;
+            _readyFlutterApps.Clear();
+            Volatile.Write(ref _flutterAppProcessIdentities, []);
+            _flutterStartupDetail = FlutterRuntimeStatus.IsWeb(Profile)
+                ? "Starting Flutter; waiting for web compilation" : "Starting Flutter; waiting for the app window";
+            return Interlocked.Increment(ref _managedFlutterRunVersion);
+        }
+    }
+
+    private void ObserveFlutterOutput(string line, long version)
+    {
+        lock (_consoleLogSync)
+        {
+            if (!_flutterRunActive || version != _managedFlutterRunVersion || _intentionalStop || _disposed) return;
+            var text = line.Trim();
+            if (text.Contains("Failed to compile application", StringComparison.OrdinalIgnoreCase) ||
+                text.Contains("Error launching application", StringComparison.OrdinalIgnoreCase) ||
+                text.StartsWith("Unable to find executable", StringComparison.OrdinalIgnoreCase) ||
+                text.StartsWith("Unable to start executable", StringComparison.OrdinalIgnoreCase))
+            {
+                _flutterBuildFailed = true;
+                _flutterWebBuildSuccessful = false;
+                _flutterStartupDetail = "Flutter could not start the app. See the output log.";
+            }
+            else if (FlutterRuntimeStatus.IsWeb(Profile) &&
+                (text.Contains(" is being served at http", StringComparison.OrdinalIgnoreCase) ||
+                 text.StartsWith("Waiting for connection from Dart debug extension at http", StringComparison.OrdinalIgnoreCase) ||
+                 text.Equals("Flutter run key commands.", StringComparison.OrdinalIgnoreCase) ||
+                 text.StartsWith("Recompile complete.", StringComparison.OrdinalIgnoreCase)))
+            {
+                _flutterWebBuildSuccessful = true;
+                _flutterBuildFailed = false;
+            }
+            else if (text.StartsWith("Building ", StringComparison.OrdinalIgnoreCase) ||
+                text.StartsWith("Compiling ", StringComparison.OrdinalIgnoreCase) ||
+                text.StartsWith("Performing hot restart", StringComparison.OrdinalIgnoreCase))
+            {
+                _flutterStartupDetail = FlutterRuntimeStatus.IsWeb(Profile)
+                    ? "Flutter is compiling the web app" : "Flutter is building the app; waiting for the app window";
+                _flutterBuildFailed = false;
+                if (FlutterRuntimeStatus.IsWeb(Profile)) _flutterWebBuildSuccessful = false;
+            }
+            else if (text.StartsWith("Resolving dependencies", StringComparison.OrdinalIgnoreCase) ||
+                text.StartsWith("Downloading packages", StringComparison.OrdinalIgnoreCase))
+                _flutterStartupDetail = "Flutter is preparing packages";
+            else if (text.StartsWith("Launching ", StringComparison.OrdinalIgnoreCase) ||
+                text.StartsWith("Syncing files to device", StringComparison.OrdinalIgnoreCase))
+                _flutterStartupDetail = FlutterRuntimeStatus.IsWeb(Profile)
+                    ? "Flutter is starting the web app; waiting for compilation" : "Flutter is launching the app; waiting for the app window";
+        }
+    }
 
     private long BeginFrontendRun()
     {
@@ -606,7 +824,8 @@ public sealed class ServiceRunner : IDisposable
     }
 
     private sealed record Inspection(ProcessInventory Inventory, IReadOnlyList<InspectedProcess> All,
-        IReadOnlyList<InspectedProcess> Owned, IReadOnlyList<ListeningPort> ReportedListeners);
+        IReadOnlyList<InspectedProcess> Owned, IReadOnlyList<ListeningPort> ReportedListeners,
+        FlutterRuntimeStatus.NativeEvidence FlutterApps);
 
     // The inventory cache may already be complete. Dispatch the whole inspection, including
     // native identity/job checks and ownership traversal, instead of resuming that work on WPF.
@@ -614,6 +833,24 @@ public sealed class ServiceRunner : IDisposable
     private Task<Inspection> InspectAsync(bool fresh = false) => Task.Run(async () =>
     {
         var inventory = await ProcessInspector.ReadAsync(fresh, includePorts: !Profile.IsConsole).ConfigureAwait(false);
+        var ancestors = ProcessInspector.Ancestors(inventory.Processes);
+        if (!_runtimeLoaded)
+        {
+            var previous = ServiceRuntimeStore.Load(Profile.Id, WorkingDirectory);
+            if (previous is not null)
+            {
+                foreach (var identity in previous.Processes.Where(p => !ancestors.Contains(p.Id) && ProcessInspector.IsSameProcess(p)))
+                {
+                    _owned[identity.Id] = identity;
+                    _recoveredRoots.Add(identity);
+                }
+                if (Profile.UsesProcessSession)
+                    foreach (var name in previous.ConsoleJobs)
+                        if (!_retainedJobs.ContainsKey(name) && ConsoleProcessSession.OpenRetainedJob(name) is { } job)
+                            _retainedJobs.Add(name, job);
+            }
+            _runtimeLoaded = true;
+        }
         var consoleMembers = new List<InspectedProcess>();
         var consoleInspectionFailed = false;
         foreach (var session in new[] { _consoleSession, _maintenanceSession }.OfType<ConsoleProcessSession>())
@@ -628,10 +865,31 @@ public sealed class ServiceRunner : IDisposable
                 inventory = inventory with { InspectionError = ex.Message };
             }
         }
+        foreach (var retained in _retainedJobs.ToArray())
+        {
+            try
+            {
+                var members = ConsoleProcessSession.ReadJobProcesses(retained.Value);
+                if (members.Count == 0)
+                {
+                    // A completed retained run must not pollute the next run's origin or recovery record.
+                    _retainedJobs.Remove(retained.Key);
+                    retained.Value.Dispose();
+                }
+                else consoleMembers.AddRange(members);
+            }
+            catch (Exception ex) when (ex is InvalidOperationException or System.ComponentModel.Win32Exception)
+            {
+                consoleInspectionFailed = true;
+                inventory = inventory with { InspectionError = ex.Message };
+            }
+        }
         var processById = inventory.Processes.ToDictionary(p => p.Id);
         foreach (var member in consoleMembers)
             if (!processById.TryGetValue(member.Id, out var existing) || existing.Identity != member.Identity)
                 processById[member.Id] = member;
+            else if (string.IsNullOrEmpty(existing.Executable) && !string.IsNullOrEmpty(member.Executable))
+                processById[member.Id] = existing with { Executable = member.Executable };
         inventory = inventory with { Processes = processById.Values.ToArray() };
         var reportedListeners = inventory.ListeningPorts;
         // Process and TCP snapshots are taken separately, and a cached listener can outlive its
@@ -641,7 +899,6 @@ public sealed class ServiceRunner : IDisposable
         if (exitedListeners.Count > 0)
             inventory = inventory with { ListeningPorts = inventory.ListeningPorts
                 .Where(p => !exitedListeners.Contains(p.ProcessId)).ToArray() };
-        var ancestors = ProcessInspector.Ancestors(inventory.Processes);
         var owned = ProcessInspector.Descendants(inventory.Processes, _owned.Values.Concat(consoleMembers.Select(p => p.Identity)))
             .Where(p => !ancestors.Contains(p.Id) && ProcessInspector.IsSameProcess(p.Identity)).ToArray();
         if (consoleMembers.Count > 0 && owned.Length == 0)
@@ -653,12 +910,18 @@ public sealed class ServiceRunner : IDisposable
         foreach (var process in owned) _owned[process.Id] = process.Identity;
         _hasManagedProcess = owned.Length > 0 || consoleInspectionFailed ||
             (inventory.InspectionError is not null && _owned.Values.Any(ProcessInspector.IsSameProcess));
-        var external = inventory.Processes.Where(p => !ancestors.Contains(p.Id)
-            && ProcessInspector.BelongsToDirectory(p, WorkingDirectory));
+        // Folder evidence cannot distinguish overlapping commands. Managed/recovered
+        // identities and verified job membership remain sufficient for both services.
+        InspectedProcess[] external = UsesManagedProcessTrackingOnly ? [] : inventory.Processes.Where(p => !ancestors.Contains(p.Id)
+            && ProcessInspector.BelongsToDirectory(p, WorkingDirectory)).ToArray();
         var all = ProcessInspector.Descendants(inventory.Processes,
             external.Select(p => p.Identity).Concat(owned.Select(p => p.Identity)))
             .Where(p => !ancestors.Contains(p.Id) && ProcessInspector.IsSameProcess(p.Identity)).ToArray();
-        return new Inspection(inventory, all, owned, reportedListeners);
+        var flutterApps = FlutterRuntimeStatus.IsNative(Profile)
+            ? FlutterRuntimeStatus.InspectNativeApps(WorkingDirectory, all) : FlutterRuntimeStatus.NativeEvidence.Empty;
+        Volatile.Write(ref _flutterAppProcessIdentities, _intentionalStop || inventory.InspectionError is not null
+            ? [] : flutterApps.Apps.Select(app => app.Identity).ToArray());
+        return new Inspection(inventory, all, owned, reportedListeners, flutterApps);
     });
 
     private async Task RefreshCoreAsync(Inspection? inspection = null)
@@ -671,11 +934,35 @@ public sealed class ServiceRunner : IDisposable
             Publish(ServiceState.Error, inspection.Inventory.InspectionError, ids, BuildUiUrl());
             return;
         }
+        // A maintenance wait retained for a canceled close no longer owns the gate.
+        // Keep its streams/job while any verified descendants still exist; release after completion.
+        if (_operationCancellation is null && _maintenanceProcess is { HasExited: true } maintenance
+            && inspection.Owned.Count == 0
+            && (_maintenanceSession is null || (await Task.Run(_maintenanceSession.ReadProcesses)).Count == 0))
+        {
+            if (!_intentionalStop)
+            {
+                var exitCode = maintenance.ExitCode;
+                if (exitCode != 0) _lastError = $"{_maintenanceLabel ?? "Maintenance"} exited with code {exitCode}. See the output log.";
+                Log(exitCode == 0 ? $"{_maintenanceLabel ?? "Maintenance"} completed successfully." : _lastError!,
+                    error: exitCode != 0, kind: exitCode == 0 ? ServiceLogKind.Success : ServiceLogKind.Error);
+            }
+            if (_maintenanceSession is { } completed) await DrainConsoleOutputAsync(completed);
+            _maintenanceSession?.Dispose();
+            _maintenanceSession = null;
+            _maintenanceOutputCapture?.Dispose();
+            _maintenanceOutputCapture = null;
+            _maintenanceProcess.Dispose();
+            _maintenanceProcess = null;
+            _maintenanceLabel = null;
+        }
+        if (Profile.UsesProcessSession && ids.Length == 0 &&
+            _consoleSession is { OutputDrainAttempted: false } completedSession && completedSession.Process.HasExited)
+            await DrainConsoleOutputAsync(completedSession);
         if (Profile.IsConsole)
         {
-            if (ids.Length == 0 && _consoleSession is { OutputDrainAttempted: false } completedSession && completedSession.Process.HasExited)
-                await DrainConsoleOutputAsync(completedSession);
-            RefreshConsole(inspection, ids);
+            if (FlutterRuntimeStatus.IsNative(Profile)) RefreshFlutter(inspection, ids);
+            else RefreshConsole(inspection, ids);
             return;
         }
         if (inspection.Owned.Count == 0) InvalidateFrontendRun();
@@ -711,13 +998,59 @@ public sealed class ServiceRunner : IDisposable
             Publish(ServiceState.Starting, $"Process detected; waiting for HTTP on port {endpoint.Port}", ids, uiUrl);
             return;
         }
+        var verifyFlutterAssets = false;
+        if (FlutterRuntimeStatus.IsWeb(Profile))
+        {
+            bool waiting, failed;
+            string detail;
+            lock (_consoleLogSync)
+            {
+                waiting = _flutterRunActive && !_flutterWebBuildSuccessful;
+                failed = _flutterRunActive && _flutterBuildFailed;
+                detail = _lastError ?? _flutterStartupDetail;
+                verifyFlutterAssets = !_flutterRunActive;
+            }
+            if (_lastError is not null || failed || waiting)
+            {
+                Publish(_lastError is not null || failed ? ServiceState.Error : ServiceState.Starting, detail, ids, uiUrl);
+                return;
+            }
+        }
         try
         {
             var frontendAttempt = PendingFrontendReadiness(inspection, listeners);
             using var request = new HttpRequestMessage(HttpMethod.Get, uiUrl);
             using var response = await Http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead);
-            var origin = inspection.Owned.Count > 0 ? "Started by launcher" : "Started outside launcher";
+            var origin = ProcessOrigin(inspection);
             var status = (int)response.StatusCode;
+            if (FlutterRuntimeStatus.IsWeb(Profile))
+            {
+                bool waiting, failed;
+                string detail;
+                lock (_consoleLogSync)
+                {
+                    waiting = _flutterRunActive && !_flutterWebBuildSuccessful;
+                    failed = _flutterRunActive && _flutterBuildFailed;
+                    detail = _lastError ?? _flutterStartupDetail;
+                }
+                // Compiler output can change while the HTTP probe is pending. A listening
+                // WebDevFS server alone does not prove that Flutter finished compiling.
+                if (_lastError is not null || failed || waiting)
+                {
+                    Publish(_lastError is not null || failed ? ServiceState.Error : ServiceState.Starting, detail, ids, uiUrl);
+                    return;
+                }
+                if (status >= 400)
+                {
+                    Publish(ServiceState.Error, $"Flutter web endpoint returned HTTP {status}", ids, uiUrl);
+                    return;
+                }
+                if (verifyFlutterAssets && !await FlutterWebHasCompiledAssetsAsync(endpoint))
+                {
+                    Publish(ServiceState.Starting, "Flutter web server detected; waiting for compiled app assets", ids, uiUrl);
+                    return;
+                }
+            }
             Publish(ServiceState.Running, status >= 500 ? $"{origin}; HTTP {status} (server reports an error)" : $"{origin}; HTTP {status}", ids, uiUrl,
                 status >= 500 ? ServiceLogKind.Warning : ServiceLogKind.Success);
             NotifyFrontendReady(uiUrl, status, frontendAttempt);
@@ -728,6 +1061,28 @@ public sealed class ServiceRunner : IDisposable
         }
     }
 
+    private static async Task<bool> FlutterWebHasCompiledAssetsAsync(Uri endpoint)
+    {
+        // Recovered/external runs have no captured readiness output. Inspect only the normal
+        // generated JavaScript entry point; index.html can be served before compilation finishes.
+        foreach (var entrypoint in new[] { "/main.dart.js", "/main.dart.mjs" })
+        {
+            using var request = new HttpRequestMessage(HttpMethod.Get, new Uri(endpoint.GetLeftPart(UriPartial.Authority) + entrypoint));
+            using var response = await Http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead);
+            var mediaType = response.Content.Headers.ContentType?.MediaType;
+            if (response.StatusCode == System.Net.HttpStatusCode.OK &&
+                mediaType?.Contains("javascript", StringComparison.OrdinalIgnoreCase) == true &&
+                response.Content.Headers.ContentLength != 0)
+            {
+                await using var stream = await response.Content.ReadAsStreamAsync();
+                var firstByte = new byte[1];
+                using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(1));
+                return await stream.ReadAsync(firstByte, timeout.Token) > 0;
+            }
+        }
+        return false;
+    }
+
     private void RefreshConsole(Inspection inspection, int[] ids)
     {
         int? exitCode = null;
@@ -735,7 +1090,7 @@ public sealed class ServiceRunner : IDisposable
             exitCode = session.Process.ExitCode;
         if (ids.Length > 0)
         {
-            var origin = inspection.Owned.Count > 0 ? "Started by launcher" : "Started outside launcher";
+            var origin = ProcessOrigin(inspection);
             var detail = exitCode is { } code
                 ? $"{origin}; command exited with code {code}; child processes still running"
                 : $"{origin}; console processes running";
@@ -755,6 +1110,54 @@ public sealed class ServiceRunner : IDisposable
         }
         Publish(ServiceState.Stopped, _consoleWasStopped ? "Console processes stopped" : "No matching console processes", ids);
     }
+
+    private void RefreshFlutter(Inspection inspection, int[] ids)
+    {
+        int? exitCode = null;
+        if (!_consoleWasStopped && _consoleSession is { } session && session.Process.HasExited)
+            exitCode = session.Process.ExitCode;
+        bool appReady, appWasReady, failed;
+        string startupDetail;
+        lock (_consoleLogSync)
+        {
+            foreach (var identity in inspection.FlutterApps.ReadyApps) _readyFlutterApps.Add(identity);
+            appReady = inspection.FlutterApps.Apps.Any(app => _readyFlutterApps.Contains(app.Identity));
+            appWasReady = _readyFlutterApps.Count > 0;
+            failed = _flutterRunActive && _flutterBuildFailed;
+            startupDetail = _flutterStartupDetail;
+        }
+        if (_lastError is not null || exitCode is not null and not 0 || failed)
+        {
+            Publish(ServiceState.Error, _lastError ?? (exitCode is not null and not 0
+                ? $"Flutter command exited with code {exitCode}. See the output log." : startupDetail), ids);
+            return;
+        }
+        if (appReady)
+        {
+            Publish(ServiceState.Running, exitCode is { } code
+                ? $"{ProcessOrigin(inspection)}; Flutter app running; Flutter command exited with code {code}"
+                : $"{ProcessOrigin(inspection)}; Flutter app window detected", ids);
+            return;
+        }
+        if (ids.Length > 0)
+        {
+            var detail = inspection.FlutterApps.Apps.Count > 0 ? "Flutter app process detected; waiting for the app window"
+                : appWasReady ? "Flutter app exited; waiting for Flutter tools to finish" : startupDetail;
+            Publish(ServiceState.Starting, detail, ids);
+            return;
+        }
+        if (exitCode == 0)
+        {
+            Publish(ServiceState.Completed, appWasReady ? "Flutter app exited; command completed (exit code 0)"
+                : "Flutter command completed (exit code 0); no local app process remains; app readiness was not verified", ids);
+            return;
+        }
+        Publish(ServiceState.Stopped, _consoleWasStopped ? "Flutter app and tools stopped" : "No matching Flutter app processes", ids);
+    }
+
+    private string ProcessOrigin(Inspection inspection) => inspection.Owned.Count == 0 ? "Started outside launcher"
+        : _retainedJobs.Count > 0 || inspection.Owned.Any(p => _recoveredRoots.Contains(p.Identity))
+            ? "Left running by a previous launcher" : "Started by launcher";
 
     private async Task DrainConsoleOutputAsync(ConsoleProcessSession session)
     {
@@ -785,14 +1188,25 @@ public sealed class ServiceRunner : IDisposable
     {
         _intentionalStop = true;
         InvalidateFrontendRun();
+        lock (_consoleLogSync) _flutterRunActive = false;
+        Volatile.Write(ref _flutterAppProcessIdentities, []);
         try
         {
             var inspection = await InspectAsync(fresh: true);
-            if (Profile.IsConsole && _consoleSession is { } session && _hasManagedProcess)
+            var stoppedJobIds = new HashSet<int>();
+            int? stoppedJobPort = null;
+            if (Profile.UsesProcessSession && _hasManagedProcess)
             {
+                stoppedJobIds.UnionWith(inspection.Owned.Select(process => process.Id));
+                if (Profile.IsCommandApi) stoppedJobPort = GetEndpoint(inspection)?.Port;
                 _consoleWasStopped = true;
                 // Job membership covers children created between snapshots, with no path or PID-name guess.
-                await Task.Run(session.Stop);
+                await Task.Run(() =>
+                {
+                    _consoleSession?.Stop();
+                    _maintenanceSession?.Stop();
+                    foreach (var job in _retainedJobs.Values) ConsoleProcessSession.StopRetainedJob(job);
+                });
                 inspection = await InspectAsync(fresh: true);
             }
             var conflictIdentities = conflictApproval?.Targets.Select(p => p.Identity).ToHashSet() ?? [];
@@ -814,12 +1228,12 @@ public sealed class ServiceRunner : IDisposable
                 .Concat(state.Inventory.Processes.Where(p => conflictIdentities.Contains(p.Identity)))
                 .DistinctBy(p => p.Id).ToArray();
             var targets = Remaining(inspection);
-            if (targets.Count == 0 && conflictApproval is null)
+            if (targets.Count == 0 && conflictApproval is null && stoppedJobPort is null)
             {
                 // An explicit stop also acknowledges a previous failed start. A released port
                 // must not leave a historical conflict/error on an otherwise stopped service.
                 _lastError = inspection.Inventory.InspectionError;
-                Log(Profile.IsConsole && _consoleWasStopped ? "Console command and child processes stopped."
+                Log(Profile.UsesProcessSession && _consoleWasStopped ? "Command and child processes stopped."
                     : includeExternal ? "No verified service processes to stop." : "No launcher-owned processes to stop.");
                 await RefreshCoreAsync(inspection);
                 return inspection.Inventory.InspectionError is null;
@@ -833,9 +1247,9 @@ public sealed class ServiceRunner : IDisposable
             foreach (var error in errors) Log(error, true);
             var after = await InspectAsync(fresh: true);
             var remaining = Remaining(after);
-            var stoppedIds = targets.Select(p => p.Id).ToHashSet();
+            var stoppedIds = targets.Select(p => p.Id).Concat(stoppedJobIds).ToHashSet();
             bool HasListeners(Inspection state) => !Profile.IsConsole && state.ReportedListeners
-                .Any(p => stoppedIds.Contains(p.ProcessId) || p.Port == conflictApproval?.Port);
+                .Any(p => stoppedIds.Contains(p.ProcessId) || p.Port == conflictApproval?.Port || p.Port == stoppedJobPort);
             var releaseDeadline = DateTime.UtcNow.AddSeconds(5);
             // Windows can report a terminated process's listener briefly after WaitForExit returns.
             // Restart must wait for both process termination and socket release.
@@ -948,6 +1362,7 @@ public sealed class ServiceRunner : IDisposable
         // the previous attempt. Emit that current failure once in the fresh console buffer.
         var repeatDiagnostic = _repeatDiagnosticAfterConsoleReset && state is ServiceState.Error or ServiceState.Conflict;
         if (previous.State == state && previous.Detail == detail && !repeatDiagnostic) return;
+        SnapshotChanged?.Invoke();
         switch (state)
         {
             case ServiceState.Running:
@@ -1028,9 +1443,19 @@ public sealed class ServiceRunner : IDisposable
         if (_disposed) return;
         _disposed = true;
         _intentionalStop = true;
+        Volatile.Write(ref _flutterAppProcessIdentities, []);
         CancelMaintenance();
         _consoleSession?.Dispose();
         _maintenanceSession?.Dispose();
+        _startOutputCapture?.Dispose();
+        _maintenanceOutputCapture?.Dispose();
+        foreach (var job in _retainedJobs.Values)
+        {
+            try { ConsoleProcessSession.StopRetainedJob(job); }
+            catch (Exception ex) when (ex is InvalidOperationException or System.ComponentModel.Win32Exception) { }
+            job.Dispose();
+        }
+        _retainedJobs.Clear();
         // This fallback is deliberately limited to identities recorded while they belonged to us.
         // Normal UI shutdown awaits StopManagedAsync, which also captures current descendants.
         foreach (var identity in _owned.Values.ToArray())
@@ -1043,6 +1468,8 @@ public sealed class ServiceRunner : IDisposable
                 }
                 catch (Exception ex) when (ex is ArgumentException or InvalidOperationException or System.ComponentModel.Win32Exception) { }
         _startProcess?.Dispose();
+        _maintenanceProcess?.Dispose();
         _logs.Writer.TryComplete();
+        CommandFolders.TryRemove(_runnerId, out _);
     }
 }

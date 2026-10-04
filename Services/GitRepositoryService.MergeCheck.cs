@@ -7,7 +7,8 @@ namespace FullStackLauncher.Services;
 public static partial class GitRepositoryService
 {
     public static Task<GitMergeCheckResult> CheckReleaseMergeAsync(string root, string remote, string sourceBranch,
-        CancellationToken token = default, IProgress<string>? progress = null, Func<CancellationToken, Task>? ensureIdle = null) =>
+        CancellationToken token = default, IProgress<string>? progress = null, Func<CancellationToken, Task>? ensureIdle = null,
+        bool skipUpToDateSimulation = false) =>
         InRepositoryAsync(root, token, async snapshot =>
         {
             RequireNoOperation(snapshot);
@@ -19,9 +20,6 @@ public static partial class GitRepositoryService
             var savedRelease = await ReadReleaseBranchAsync(root, remote, token).ConfigureAwait(false);
             if (savedRelease != sourceBranch)
                 throw new InvalidOperationException("The saved release branch changed or is unavailable. Refresh and choose the release source before checking conflicts.");
-            await RequireMergeTreeSupportAsync(root, token).ConfigureAwait(false);
-            await RequireNoExternalMergeCommandsAsync(root, token).ConfigureAwait(false);
-
             IReadOnlyList<string> networkOptions = [];
             if (ensureIdle is not null)
             {
@@ -41,7 +39,7 @@ public static partial class GitRepositoryService
             // Fetch the advertised immutable object, without a destination ref. Empty refmap
             // suppresses configured tracking mappings; FETCH_HEAD and maintenance stay untouched.
             if (ensureIdle is not null) await ensureIdle(token).ConfigureAwait(false);
-            progress?.Report("Fetching release objects without changing branches…");
+            progress?.Report("Fetching the selected remote commit without changing branches…");
             var fetched = await GitAsync(root,
                 [.. networkOptions, "-c", "fetch.pruneTags=false", "fetch", "--no-prune", "--no-prune-tags", "--no-tags",
                     "--no-recurse-submodules", "--no-write-fetch-head", "--no-auto-maintenance", "--no-write-commit-graph",
@@ -54,45 +52,65 @@ public static partial class GitRepositoryService
 
             await RequireUnchangedPowerRemoteAsync(root, remote, url, token).ConfigureAwait(false);
             RequireSameLocalState(snapshot, await ReadCoreAsync(root, token).ConfigureAwait(false));
-            await RequireNoExternalMergeCommandsAsync(root, token).ConfigureAwait(false);
             if (ensureIdle is not null) await ensureIdle(token).ConfigureAwait(false);
-            progress?.Report("Testing committed history with Git only…");
-            // merge-tree creates Git objects but never reads or writes the index or working tree.
-            // No fallback to merge, checkout, stash, commit or conflict resolution is permitted.
-            var simulation = await GitAsync(root,
-                ["-c", "submodule.recurse=false", "-c", "rerere.enabled=false", "-c", "rerere.autoupdate=false",
-                    "merge-tree", "--write-tree", "--name-only", "--messages", "-z", snapshot.HeadCommit, sourceCommit], token).ConfigureAwait(false);
-            if (simulation.ExitCode is not (0 or 1))
+            progress?.Report("Checking whether the remote branch has commits missing locally…");
+            var incoming = await GitAsync(root,
+                ["rev-list", "--count", snapshot.HeadCommit + ".." + sourceCommit, "--"], token).ConfigureAwait(false);
+            EnsureSuccess(incoming);
+            if (!long.TryParse(incoming.Output.TrimEnd('\r', '\n'), NumberStyles.None, CultureInfo.InvariantCulture, out var incomingCommits)
+                || incomingCommits < 0)
+                throw new InvalidOperationException("Git returned an invalid incoming-commit count. No conflict result is available.");
+
+            var runSimulation = !skipUpToDateSimulation || incomingCommits > 0;
+            var hasConflicts = false;
+            IReadOnlyList<string> paths = [];
+            var diagnostics = "The current branch already includes the fetched remote commit. No merge simulation was needed.";
+            if (runSimulation)
             {
-                if (simulation.ExitCode == 129)
-                    throw new InvalidOperationException("This Git installation does not support the required merge-tree options. Install Git for Windows 2.38 or newer. No merge was started.");
-                ThrowCommandFailure(simulation);
+                await RequireMergeTreeSupportAsync(root, token).ConfigureAwait(false);
+                await RequireNoExternalMergeCommandsAsync(root, token).ConfigureAwait(false);
+                if (ensureIdle is not null) await ensureIdle(token).ConfigureAwait(false);
+                progress?.Report($"Testing {incomingCommits} incoming commit(s) for merge conflicts with Git only…");
+                // merge-tree creates Git objects but never reads or writes the index or working tree.
+                // No fallback to merge, checkout, stash, commit or conflict resolution is permitted.
+                var simulation = await GitAsync(root,
+                    ["-c", "submodule.recurse=false", "-c", "rerere.enabled=false", "-c", "rerere.autoupdate=false",
+                        "merge-tree", "--write-tree", "--name-only", "--messages", "-z", snapshot.HeadCommit, sourceCommit], token).ConfigureAwait(false);
+                if (simulation.ExitCode is not (0 or 1))
+                {
+                    if (simulation.ExitCode == 129)
+                        throw new InvalidOperationException("This Git installation does not support the required merge-tree options. Install Git for Windows 2.38 or newer. No merge was started.");
+                    ThrowCommandFailure(simulation);
+                }
+                (paths, diagnostics) = ParseMergeCheckOutput(root, simulation);
+                hasConflicts = simulation.ExitCode == 1;
             }
-            var (paths, diagnostics) = ParseMergeCheckOutput(root, simulation);
+            else progress?.Report("The current branch already includes the remote changes. Verifying this result…");
 
             // An external Git client can bypass the launcher lease. Reject detected identity
             // changes instead of attaching a result to a different branch or release tip.
-            progress?.Report("Verifying the compared branch and release…");
+            progress?.Report("Verifying the current branch and selected remote branch…");
             if (ensureIdle is not null) await ensureIdle(token).ConfigureAwait(false);
             await RequireUnchangedPowerRemoteAsync(root, remote, url, token).ConfigureAwait(false);
             if (await ReadMergeCheckSourceAsync(root, url, sourceBranch, token, networkOptions, ensureIdle is not null).ConfigureAwait(false) != sourceCommit)
                 throw new InvalidOperationException("The release branch changed during the conflict test. Run the test again to compare its new commit; this result was discarded.");
-            await RequireNoExternalMergeCommandsAsync(root, token).ConfigureAwait(false);
+            if (runSimulation) await RequireNoExternalMergeCommandsAsync(root, token).ConfigureAwait(false);
             if (await ReadReleaseBranchAsync(root, remote, token).ConfigureAwait(false) != savedRelease)
                 throw new InvalidOperationException("The saved release branch changed during the conflict test. Refresh and review the release choice; this result was discarded.");
             await RequireUnchangedPowerRemoteAsync(root, remote, url, token).ConfigureAwait(false);
             RequireSameLocalState(snapshot, await ReadCoreAsync(root, token).ConfigureAwait(false));
             if (ensureIdle is not null) await ensureIdle(token).ConfigureAwait(false);
 
-            var hasConflicts = simulation.ExitCode == 1;
             return new GitMergeCheckResult
             {
                 CurrentBranch = snapshot.Branch, CurrentCommit = snapshot.HeadCommit,
                 Remote = remote, SourceBranch = sourceBranch, SourceCommit = sourceCommit,
+                IncomingCommits = incomingCommits,
                 HasConflicts = hasConflicts, ConflictedPaths = paths,
                 HasUncommittedChanges = snapshot.Changes.Count > 0, CheckedAt = DateTimeOffset.UtcNow,
                 GitDiagnostics = diagnostics,
-                Message = hasConflicts ? "Git found merge conflicts between the compared commits."
+                Message = !runSimulation ? "The current branch is up to date with the selected remote branch. No merge is needed."
+                    : hasConflicts ? "Git found merge conflicts between the compared commits."
                     : "Git found no merge conflicts between the compared commits."
             };
         });

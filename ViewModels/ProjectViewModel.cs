@@ -5,6 +5,7 @@ namespace FullStackLauncher.ViewModels;
 // Sidebar state shares the service cards' live runners and is never saved to settings.
 public sealed class ProjectViewModel(ProjectProfile profile, IReadOnlyList<ServiceViewModel> services) : ObservableObject
 {
+    private IReadOnlyList<ServiceViewModel> _services = services.ToArray();
     private IReadOnlyList<ProjectBranchViewModel> _branches =
         [new("Checking branch…", "Reading Git information from the project and service folders.")];
     private bool _isDetailsExpanded;
@@ -12,7 +13,7 @@ public sealed class ProjectViewModel(ProjectProfile profile, IReadOnlyList<Servi
     public ProjectProfile Profile { get; } = profile;
     public string Name => Profile.Name;
     public bool IsArchived => Profile.IsArchived;
-    public IReadOnlyList<ServiceViewModel> Services { get; } = services;
+    public IReadOnlyList<ServiceViewModel> Services => _services;
     public IReadOnlyList<ProjectBranchViewModel> Branches => _branches;
     public bool IsDetailsExpanded
     {
@@ -28,6 +29,11 @@ public sealed class ProjectViewModel(ProjectProfile profile, IReadOnlyList<Servi
     }
 
     public void RefreshName() => Changed(nameof(Name));
+    public void UpdateServices(IReadOnlyList<ServiceViewModel> services)
+    {
+        _services = services.ToArray();
+        Changed(nameof(Services));
+    }
     public void RefreshArchiveState() => Changed(nameof(IsArchived));
 }
 

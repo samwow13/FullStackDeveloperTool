@@ -41,7 +41,7 @@ public partial class GitWorkspaceWindow
         {
             _postPushLinkError = error;
             PublishFeedbackDetail.Text += " " + error;
-            AddActivity("After-push link", remote.Name, error);
+            ReportError(error);
             return;
         }
         _publishedLink = PostPushLink.Url(remote);
@@ -70,8 +70,8 @@ public partial class GitWorkspaceWindow
         }
         catch (System.Runtime.InteropServices.ExternalException exception)
         {
-            PublishLinkStatus.Text = "The link could not be copied. Try Copy link again.";
-            AddActivity("Copy after-push link", _publishedLink, SafeError(exception));
+            PublishLinkStatus.Text = "The link could not be copied. Review error details below, then try Copy link again.";
+            ReportError(SafeError(exception));
         }
     }
 
@@ -91,7 +91,7 @@ public partial class GitWorkspaceWindow
         {
             var detail = "Push succeeded. " + SafeError(exception);
             if (_publishedLink == link) PublishLinkStatus.Text = detail;
-            AddActivity("Open after-push link", link, detail);
+            ReportError(detail);
         }
         finally { _openingPublishedLink = false; }
     }
@@ -169,7 +169,7 @@ public partial class GitWorkspaceWindow
         PublishFeedbackDismiss.Visibility = Visibility.Visible;
         PublishFeedbackHeading.Text = confirmed ? "Pushed successfully" : "Push not confirmed";
         PublishFeedbackDetail.Text = string.IsNullOrWhiteSpace(detail)
-            ? confirmed ? "Your commits reached the selected remote." : "Review Activity for details before trying again."
+            ? confirmed ? "Your commits reached the selected remote." : "Push was not confirmed. Review error details and refresh local and remote status before trying again."
             : SensitiveDataProtection.Redact(detail);
         if (_postPushLinkError != null) PublishFeedbackDetail.Text += " " + _postPushLinkError;
         if (confirmed)

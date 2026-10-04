@@ -51,7 +51,7 @@ public sealed record GitSyncResult
     public bool ReadyToFinish { get; init; }
 }
 
-/// <summary>A committed-history simulation, never a prepared or completed merge.</summary>
+/// <summary>A committed-history comparison, never a prepared or completed merge.</summary>
 public sealed record GitMergeCheckResult
 {
     public string CurrentBranch { get; init; } = "";
@@ -59,6 +59,7 @@ public sealed record GitMergeCheckResult
     public string Remote { get; init; } = "";
     public string SourceBranch { get; init; } = "";
     public string SourceCommit { get; init; } = "";
+    public long IncomingCommits { get; init; }
     public bool HasConflicts { get; init; }
     public IReadOnlyList<string> ConflictedPaths { get; init; } = [];
     public bool HasUncommittedChanges { get; init; }

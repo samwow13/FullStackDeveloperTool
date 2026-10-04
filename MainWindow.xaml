@@ -5,7 +5,7 @@
         xmlns:controls="clr-namespace:FullStackLauncher.Controls"
         Title="Full Stack Launcher" Icon="pack://application:,,,/Assets/launcher.ico" Width="1440" Height="980" MinWidth="1060" MinHeight="740"
         Background="{StaticResource BackgroundBrush}" Foreground="{StaticResource TextBrush}" FontFamily="Segoe UI" FontSize="13"
-        WindowStartupLocation="CenterScreen" Loaded="Window_Loaded" Closing="Window_Closing" KeyDown="ProjectEditWindow_KeyDown">
+        WindowStartupLocation="CenterScreen" WindowState="Maximized" Loaded="Window_Loaded" Closing="Window_Closing" KeyDown="ProjectEditWindow_KeyDown">
     <Window.Resources>
         <DataTemplate x:Key="ProjectBranchTemplate">
             <Grid Margin="0,3,0,0" AutomationProperties.Name="{Binding DisplayText}">
@@ -51,6 +51,25 @@
                     </ControlTemplate.Triggers>
                 </ControlTemplate>
             </Setter.Value></Setter>
+        </Style>
+        <Style x:Key="ServiceUtilityToggle" TargetType="ToggleButton" BasedOn="{StaticResource SectionToggle}">
+            <Setter Property="Foreground" Value="{StaticResource TextBrush}"/>
+            <Style.Triggers>
+                <Trigger Property="IsChecked" Value="True"><Setter Property="Foreground" Value="{StaticResource TextBrush}"/></Trigger>
+                <Trigger Property="IsEnabled" Value="False"><Setter Property="Foreground" Value="{StaticResource MutedBrush}"/><Setter Property="Cursor" Value="Arrow"/></Trigger>
+            </Style.Triggers>
+        </Style>
+        <Style x:Key="ServiceLaunchButton" TargetType="Button" BasedOn="{StaticResource {x:Type Button}}">
+            <Setter Property="Background" Value="#303844"/>
+            <Setter Property="BorderBrush" Value="#586270"/>
+            <Setter Property="Foreground" Value="#C5CDD9"/>
+            <Style.Triggers>
+                <DataTrigger Binding="{Binding HasLiveUrl}" Value="True">
+                    <Setter Property="Background" Value="{StaticResource AccentBrush}"/>
+                    <Setter Property="BorderBrush" Value="{StaticResource AccentBrush}"/>
+                    <Setter Property="Foreground" Value="#0C2925"/>
+                </DataTrigger>
+            </Style.Triggers>
         </Style>
         <Style x:Key="SectionsDropdownToggle" TargetType="ToggleButton" BasedOn="{StaticResource SectionToggle}">
             <Setter Property="Foreground" Value="{StaticResource TextBrush}"/>
@@ -198,7 +217,7 @@
             <Setter Property="Template"><Setter.Value>
                 <ControlTemplate TargetType="Expander">
                     <Grid>
-                        <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
+                        <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
                         <ToggleButton x:Name="HeaderToggle" IsChecked="{Binding IsExpanded, RelativeSource={RelativeSource TemplatedParent}, Mode=TwoWay}" Content="{TemplateBinding Header}" Foreground="{TemplateBinding Foreground}" Cursor="Hand" ToolTip="Expand or collapse details" AutomationProperties.Name="{Binding (AutomationProperties.Name), RelativeSource={RelativeSource TemplatedParent}, StringFormat=Expand or collapse {0}}">
                             <ToggleButton.Template><ControlTemplate TargetType="ToggleButton">
                                 <Border x:Name="HeaderFrame" Background="Transparent" BorderBrush="Transparent" BorderThickness="1" CornerRadius="6" Padding="4,6">
@@ -214,18 +233,11 @@
                                 </ControlTemplate.Triggers>
                             </ControlTemplate></ToggleButton.Template>
                         </ToggleButton>
-                        <ContentPresenter Grid.Row="1" Content="{TemplateBinding Tag}" TextElement.Foreground="{TemplateBinding Foreground}"/>
-                        <ContentPresenter x:Name="Details" Grid.Row="2" ContentSource="Content" TextElement.Foreground="{TemplateBinding Foreground}" Visibility="Collapsed"/>
+                        <ContentPresenter x:Name="Details" Grid.Row="1" ContentSource="Content" TextElement.Foreground="{TemplateBinding Foreground}" Visibility="Collapsed"/>
                     </Grid>
                     <ControlTemplate.Triggers><Trigger Property="IsExpanded" Value="True"><Setter TargetName="Details" Property="Visibility" Value="Visible"/></Trigger></ControlTemplate.Triggers>
                 </ControlTemplate>
             </Setter.Value></Setter>
-        </Style>
-        <Style x:Key="ServiceCardAction" TargetType="Button" BasedOn="{StaticResource {x:Type Button}}">
-            <Setter Property="Padding" Value="10,7"/>
-            <Setter Property="FontSize" Value="12"/>
-            <Setter Property="Margin" Value="0,0,8,6"/>
-            <Setter Property="Background" Value="Transparent"/>
         </Style>
         <Style x:Key="ServiceMetadata" TargetType="Border">
             <Setter Property="Background" Value="#141D29"/>
@@ -280,7 +292,7 @@
         <Grid.ColumnDefinitions><ColumnDefinition x:Name="SidebarColumn" Width="245"/><ColumnDefinition Width="*" MinWidth="360"/><ColumnDefinition x:Name="NextCommitSplitterColumn" Width="0"/><ColumnDefinition x:Name="NextCommitColumn" Width="0"/></Grid.ColumnDefinitions>
         <Border x:Name="SidebarPanel" Background="{StaticResource SurfaceBrush}" BorderBrush="{StaticResource BorderBrush}" BorderThickness="0,0,1,0">
             <Grid Margin="16,24,16,18">
-                <Grid.RowDefinitions><RowDefinition x:Name="ProjectsRow" Height="*"/><RowDefinition x:Name="ToolsRow" Height="Auto"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
+                <Grid.RowDefinitions><RowDefinition x:Name="ProjectsRow" Height="*"/><RowDefinition x:Name="ToolsRow" Height="Auto"/></Grid.RowDefinitions>
                 <Grid x:Name="ProjectsPanel" Grid.Row="0">
                     <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="*"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
                     <StackPanel Margin="0,0,0,12">
@@ -344,7 +356,7 @@
                 </ListBox>
                     <StackPanel Grid.Row="2" Margin="0,8,0,8">
                         <Button Content="{Binding ArchiveProjectLabel}" Click="ArchiveProject_Click" IsEnabled="{Binding CanArchiveProject}" Padding="8,7" FontSize="11" ToolTip="Move this project between Active and Archived while preserving its settings, notes and running apps"/>
-                        <Button Content="Remove selected project" Click="RemoveProject_Click" IsEnabled="{Binding CanRemoveProject}" Padding="8,5" FontSize="10" Background="Transparent" BorderThickness="0" Foreground="{StaticResource MutedBrush}" Margin="0,6,0,0"/>
+                        <Button Content="Remove selected project" Click="RemoveProject_Click" IsEnabled="{Binding CanRemoveProject}" Style="{StaticResource DangerButton}" Padding="8,5" FontSize="10" Background="#A3293D" BorderBrush="#CE5366" Foreground="White" Margin="0,6,0,0"/>
                     </StackPanel>
                 </Grid>
                 <Grid x:Name="ToolsPanel" Grid.Row="1" Margin="0,14,0,8">
@@ -367,21 +379,25 @@
                     </ScrollViewer>
                     <Button Grid.Row="2" Content="Manage tools…" Click="ManageTools_Click" Padding="8,5" FontSize="11" Background="Transparent" BorderThickness="0" Foreground="{StaticResource MutedBrush}" HorizontalAlignment="Left"/>
                 </Grid>
-                <StackPanel Grid.Row="2">
-                    <Border BorderBrush="{StaticResource BorderBrush}" BorderThickness="0,1,0,0" Margin="0,14,0,14"/>
-                    <TextBlock Text="MADE TO MOVE" Foreground="{StaticResource AccentBrush}" FontSize="10" FontWeight="Bold"/>
-                    <TextBlock Text="Your layout and projects travel with your settings." TextWrapping="Wrap" Foreground="{StaticResource MutedBrush}" FontSize="11" Margin="0,7,0,0"/>
-                </StackPanel>
             </Grid>
         </Border>
         <Grid Grid.Column="1" Margin="22,24,22,16">
-            <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="*"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
+            <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="*"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
             <Grid>
                 <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
                 <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
-                <TextBlock Text="WORKSPACE / LOCAL PROCESSES" Foreground="{StaticResource AccentBrush}" FontSize="10" FontWeight="Bold" TextTrimming="CharacterEllipsis" VerticalAlignment="Center" Margin="0,0,12,0"/>
+                <Button Click="ProjectTitle_Click" IsEnabled="{Binding CanEdit}" ToolTip="Click to rename this project" AutomationProperties.Name="Edit project title" Background="Transparent" BorderThickness="0" Padding="0" HorizontalContentAlignment="Stretch" VerticalAlignment="Top" Margin="0,0,12,0">
+                    <Button.Style><Style TargetType="Button" BasedOn="{StaticResource {x:Type Button}}"><Style.Triggers><DataTrigger Binding="{Binding IsEditing}" Value="True"><Setter Property="Visibility" Value="Collapsed"/></DataTrigger></Style.Triggers></Style></Button.Style>
+                    <TextBlock Text="{Binding SelectedProject.Name, TargetNullValue=Choose a project}" FontSize="27" FontWeight="SemiBold" TextTrimming="CharacterEllipsis"/>
+                </Button>
                 <StackPanel Grid.Column="1" Orientation="Horizontal" HorizontalAlignment="Right" VerticalAlignment="Top">
-                    <Button Content="Alerts ▾" Click="CodexAlertsMenu_Click" ToolTip="Codex alerts and always-on-top chat progress" Padding="10,7" FontSize="11" Margin="0,0,6,0">
+                    <Button x:Name="FunctionsMenuButton" Content="Functions ▾" Click="FunctionsMenu_Click" ToolTip="Setup and recovery tools" Padding="10,7" FontSize="11" Margin="0,0,6,0" AutomationProperties.Name="Functions">
+                        <Button.ContextMenu><ContextMenu Style="{StaticResource ServiceToolContextMenu}">
+                            <MenuItem Header="First Time Setup" Click="FirstTimeSetup_Click" Style="{StaticResource ServiceToolMenuItem}" ToolTip="Connect your agent and copy instructions for your existing AGENTS.md file."/>
+                            <MenuItem x:Name="HardResetCodexMenuItem" Header="Hard Reset Codex" Click="HardResetCodex_Click" Style="{StaticResource ServiceToolMenuItem}" ToolTip="Force close Codex and ChatGPT processes, then reopen desktop apps. Unsaved work and active chats may be interrupted."/>
+                        </ContextMenu></Button.ContextMenu>
+                    </Button>
+                    <Button x:Name="AlertsMenuButton" Content="Alerts ▾" Click="CodexAlertsMenu_Click" ToolTip="Codex alerts and always-on-top chat progress" Padding="10,7" FontSize="11" Margin="0,0,6,0">
                         <Button.ContextMenu><ContextMenu>
                             <MenuItem Header="Open Codex alerts" Click="CodexAlerts_Click"/>
                             <Separator/>
@@ -390,28 +406,20 @@
                             <MenuItem Header="Clear finished chats" Click="CodexOverlayClear_Click"/>
                         </ContextMenu></Button.ContextMenu>
                     </Button>
-                    <ToggleButton x:Name="EditModeToggle" IsChecked="{Binding IsEditing, Mode=OneWay}" Click="EditProject_Click" IsEnabled="{Binding CanEdit}" Margin="0,0,6,0" AutomationProperties.Name="Edit project" ToolTip="Toggle editing; click again to save changes">
+                    <ToggleButton x:Name="EditModeToggle" Height="{Binding ActualHeight, ElementName=AlertsMenuButton}" Margin="0" IsChecked="{Binding IsEditing, Mode=OneWay}" Click="EditProject_Click" IsEnabled="{Binding CanEdit}" AutomationProperties.Name="Edit project" ToolTip="Toggle editing; click again to save changes">
                         <ToggleButton.Style><Style TargetType="ToggleButton" BasedOn="{StaticResource SectionToggle}">
                             <Setter Property="Content" Value="Edit"/><Setter Property="FontSize" Value="11"/><Setter Property="Padding" Value="10,7"/>
                             <Style.Triggers><Trigger Property="IsChecked" Value="True"><Setter Property="Content" Value="Editing"/></Trigger></Style.Triggers>
                         </Style></ToggleButton.Style>
                     </ToggleButton>
-                    <Button Content="↻" FontSize="19" Padding="10,3" Click="Refresh_Click" ToolTip="Refresh Git branches, process and URL status" AutomationProperties.Name="Refresh status"/>
                 </StackPanel>
                 <StackPanel Grid.Row="1" Grid.ColumnSpan="2">
-                    <Button Click="ProjectTitle_Click" IsEnabled="{Binding CanEdit}" ToolTip="Click to rename this project" AutomationProperties.Name="Edit project title" Background="Transparent" BorderThickness="0" Padding="0" HorizontalContentAlignment="Stretch" Margin="0,6,12,4">
-                        <Button.Style><Style TargetType="Button" BasedOn="{StaticResource {x:Type Button}}"><Style.Triggers><DataTrigger Binding="{Binding IsEditing}" Value="True"><Setter Property="Visibility" Value="Collapsed"/></DataTrigger></Style.Triggers></Style></Button.Style>
-                        <TextBlock Text="{Binding SelectedProject.Name, TargetNullValue=Choose a project}" FontSize="27" FontWeight="SemiBold" TextTrimming="CharacterEllipsis"/>
-                    </Button>
                     <StackPanel Visibility="{Binding IsEditing, Converter={StaticResource BoolToVisibility}}" Margin="0,6,12,4">
                         <TextBlock Text="PROJECT NAME" Foreground="{StaticResource AccentBrush}" FontSize="10" FontWeight="Bold" Margin="0,0,0,3"/>
                         <TextBox x:Name="ProjectNameEditor" Text="{Binding DraftProjectName, UpdateSourceTrigger=PropertyChanged}" Style="{StaticResource ProjectEditField}" FontSize="23" FontWeight="SemiBold" IsEnabled="{Binding CanSaveProjectEdits}" KeyDown="ProjectEditField_KeyDown" AutomationProperties.Name="Project name"/>
                     </StackPanel>
-                    <TextBlock Text="{Binding RootPath}" Foreground="{StaticResource MutedBrush}" FontSize="11" TextTrimming="CharacterEllipsis" ToolTip="{Binding RootPath}"/>
-                    <TextBlock Text="{Binding QueueActivitySummary}" Foreground="{StaticResource TextBrush}" FontSize="11" TextWrapping="Wrap" Margin="0,5,0,0" AutomationProperties.Name="Queue activity"/>
                     <TextBlock Text="{Binding QueueRecentSummary}" Foreground="{StaticResource AccentBrush}" FontSize="11" TextWrapping="Wrap" Margin="0,3,0,0"
                                Visibility="{Binding HasQueueRecent, Converter={StaticResource BoolToVisibility}}" AutomationProperties.Name="Recently completed queue task"/>
-                    <ItemsControl ItemsSource="{Binding SelectedProjectItem.Branches}" ItemTemplate="{StaticResource ProjectBranchTemplate}" Margin="0,5,12,0" IsTabStop="False"/>
                     <Border Background="#3D202A" BorderBrush="#E96B78" BorderThickness="2" CornerRadius="7" Padding="10,8" Margin="0,10,12,0"
                             Visibility="{Binding HasProductionNotice, Converter={StaticResource BoolToVisibility}}">
                         <StackPanel>
@@ -465,20 +473,33 @@
                 <Grid>
                     <Grid.Style><Style TargetType="Grid"><Style.Triggers><DataTrigger Binding="{Binding IsEditing}" Value="True"><Setter Property="Visibility" Value="Collapsed"/></DataTrigger></Style.Triggers></Style></Grid.Style>
                     <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
-                    <StackPanel><TextBlock Text="{Binding Summary}" FontSize="14" FontWeight="SemiBold" TextWrapping="Wrap"/><TextBlock Text="Live process and endpoint status" Foreground="{StaticResource MutedBrush}" FontSize="11" Margin="0,4,0,0" TextWrapping="Wrap"/></StackPanel>
-                    <WrapPanel Grid.Row="1" Margin="0,10,0,-5">
-                        <StackPanel Orientation="Horizontal" Margin="0,0,8,5">
-                            <Button Content="▶  Start all" Style="{StaticResource PrimaryButton}" Click="StartAll_Click"
-                                    IsEnabled="{Binding CanStartBatch}" ToolTip="{Binding StartAllDescription}" ToolTipService.ShowOnDisabled="True"
-                                    AutomationProperties.HelpText="{Binding StartAllDescription}"/>
+                    <StackPanel>
+                        <WrapPanel>
+                            <TextBlock Text="{Binding Summary}" FontSize="14" FontWeight="SemiBold" TextWrapping="Wrap"
+                                       VerticalAlignment="Center" Margin="0,0,10,4"/>
                             <Border Background="#173B34" BorderBrush="{StaticResource AccentBrush}" BorderThickness="1" CornerRadius="7"
-                                    Padding="9,6" Margin="6,0,0,0" VerticalAlignment="Center"
+                                    Padding="8,3" Margin="0,0,0,4" VerticalAlignment="Center"
                                     Visibility="{Binding AllServicesRunning, Converter={StaticResource BoolToVisibility}}">
                                 <TextBlock Text="● Running" Foreground="{StaticResource AccentBrush}" FontWeight="SemiBold" FontSize="11"
                                            ToolTip="All services are running." AutomationProperties.Name="All services are running"
                                            AutomationProperties.LiveSetting="Polite"/>
                             </Border>
-                        </StackPanel>
+                        </WrapPanel>
+                        <ItemsControl ItemsSource="{Binding Services}" Margin="0,2,0,-4" IsTabStop="False"
+                                      AutomationProperties.Name="Service status overview">
+                            <ItemsControl.ItemsPanel><ItemsPanelTemplate><WrapPanel/></ItemsPanelTemplate></ItemsControl.ItemsPanel>
+                            <ItemsControl.ItemTemplate><DataTemplate>
+                                <TextBlock Text="{Binding OverviewStatus}" Foreground="{Binding OverviewStatusColor}" FontSize="11"
+                                           FontWeight="SemiBold" TextWrapping="Wrap" Margin="0,0,14,4" ToolTip="{Binding Detail}"
+                                           AutomationProperties.Name="{Binding OverviewStatus}" AutomationProperties.HelpText="{Binding Detail}"
+                                           AutomationProperties.LiveSetting="Polite"/>
+                            </DataTemplate></ItemsControl.ItemTemplate>
+                        </ItemsControl>
+                    </StackPanel>
+                    <WrapPanel Grid.Row="1" Margin="0,10,0,-5">
+                        <Button Content="▶  Start all" Style="{StaticResource PrimaryButton}" Click="StartAll_Click" Margin="0,0,8,5"
+                                IsEnabled="{Binding CanStartBatch}" ToolTip="{Binding StartAllDescription}" ToolTipService.ShowOnDisabled="True"
+                                AutomationProperties.HelpText="{Binding StartAllDescription}"/>
                         <Button Content="Restart all" Click="RestartAll_Click" IsEnabled="{Binding CanBatch}" Margin="0,0,8,5"/>
                         <Button Content="■  Force stop all" Style="{StaticResource DangerButton}" Click="StopAll_Click" IsEnabled="{Binding CanStopBatch}" Margin="0,0,8,5"/>
                     </WrapPanel>
@@ -501,7 +522,15 @@
                     <Grid x:Name="ServicesPanel">
                         <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="*"/></Grid.RowDefinitions>
                         <Grid Margin="0,0,0,8">
-                            <TextBlock Text="Services" Foreground="{StaticResource TextBrush}" FontSize="15" FontWeight="SemiBold" VerticalAlignment="Center"/>
+                            <WrapPanel Margin="0,0,60,0">
+                                <TextBlock Text="Services" Foreground="{StaticResource TextBrush}" FontSize="15" FontWeight="SemiBold" VerticalAlignment="Center" Margin="0,0,12,0"/>
+                                <Button Content="＋ Add console app" Click="AddConsoleApp_Click" IsEnabled="{Binding CanAddConsoleApp}"
+                                        Padding="9,5" FontSize="11" Margin="0,0,8,0" AutomationProperties.Name="Add console app to selected project"
+                                        ToolTip="Add a folder and command to this project. Running services stay running."/>
+                                <Button Content="＋ Add API" Click="AddApi_Click" IsEnabled="{Binding CanAddApi}"
+                                        Padding="9,5" FontSize="11" AutomationProperties.Name="Add API to selected project"
+                                        ToolTip="Add FastAPI or another API with a folder, command, and local URL."/>
+                            </WrapPanel>
                             <Button Style="{StaticResource HideSectionButton}" Tag="Services" Click="HideSection_Click" HorizontalAlignment="Right" AutomationProperties.Name="Hide services"/>
                         </Grid>
                     <ScrollViewer Grid.Row="1" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
@@ -529,54 +558,187 @@
                                         </StackPanel>
                                      </Border>
                                      <Expander Style="{StaticResource ServiceCardExpander}" AutomationProperties.Name="{Binding Name}">
-                                        <Expander.Tag>
-                                            <Grid Margin="29,4,0,2" Visibility="{Binding HasLiveUrl, Converter={StaticResource BoolToVisibility}}">
-                                                <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
-                                                <Button Click="OpenUrl_Click" IsEnabled="{Binding HasLiveUrl}" HorizontalContentAlignment="Stretch" HorizontalAlignment="Stretch"
-                                                        Background="Transparent" BorderThickness="0" Foreground="{StaticResource AccentBrush}" Padding="0,3"
-                                                        ToolTip="{Binding LiveUrl}" AutomationProperties.Name="{Binding LiveUrl, StringFormat=Open {0}}">
-                                                    <TextBlock Text="{Binding LiveUrl}" TextTrimming="CharacterEllipsis" TextAlignment="Left"/>
-                                                </Button>
-                                                <Button Grid.Column="1" Content="Copy" Click="CopyServiceUrl_Click" IsEnabled="{Binding HasLiveUrl}"
-                                                        Background="Transparent" BorderThickness="0" Foreground="{StaticResource MutedBrush}" FontSize="10" Padding="5,3"
-                                                        ToolTip="Copy this live service address" AutomationProperties.Name="{Binding Name, StringFormat=Copy live address for {0}}"/>
-                                            </Grid>
-                                        </Expander.Tag>
                                         <Expander.Header>
                                             <Grid>
                                                 <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
                                                 <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
-                                                <TextBlock Text="{Binding Name}" FontSize="17" FontWeight="SemiBold" TextWrapping="Wrap" VerticalAlignment="Center" Margin="0,0,12,0"/>
-                                                <Border Grid.Column="1" Background="#111923" CornerRadius="5" Padding="10,5" VerticalAlignment="Top">
+                                                <WrapPanel VerticalAlignment="Center" Margin="0,0,12,0">
+                                                    <TextBlock Text="{Binding Name}" FontSize="17" FontWeight="SemiBold" TextWrapping="Wrap" VerticalAlignment="Center" Margin="0,0,10,0"/>
+                                                    <ToggleButton x:Name="StatisticsToggle" Content="Statistics" Style="{StaticResource ServiceUtilityToggle}" Padding="9,5" FontSize="11"
+                                                                  Click="StatisticsToggle_Click" AutomationProperties.Name="{Binding Name, StringFormat=Statistics for {0}}"/>
+                                                    <ToggleButton Content="Change DB" Click="ChangeDatabase_Click" Style="{StaticResource ServiceUtilityToggle}" Padding="9,5" FontSize="11"
+                                                                  Visibility="{Binding HasApiConfiguration, Converter={StaticResource BoolToVisibility}}" IsEnabled="{Binding CanChangeDatabase}"
+                                                                  AutomationProperties.Name="{Binding Name, StringFormat=Change database for {0}}"
+                                                                  ToolTip="Change the Local API connection and restart this API." ToolTipService.ShowOnDisabled="True"/>
+                                                    <Button Content="{Binding LaunchButtonLabel}" Click="LaunchUi_Click" Style="{StaticResource ServiceLaunchButton}" Padding="9,5" FontSize="11" Margin="0,0,6,5"
+                                                            Visibility="{Binding HasWebEndpoint, Converter={StaticResource BoolToVisibility}}"
+                                                            ToolTip="{Binding LaunchButtonHelpText}" AutomationProperties.Name="{Binding LaunchButtonAccessibleName}"
+                                                            AutomationProperties.HelpText="{Binding LaunchButtonHelpText}"/>
+                                                    <ToggleButton x:Name="ApiSettingsToggle" Margin="0,0,6,5"
+                                                                  Click="ServiceMenuToggle_Click" ToolTip="Service settings"
+                                                                  AutomationProperties.Name="{Binding Name, StringFormat=Settings for {0}}">
+                                                        <ToggleButton.Style>
+                                                            <Style TargetType="ToggleButton" BasedOn="{StaticResource NextCommitSettingsButton}">
+                                                                <Style.Triggers>
+                                                                    <MultiDataTrigger>
+                                                                        <MultiDataTrigger.Conditions>
+                                                                            <Condition Binding="{Binding HasApiConfiguration}" Value="False"/>
+                                                                            <Condition Binding="{Binding ShowClean}" Value="False"/>
+                                                                            <Condition Binding="{Binding ShowSetup}" Value="False"/>
+                                                                        </MultiDataTrigger.Conditions>
+                                                                        <Setter Property="Visibility" Value="Collapsed"/>
+                                                                    </MultiDataTrigger>
+                                                                </Style.Triggers>
+                                                            </Style>
+                                                        </ToggleButton.Style>
+                                                    </ToggleButton>
+                                                    <Popup x:Name="ApiSettingsPopup" PlacementTarget="{Binding ElementName=ApiSettingsToggle}" Placement="Bottom" VerticalOffset="6"
+                                                           IsOpen="{Binding IsChecked, ElementName=ApiSettingsToggle, Mode=TwoWay}" StaysOpen="False" AllowsTransparency="True"
+                                                           DataContext="{Binding PlacementTarget.DataContext, RelativeSource={RelativeSource Self}}" Opened="ServiceMenuPopup_Opened">
+                                                        <Border Background="{StaticResource SurfaceBrush}" BorderBrush="{StaticResource BorderBrush}" BorderThickness="1" CornerRadius="8" Padding="12" Width="300"
+                                                                TextElement.Foreground="{StaticResource TextBrush}" KeyboardNavigation.TabNavigation="Cycle"
+                                                                Tag="{Binding ElementName=ApiSettingsPopup}" KeyDown="ServiceMenuPopup_KeyDown">
+                                                            <StackPanel>
+                                                                <DockPanel Margin="0,0,0,8">
+                                                                    <Button DockPanel.Dock="Right" Content="×" Padding="7,2" FontSize="14" HorizontalAlignment="Right"
+                                                                            Tag="{Binding ElementName=ApiSettingsPopup}" Click="CloseServiceMenu_Click" AutomationProperties.Name="Close service settings"/>
+                                                                    <TextBlock Text="Service settings" Foreground="{StaticResource TextBrush}" FontWeight="SemiBold" VerticalAlignment="Center"/>
+                                                                </DockPanel>
+                                                                <StackPanel Visibility="{Binding HasApiConfiguration, Converter={StaticResource BoolToVisibility}}" Margin="0,0,0,6">
+                                                                <TextBlock Text="{Binding ConfigurationStatus}" Foreground="{Binding ConfigurationColor}" TextWrapping="Wrap" FontSize="11" Margin="0,0,0,10"/>
+                                                                <Button Content="Launch profile…" Click="ApiSettingsLaunchProfile_Click" IsEnabled="{Binding CanConfigureApi}"
+                                                                        CommandParameter="{Binding ElementName=ApiSettingsPopup}" HorizontalContentAlignment="Left" Padding="10,7" Margin="0,0,0,6"
+                                                                        AutomationProperties.Name="View and edit API launch profile"/>
+                                                                <Button Content="Manage secrets &amp; settings…" Click="ApiSettingsSecrets_Click" IsEnabled="{Binding CanConfigureApi}"
+                                                                        CommandParameter="{Binding ElementName=ApiSettingsPopup}" HorizontalContentAlignment="Left" Padding="10,7" Margin="0,0,0,6"/>
+                                                                <Button Content="{Binding LocalButtonLabel}" Tag="Local" Click="ApiSettingsUseLocal_Click" IsEnabled="{Binding CanSwitchConfiguration}"
+                                                                        CommandParameter="{Binding ElementName=ApiSettingsPopup}" HorizontalContentAlignment="Left" Padding="10,7"/>
+                                                                </StackPanel>
+                                                                <Button Content="Clean" Click="ApiSettingsClean_Click" CommandParameter="{Binding ElementName=ApiSettingsPopup}"
+                                                                        IsEnabled="{Binding CanClean}" Visibility="{Binding ShowClean, Converter={StaticResource BoolToVisibility}}"
+                                                                        HorizontalContentAlignment="Left" Padding="10,7" Margin="0,0,0,6" ToolTip="{Binding Profile.CleanCommand}"
+                                                                        ToolTipService.ShowOnDisabled="True" AutomationProperties.Name="{Binding Name, StringFormat=Clean {0}}"/>
+                                                                <Button Content="Setup" Click="ApiSettingsSetup_Click" CommandParameter="{Binding ElementName=ApiSettingsPopup}"
+                                                                        IsEnabled="{Binding CanSetup}" Visibility="{Binding ShowSetup, Converter={StaticResource BoolToVisibility}}"
+                                                                        HorizontalContentAlignment="Left" Padding="10,7" ToolTip="{Binding Profile.SetupCommand}"
+                                                                        ToolTipService.ShowOnDisabled="True" AutomationProperties.Name="{Binding Name, StringFormat=Setup {0}}"/>
+                                                            </StackPanel>
+                                                        </Border>
+                                                    </Popup>
+                                                    <ToggleButton x:Name="ConsoleMenuToggle" Content="Console" Style="{StaticResource SectionsDropdownToggle}"
+                                                                  Padding="9,5" FontSize="11" Margin="0,0,6,5" Click="ServiceMenuToggle_Click"
+                                                                  AutomationProperties.Name="{Binding Name, StringFormat=Console menu for {0}}"/>
+                                                    <Popup x:Name="ConsoleMenuPopup" PlacementTarget="{Binding ElementName=ConsoleMenuToggle}" Placement="Bottom" VerticalOffset="6"
+                                                           IsOpen="{Binding IsChecked, ElementName=ConsoleMenuToggle, Mode=TwoWay}" StaysOpen="False" AllowsTransparency="True"
+                                                           DataContext="{Binding PlacementTarget.DataContext, RelativeSource={RelativeSource Self}}" Opened="ServiceMenuPopup_Opened">
+                                                        <Border Background="{StaticResource SurfaceBrush}" BorderBrush="{StaticResource BorderBrush}" BorderThickness="1"
+                                                                CornerRadius="8" Padding="12" Width="260" TextElement.Foreground="{StaticResource TextBrush}"
+                                                                KeyboardNavigation.TabNavigation="Cycle" Tag="{Binding ElementName=ConsoleMenuPopup}" KeyDown="ServiceMenuPopup_KeyDown">
+                                                            <StackPanel>
+                                                                <DockPanel Margin="0,0,0,8">
+                                                                    <Button DockPanel.Dock="Right" Content="×" Padding="7,2" FontSize="14" HorizontalAlignment="Right"
+                                                                            Tag="{Binding ElementName=ConsoleMenuPopup}" Click="CloseServiceMenu_Click" AutomationProperties.Name="Close console menu"/>
+                                                                    <TextBlock Text="Console" Foreground="{StaticResource TextBrush}" FontWeight="SemiBold" VerticalAlignment="Center"/>
+                                                                </DockPanel>
+                                                                <Button Content="Expand output ↗" Click="ConsoleMenuExpand_Click" CommandParameter="{Binding ElementName=ConsoleMenuPopup}"
+                                                                        HorizontalContentAlignment="Left" Padding="10,7" Margin="0,0,0,6"
+                                                                        ToolTip="Open a resizable live console with severity filters and sorting"
+                                                                        AutomationProperties.Name="{Binding Name, StringFormat=Expand console output for {0}}"/>
+                                                                <Button Content="Copy output" Click="ConsoleMenuCopy_Click" CommandParameter="{Binding ElementName=ConsoleMenuPopup}"
+                                                                        IsEnabled="{Binding HasConsoleOutput}" HorizontalContentAlignment="Left" Padding="10,7" Margin="0,0,0,6"
+                                                                        ToolTip="Copy all retained output for this service, including errors."
+                                                                        AutomationProperties.Name="{Binding Name, StringFormat=Copy console output for {0}}"/>
+                                                                <Button Content="Clear output" Click="ConsoleMenuClear_Click" CommandParameter="{Binding ElementName=ConsoleMenuPopup}"
+                                                                        IsEnabled="{Binding HasConsoleOutput}" HorizontalContentAlignment="Left" Padding="10,7" Margin="0,0,0,6"
+                                                                        ToolTip="Clear retained output and its error indicator. New capture continues."
+                                                                        AutomationProperties.Name="{Binding Name, StringFormat=Clear console output for {0}}"/>
+                                                                <Button Content="Copy Errors" Click="ConsoleMenuCopyErrors_Click" CommandParameter="{Binding ElementName=ConsoleMenuPopup}"
+                                                                        Style="{StaticResource DangerButton}" HorizontalContentAlignment="Left" Padding="10,7" Margin="0,0,0,6"
+                                                                        Visibility="{Binding HasOutputError, Converter={StaticResource BoolToVisibility}}"
+                                                                        ToolTip="Copy retained errors and up to 10 preceding console entries per error."
+                                                                        AutomationProperties.Name="{Binding Name, StringFormat=Copy errors for {0}}"/>
+                                                                <CheckBox Content="Open after build" IsChecked="{Binding OpenAfterBuild, Mode=OneWay}" Click="OpenAfterBuild_Click"
+                                                                          IsEnabled="{Binding CanChangeOpenAfterBuild}" Visibility="{Binding IsFrontendService, Converter={StaticResource BoolToVisibility}}"
+                                                                          Style="{StaticResource LongRunningTaskCheckBox}" Margin="0,10,0,0" FontSize="12"
+                                                                          ToolTipService.ShowOnDisabled="True" ToolTipService.ShowDuration="30000"
+                                                                          AutomationProperties.Name="{Binding Name, StringFormat=Open {0} after build}"
+                                                                          AutomationProperties.HelpText="{Binding OpenAfterBuildDetails}">
+                                                                    <CheckBox.ToolTip><ToolTip><TextBlock Text="{Binding OpenAfterBuildDetails}" MaxWidth="440" TextWrapping="Wrap"/></ToolTip></CheckBox.ToolTip>
+                                                                </CheckBox>
+                                                            </StackPanel>
+                                                        </Border>
+                                                    </Popup>
+                                                    <Button Content="Open in… ▾" Click="OpenServiceTool_Click" Padding="9,5" FontSize="11" Margin="0,0,6,5"
+                                                            ToolTip="{Binding Directory, StringFormat=Open this service folder in File Explorer or an installed application: {0}}"
+                                                            AutomationProperties.Name="{Binding Name, StringFormat=Open {0} folder in another application}"/>
+                                                    <Popup x:Name="StatisticsPopup" PlacementTarget="{Binding ElementName=StatisticsToggle}" Placement="Bottom" VerticalOffset="6"
+                                                           IsOpen="{Binding IsChecked, ElementName=StatisticsToggle, Mode=TwoWay}" StaysOpen="False" AllowsTransparency="True" Opened="StatisticsPopup_Opened"
+                                                           DataContext="{Binding PlacementTarget.DataContext, RelativeSource={RelativeSource Self}}">
+                                                        <Border Background="{StaticResource SurfaceBrush}" BorderBrush="{StaticResource BorderBrush}" BorderThickness="1" CornerRadius="8" Padding="12" Width="400" KeyboardNavigation.TabNavigation="Cycle"
+                                                                TextElement.Foreground="{StaticResource TextBrush}" Tag="{Binding ElementName=StatisticsPopup}" KeyDown="StatisticsPopup_KeyDown">
+                                                            <Grid>
+                                                                <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="*"/></Grid.RowDefinitions>
+                                                                <DockPanel Margin="0,0,0,8">
+                                                                    <Button DockPanel.Dock="Right" Content="×" HorizontalAlignment="Right" Padding="7,2" FontSize="14"
+                                                                            Tag="{Binding ElementName=StatisticsPopup}" Click="CloseStatistics_Click" AutomationProperties.Name="Close statistics"/>
+                                                                    <TextBlock Text="{Binding Name}" Foreground="{StaticResource MutedBrush}" FontSize="12" VerticalAlignment="Center" TextTrimming="CharacterEllipsis" Margin="0,0,10,0"/>
+                                                                </DockPanel>
+                                                                <ScrollViewer Grid.Row="1" MaxHeight="480" VerticalScrollBarVisibility="Auto">
+                                                                    <Grid>
+                                                                        <Grid.ColumnDefinitions><ColumnDefinition Width="90"/><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+                                                                        <Grid.RowDefinitions>
+                                                                            <RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/>
+                                                                            <RowDefinition Height="Auto"/><RowDefinition Height="Auto"/>
+                                                                        </Grid.RowDefinitions>
+                                                                        <TextBlock Text="Lines" FontSize="12" VerticalAlignment="Center" Foreground="{StaticResource MutedBrush}"/>
+                                                                        <TextBlock Grid.Column="1" Text="{Binding SourceLines.Value}" Foreground="{Binding SourceLines.Foreground}" FontSize="14" VerticalAlignment="Center" Margin="0,0,10,0"
+                                                                                   AutomationProperties.Name="Code lines" AutomationProperties.LiveSetting="Polite" ToolTipService.ShowDuration="30000">
+                                                                            <TextBlock.ToolTip><ToolTip><TextBlock Text="{Binding SourceLines.Details}" MaxWidth="440" TextWrapping="Wrap"/></ToolTip></TextBlock.ToolTip>
+                                                                        </TextBlock>
+                                                                        <Button Grid.Column="2" Content="{Binding SourceLines.CountButtonLabel}" Click="CountServiceLines_Click" IsEnabled="{Binding SourceLines.CanCount}"
+                                                                                MinWidth="76" Padding="8,5" FontSize="11" AutomationProperties.Name="{Binding Name, StringFormat=Count source code lines for {0}}"/>
+                                                                        <ProgressBar Grid.Row="1" Grid.ColumnSpan="3" Height="3" IsIndeterminate="True" Margin="0,6,0,4" Foreground="{StaticResource AccentBrush}" Background="#111923" BorderThickness="0"
+                                                                                     Visibility="{Binding SourceLines.IsBusy, Converter={StaticResource BoolToVisibility}}" AutomationProperties.Name="Counting code lines"/>
+                                                                        <TextBlock Grid.Row="2" Grid.ColumnSpan="3" Text="{Binding SourceLines.Error}" Foreground="#FFD27A" FontSize="11" TextWrapping="Wrap" Margin="0,4,0,4"
+                                                                                   Visibility="{Binding SourceLines.HasError, Converter={StaticResource BoolToVisibility}}" AutomationProperties.LiveSetting="Polite"/>
+                                                                        <TextBlock Grid.Row="3" Text="Avg / file" FontSize="12" VerticalAlignment="Center" Foreground="{StaticResource MutedBrush}" Margin="0,9,0,0"/>
+                                                                        <TextBlock Grid.Row="3" Grid.Column="1" Text="{Binding SourceLines.AverageValue}" FontSize="14" VerticalAlignment="Center" Margin="0,9,10,0" AutomationProperties.Name="Average lines per file" AutomationProperties.LiveSetting="Polite" ToolTipService.ShowDuration="30000">
+                                                                            <TextBlock.ToolTip><ToolTip><TextBlock Text="{Binding SourceLines.Details}" MaxWidth="440" TextWrapping="Wrap"/></ToolTip></TextBlock.ToolTip>
+                                                                        </TextBlock>
+                                                                        <Grid Grid.Row="4" Grid.ColumnSpan="3" Margin="0,12,0,0" Visibility="{Binding ShowApiDatabaseLabel, Converter={StaticResource BoolToVisibility}}">
+                                                                            <Grid.ColumnDefinitions><ColumnDefinition Width="90"/><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+                                                                            <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
+                                                                            <TextBlock Text="Endpoints" FontSize="12" VerticalAlignment="Center" Foreground="{StaticResource MutedBrush}"/>
+                                                                            <TextBlock Grid.Column="1" Text="{Binding ApiEndpoints.Value}" Foreground="{Binding ApiEndpoints.Foreground}" FontSize="14" VerticalAlignment="Center" Margin="0,0,10,0"
+                                                                                       AutomationProperties.Name="API endpoints" AutomationProperties.LiveSetting="Polite" ToolTipService.ShowDuration="30000">
+                                                                                <TextBlock.ToolTip><ToolTip><TextBlock Text="{Binding ApiEndpoints.Details}" MaxWidth="440" TextWrapping="Wrap"/></ToolTip></TextBlock.ToolTip>
+                                                                            </TextBlock>
+                                                                            <Button Grid.Column="2" Content="{Binding ApiEndpoints.ButtonLabel}" Click="CountApiEndpoints_Click" IsEnabled="{Binding ApiEndpoints.CanCount}"
+                                                                                    MinWidth="76" Padding="8,5" FontSize="11" AutomationProperties.Name="{Binding Name, StringFormat=Count API endpoints for {0}}"/>
+                                                                            <ProgressBar Grid.Row="1" Grid.ColumnSpan="3" Height="3" IsIndeterminate="True" Margin="0,6,0,4" Foreground="{StaticResource AccentBrush}" Background="#111923" BorderThickness="0"
+                                                                                         Visibility="{Binding ApiEndpoints.IsBusy, Converter={StaticResource BoolToVisibility}}" AutomationProperties.Name="Counting API endpoints"/>
+                                                                            <TextBlock Grid.Row="2" Grid.ColumnSpan="2" Text="{Binding ApiEndpoints.Status}" Foreground="#FFD27A" FontSize="11" TextWrapping="Wrap" Margin="0,6,10,0"
+                                                                                       Visibility="{Binding ApiEndpoints.HasError, Converter={StaticResource BoolToVisibility}}" AutomationProperties.LiveSetting="Polite"/>
+                                                                            <Button Grid.Row="3" Grid.Column="1" Content="Details…" Click="ApiEndpoints_Click" Padding="0,3" FontSize="11" Background="Transparent" BorderThickness="0" Foreground="{StaticResource MutedBrush}" HorizontalAlignment="Left"
+                                                                                    Visibility="{Binding ApiEndpoints.HasResult, Converter={StaticResource BoolToVisibility}}" AutomationProperties.Name="API endpoint details"/>
+                                                                            <Button Grid.Row="3" Grid.ColumnSpan="3" Content="Select branch…" Click="SelectStatisticsBranch_Click" Padding="0,3" FontSize="11" Background="Transparent" BorderThickness="0" Foreground="{StaticResource AccentBrush}" HorizontalAlignment="Left"
+                                                                                    Tag="{Binding ElementName=StatisticsPopup}" Visibility="{Binding ApiEndpoints.NeedsBranch, Converter={StaticResource BoolToVisibility}}" AutomationProperties.Name="Select tracked branch for endpoint count"/>
+                                                                        </Grid>
+                                                                    </Grid>
+                                                                </ScrollViewer>
+                                                            </Grid>
+                                                        </Border>
+                                                    </Popup>
+                                                </WrapPanel>
+                                                <Border Grid.Column="1" Background="#111923" CornerRadius="5" Padding="10,5" VerticalAlignment="Top" ToolTip="{Binding Detail}">
                                                     <StackPanel Orientation="Horizontal">
                                                         <Ellipse Width="7" Height="7" Fill="{Binding StateColor}" Margin="0,0,7,0" VerticalAlignment="Center"/>
-                                                        <TextBlock Text="{Binding Status}" Foreground="{Binding StateColor}" FontWeight="SemiBold" FontSize="12"/>
+                                                        <TextBlock Text="{Binding CardStatus}" Foreground="{Binding StateColor}" FontWeight="SemiBold" FontSize="12" AutomationProperties.HelpText="{Binding Detail}"/>
                                                     </StackPanel>
                                                 </Border>
                                                 <WrapPanel Grid.Row="1" Grid.ColumnSpan="2" Margin="0,2,0,0">
-                                                    <Border Style="{StaticResource ServiceMetadata}">
-                                                        <TextBlock Text="{Binding DesiredPortLabel}" Foreground="#CCD7E7" FontSize="13" TextWrapping="Wrap"/>
-                                                    </Border>
-                                                    <Border Style="{StaticResource ServiceMetadata}" Visibility="{Binding ShowApiDatabaseLabel, Converter={StaticResource BoolToVisibility}}" ToolTip="{Binding ApiDatabaseDetails}">
-                                                        <TextBlock Text="{Binding ApiDatabaseLabel}" Foreground="{StaticResource AccentBrush}" FontSize="13" TextWrapping="Wrap"/>
-                                                    </Border>
-                                                    <Border Style="{StaticResource ServiceMetadata}" Visibility="{Binding SourceLines.IsVisible, Converter={StaticResource BoolToVisibility}}"
-                                                            ToolTipService.ShowDuration="30000">
-                                                        <Border.ToolTip><ToolTip><TextBlock Text="{Binding SourceLines.Details}" MaxWidth="440" TextWrapping="Wrap"/></ToolTip></Border.ToolTip>
-                                                        <TextBlock Text="{Binding SourceLines.Summary}" Foreground="{Binding SourceLines.Foreground}" FontSize="13" TextWrapping="Wrap"
-                                                                   AutomationProperties.LiveSetting="Polite"/>
-                                                    </Border>
-                                                    <Border Style="{StaticResource ServiceMetadata}" Visibility="{Binding SourceLines.HasAverage, Converter={StaticResource BoolToVisibility}}"
-                                                            ToolTipService.ShowDuration="30000">
-                                                        <Border.ToolTip><ToolTip><TextBlock Text="{Binding SourceLines.Details}" MaxWidth="440" TextWrapping="Wrap"/></ToolTip></Border.ToolTip>
-                                                        <TextBlock Text="{Binding SourceLines.AverageSummary}" Foreground="{Binding SourceLines.Foreground}" FontSize="13" TextWrapping="Wrap"
-                                                                   AutomationProperties.LiveSetting="Polite"/>
-                                                    </Border>
-                                                    <Border Style="{StaticResource ServiceMetadata}" Visibility="{Binding ApiEndpoints.IsVisible, Converter={StaticResource BoolToVisibility}}"
-                                                            ToolTipService.ShowDuration="30000">
-                                                        <Border.ToolTip><ToolTip><TextBlock Text="{Binding ApiEndpoints.Details}" MaxWidth="440" TextWrapping="Wrap"/></ToolTip></Border.ToolTip>
-                                                        <TextBlock Text="{Binding ApiEndpoints.Summary}" Foreground="{Binding ApiEndpoints.Foreground}" FontSize="13" TextWrapping="Wrap"
-                                                                   AutomationProperties.LiveSetting="Polite"/>
+                                                    <Border Style="{StaticResource ServiceMetadata}" Visibility="{Binding ShowServiceTypeLabel, Converter={StaticResource BoolToVisibility}}">
+                                                        <TextBlock Text="{Binding ServiceTypeLabel}" Foreground="#CCD7E7" FontSize="13" TextWrapping="Wrap"/>
                                                     </Border>
                                                     <Border Style="{StaticResource ServiceMetadata}" Background="{Binding ConfigurationBackground}" BorderBrush="{Binding ConfigurationBorder}" BorderThickness="1"
                                                             Visibility="{Binding HasApiConfiguration, Converter={StaticResource BoolToVisibility}}">
@@ -590,23 +752,25 @@
                                             </Grid>
                                         </Expander.Header>
                                     <StackPanel>
-                                        <Border Background="{Binding ConfigurationBackground}" BorderBrush="{Binding ConfigurationBorder}" BorderThickness="1" CornerRadius="6" Padding="10" Margin="0,10,0,2"
-                                                Visibility="{Binding HasApiConfiguration, Converter={StaticResource BoolToVisibility}}">
-                                            <StackPanel>
-                                                <TextBlock Text="API CONFIGURATION" Foreground="{Binding ConfigurationColor}" FontSize="10" FontWeight="Bold"/>
-                                                <TextBlock Text="{Binding ConfigurationStatus}" Foreground="{Binding ConfigurationColor}" TextWrapping="Wrap" FontWeight="SemiBold" Margin="0,5,0,7"/>
-                                                <WrapPanel>
-                                                    <Button Content="{Binding LocalButtonLabel}" Tag="Local" Click="UseApiConfiguration_Click" IsEnabled="{Binding CanSwitchConfiguration}" Padding="8,6" FontSize="11" Margin="0,0,6,6"/>
-                                                    <Button Content="{Binding ProdButtonLabel}" Tag="Prod" Click="UseApiConfiguration_Click" IsEnabled="{Binding CanSwitchConfiguration}" Style="{StaticResource DangerButton}" Padding="8,6" FontSize="11" Margin="0,0,0,6"/>
-                                                </WrapPanel>
-                                                <Button Content="Manage secrets &amp; settings…" Click="ApiSecrets_Click" IsEnabled="{Binding CanConfigureApi}" Padding="8,6" FontSize="11" HorizontalAlignment="Left"/>
-                                                <TextBlock Text="Runs the API here with Local (Development) or Prod (Production) settings. Switching starts or restarts this API." Foreground="{StaticResource MutedBrush}" FontSize="10" TextWrapping="Wrap" Margin="0,7,0,0"/>
-                                            </StackPanel>
-                                         </Border>
-                                         <Border Background="#121A25" CornerRadius="5" Padding="8,6" Margin="0,8,0,4"><TextBlock Text="{Binding Command}" FontFamily="Cascadia Code, Consolas" FontSize="11" TextTrimming="CharacterEllipsis" ToolTip="{Binding Command}"/></Border>
-                                         <TextBlock Text="{Binding UrlCaption}" Foreground="{StaticResource MutedBrush}" FontSize="9" Margin="0,3,0,0" Visibility="{Binding HasWebEndpoint, Converter={StaticResource BoolToVisibility}}"/>
-                                         <Button Content="{Binding Url}" Foreground="{StaticResource AccentBrush}" Background="Transparent" BorderThickness="0" Padding="0,3" HorizontalAlignment="Left" IsEnabled="{Binding HasLiveUrl}" Click="OpenUrl_Click" ToolTip="{Binding UrlCaption}" FontSize="11" Visibility="{Binding HasWebEndpoint, Converter={StaticResource BoolToVisibility}}"/>
-                                        <TextBlock Text="{Binding Detail}" Foreground="{StaticResource MutedBrush}" FontSize="10" TextTrimming="CharacterEllipsis" ToolTip="{Binding Detail}" Margin="0,2,0,7"/>
+                                        <TextBlock Text="{Binding Directory}" Foreground="{StaticResource MutedBrush}" FontSize="11" TextTrimming="CharacterEllipsis" ToolTip="{Binding Directory}" Margin="0,8,0,0"
+                                                   Visibility="{Binding ShowCommandFolder, Converter={StaticResource BoolToVisibility}}" AutomationProperties.Name="Service working folder"/>
+                                        <Border Background="#121A25" CornerRadius="5" Padding="8,6" Margin="0,8,0,4">
+                                            <Border.Style>
+                                                <Style TargetType="Border">
+                                                    <Style.Triggers>
+                                                        <DataTrigger Binding="{Binding HasApiConfiguration}" Value="True">
+                                                            <Setter Property="Visibility" Value="Collapsed"/>
+                                                        </DataTrigger>
+                                                    </Style.Triggers>
+                                                </Style>
+                                            </Border.Style>
+                                            <TextBlock Text="{Binding Command}" FontFamily="Cascadia Code, Consolas" FontSize="11"
+                                                       TextTrimming="CharacterEllipsis" ToolTip="{Binding Command}"/>
+                                        </Border>
+                                        <TextBlock Text="{Binding Detail}" Foreground="{StaticResource MutedBrush}" FontSize="10" TextTrimming="CharacterEllipsis" ToolTip="{Binding Detail}" Margin="0,2,0,7"
+                                                   Visibility="{Binding HasCardDetail, Converter={StaticResource BoolToVisibility}}"/>
+                                        <TextBlock Text="{Binding ProcessTrackingHint}" Foreground="{StaticResource MutedBrush}" FontSize="10" TextWrapping="Wrap" Margin="0,0,0,7"
+                                                   Visibility="{Binding ShowProcessTrackingHint, Converter={StaticResource BoolToVisibility}}"/>
                                         <Button Content="Resolve conflict &amp; restart" Click="ResolveConflict_Click" IsEnabled="{Binding CanResolveConflict}"
                                                 Margin="0,0,0,8" Padding="8,7" FontSize="11"
                                                 ToolTip="Review and stop the processes blocking this service's port, then restart the service.">
@@ -619,57 +783,7 @@
                                                 </Style>
                                             </Button.Style>
                                         </Button>
-                                        <UniformGrid Columns="{Binding ActionColumnCount}">
-                                            <Button Content="{Binding StartButtonLabel}" Style="{StaticResource PrimaryButton}" Click="StartService_Click" IsEnabled="{Binding CanStart}" Margin="0,0,5,0" Padding="4,6" FontSize="11"/>
-                                            <Button Content="Restart" Click="RestartService_Click" IsEnabled="{Binding CanRestart}" Margin="0,0,5,0" Padding="4,6" FontSize="11"/>
-                                            <Button Content="Clean" Click="CleanService_Click" IsEnabled="{Binding CanClean}" Margin="0,0,5,0" Padding="4,6" FontSize="11" ToolTip="{Binding Profile.CleanCommand}" Visibility="{Binding ShowClean, Converter={StaticResource BoolToVisibility}}"/>
-                                            <Button Content="Setup" Click="SetupService_Click" IsEnabled="{Binding CanSetup}" Margin="0,0,5,0" Padding="4,6" FontSize="11" ToolTip="{Binding Profile.SetupCommand}" Visibility="{Binding ShowSetup, Converter={StaticResource BoolToVisibility}}"/>
-                                            <Button Content="Stop" Click="StopService_Click" Style="{StaticResource DangerButton}" IsEnabled="{Binding CanStop}" Padding="4,6" FontSize="11" ToolTip="Force stop this service and its child processes"/>
-                                        </UniformGrid>
-                                        <TextBlock Text="{Binding ProcessLabel}" Foreground="{StaticResource MutedBrush}" FontSize="9" TextTrimming="CharacterEllipsis" ToolTip="{Binding Directory}" Margin="0,6,0,0"/>
-                                    <Border BorderBrush="{StaticResource BorderBrush}" BorderThickness="0,1,0,0" Margin="0,12,0,0" Padding="0,12,0,0">
-                                    <WrapPanel>
-                                        <ToggleButton Content="Console output" Style="{StaticResource SectionToggle}"
-                                                      IsChecked="{Binding IsConsoleVisible, Mode=TwoWay}" Margin="0,0,8,6" FontSize="12" Foreground="{StaticResource TextBrush}"
-                                                      AutomationProperties.Name="{Binding Name, StringFormat=Show console for {0}}"/>
-                                        <Button Content="Copy output" Click="CopyServiceConsole_Click" Style="{StaticResource ServiceCardAction}" IsEnabled="{Binding HasConsoleOutput}"
-                                                ToolTip="Copy all retained output for this service, including errors, without opening the console."
-                                                AutomationProperties.Name="{Binding Name, StringFormat=Copy console output for {0}}"/>
-                                        <Button Content="Clear output" Click="ClearServiceConsole" Style="{StaticResource ServiceCardAction}" IsEnabled="{Binding HasConsoleOutput}"
-                                                ToolTip="Clear this service's retained output and error indicator. New output continues to be captured."
-                                                AutomationProperties.Name="{Binding Name, StringFormat=Clear console output for {0}}"/>
-                                        <Button Content="Expand output ↗" Click="ExpandServiceConsole_Click" Style="{StaticResource ServiceCardAction}"
-                                                ToolTip="Open a resizable live console with severity filters and sorting"
-                                                AutomationProperties.Name="{Binding Name, StringFormat=Expand console output for {0}}"/>
-                                        <Button Content="Copy Errors" Click="CopyServiceErrors_Click" Style="{StaticResource DangerButton}" Padding="10,7" FontSize="12" Margin="0,0,8,6"
-                                                Visibility="{Binding HasOutputError, Converter={StaticResource BoolToVisibility}}"
-                                                ToolTip="Copy retained errors and up to 10 console entries before each error. Overlapping context is copied once."
-                                                AutomationProperties.Name="{Binding Name, StringFormat=Copy errors for {0}}"/>
-                                        <Button Content="Open in… ▾" Click="OpenServiceTool_Click" Style="{StaticResource ServiceCardAction}"
-                                                ToolTip="{Binding Directory, StringFormat=Open this service folder in File Explorer or an installed application: {0}}"
-                                                AutomationProperties.Name="{Binding Name, StringFormat=Open {0} folder in another application}"/>
-                                        <Button Content="API endpoints…" Click="ApiEndpoints_Click" Style="{StaticResource ServiceCardAction}"
-                                                Visibility="{Binding ShowApiDatabaseLabel, Converter={StaticResource BoolToVisibility}}"
-                                                ToolTip="Count API endpoint operations by HTTP verb from source, or a local OpenAPI JSON file. View routes, controller actions and discovery limitations."
-                                                AutomationProperties.Name="{Binding Name, StringFormat=Count API endpoints for {0}}"/>
-                                        <Button Content="{Binding SourceLines.ButtonLabel}" Click="CountServiceLines_Click" Style="{StaticResource ServiceCardAction}"
-                                                IsEnabled="{Binding SourceLines.CanCount}" ToolTipService.ShowOnDisabled="True" ToolTipService.ShowDuration="30000"
-                                                AutomationProperties.Name="{Binding Name, StringFormat=Count source code lines for {0}}">
-                                            <Button.ToolTip><ToolTip><TextBlock Text="{Binding SourceLines.Details}" MaxWidth="440" TextWrapping="Wrap"/></ToolTip></Button.ToolTip>
-                                        </Button>
-                                        <CheckBox Content="Open after build" IsChecked="{Binding OpenAfterBuild, Mode=OneWay}" Click="OpenAfterBuild_Click"
-                                                  IsEnabled="{Binding CanChangeOpenAfterBuild}" Visibility="{Binding IsFrontendService, Converter={StaticResource BoolToVisibility}}"
-                                                  Style="{StaticResource LongRunningTaskCheckBox}" Margin="0,0,8,6" FontSize="12"
-                                                  ToolTipService.ShowOnDisabled="True" ToolTipService.ShowDuration="30000"
-                                                  AutomationProperties.Name="{Binding Name, StringFormat=Open {0} after build}"
-                                                  AutomationProperties.HelpText="{Binding OpenAfterBuildDetails}">
-                                            <CheckBox.ToolTip><ToolTip><TextBlock Text="{Binding OpenAfterBuildDetails}" MaxWidth="440" TextWrapping="Wrap"/></ToolTip></CheckBox.ToolTip>
-                                        </CheckBox>
-                                    </WrapPanel>
-                                    </Border>
-                                    <controls:ConsoleOutput ItemsSource="{Binding ConsoleLines}" ShowSource="False" Height="250" Margin="0,8,0,0"
-                                                            Visibility="{Binding IsConsoleVisible, Converter={StaticResource BoolToVisibility}}"
-                                                            ClearRequested="ClearServiceConsole" AutomationProperties.Name="{Binding Name, StringFormat=Console for {0}}"/>
+
                                      </StackPanel>
                                      </Expander>
                                     </StackPanel>
@@ -679,37 +793,56 @@
                         </ItemsControl>
                         <ItemsControl ItemsSource="{Binding Services}">
                             <ItemsControl.ItemTemplate><DataTemplate>
+                                <StackPanel>
                                 <Border Background="{StaticResource CardBrush}" BorderBrush="{StaticResource BorderBrush}" BorderThickness="1" CornerRadius="9" Padding="12" Margin="0,0,0,8"
                                         Visibility="{Binding HasVerifiedDatabaseCard, Converter={StaticResource BoolToVisibility}}">
-                                    <Expander Style="{StaticResource ServiceCardExpander}" Expanded="DatabaseCard_Expanded" AutomationProperties.Name="{Binding DatabaseCardName}"
-                                              AutomationProperties.HelpText="{Binding DatabaseComparisonHeader}">
+                                    <Expander Style="{StaticResource ServiceCardExpander}" AutomationProperties.Name="{Binding DatabaseCardName}"
+                                              AutomationProperties.HelpText="{Binding DatabaseCardDetails}">
                                         <Expander.Header>
-                                                <StackPanel>
-                                                    <TextBlock Text="Database" FontSize="17" FontWeight="SemiBold"/>
-                                                    <TextBlock Text="{Binding LastVerifiedDatabaseName}" FontSize="14" TextWrapping="Wrap" Margin="0,5,0,0"/>
+                                            <Grid>
+                                                <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+                                                <StackPanel Margin="0,0,12,0">
+                                                    <WrapPanel VerticalAlignment="Center">
+                                                        <TextBlock Text="{Binding DatabaseCardName}" FontSize="17" FontWeight="SemiBold" TextWrapping="Wrap" VerticalAlignment="Center" Margin="0,0,10,0" AutomationProperties.LiveSetting="Polite"/>
+                                                        <ToggleButton Content="Change DB" Click="ChangeDatabase_Click" Style="{StaticResource ServiceUtilityToggle}" Padding="9,5" FontSize="11"
+                                                                IsEnabled="{Binding CanChangeDatabase}" AutomationProperties.Name="Change API database"
+                                                                ToolTip="Change the Local API connection and restart that API." ToolTipService.ShowOnDisabled="True"/>
+                                                    </WrapPanel>
                                                     <TextBlock Text="{Binding Name, StringFormat=Discovered through {0}}" Foreground="{StaticResource MutedBrush}" FontSize="12" TextWrapping="Wrap" Margin="0,4,0,0"/>
-                                                    <Border Style="{StaticResource ServiceMetadata}" HorizontalAlignment="Left" ToolTip="{Binding DatabaseCardDetails}">
-                                                        <TextBlock Text="{Binding DatabaseCardStatus}" Foreground="{Binding DatabaseCardStatusColor}" FontWeight="SemiBold" FontSize="12" TextWrapping="Wrap" AutomationProperties.LiveSetting="Polite"/>
-                                                    </Border>
-                                                    <TextBlock Text="{Binding DatabaseComparisonHeader}" Foreground="{StaticResource AccentBrush}"
-                                                               FontSize="13" FontWeight="SemiBold" TextWrapping="Wrap" Margin="0,8,0,0"
-                                                               Visibility="{Binding HasSavedDatabaseComparisonSet, Converter={StaticResource BoolToVisibility}}"
-                                                               AutomationProperties.LiveSetting="Polite"/>
-                                                    <TextBlock Text="{Binding DatabaseComparisonCheckedAt}" Foreground="{StaticResource MutedBrush}"
-                                                               FontSize="12" Margin="0,4,0,0"
-                                                               Visibility="{Binding HasDatabaseComparisonCheck, Converter={StaticResource BoolToVisibility}}"/>
                                                 </StackPanel>
+                                                <Border Grid.Column="1" Background="#111923" CornerRadius="5" Padding="10,5" VerticalAlignment="Top" ToolTip="{Binding DatabaseCardDetails}">
+                                                    <TextBlock Text="{Binding DatabaseCardStatus}" Foreground="{Binding DatabaseCardStatusColor}" FontWeight="SemiBold" FontSize="12" AutomationProperties.LiveSetting="Polite"/>
+                                                </Border>
+                                            </Grid>
                                         </Expander.Header>
                                         <StackPanel Margin="29,8,0,0">
                                             <TextBlock Text="{Binding DatabaseCardDetails}" Foreground="{StaticResource MutedBrush}" FontSize="13" TextWrapping="Wrap"/>
-                                            <Button Content="Open database explorer…" Click="OpenDatabaseExplorer_Click" HorizontalAlignment="Left"
-                                                    Margin="0,10,0,0" Padding="12,8"
-                                                    ToolTip="Browse tables, rows, accounts, connections, and database comparison or migration tools"
-                                                    AutomationProperties.Name="{Binding LastVerifiedDatabaseName, StringFormat=Open database explorer for {0}}"/>
-                                            <local:DatabaseComparisonPanel Margin="0,10,0,0"/>
                                         </StackPanel>
                                     </Expander>
                                 </Border>
+                                <ItemsControl ItemsSource="{Binding FlutterDatabases}">
+                                    <ItemsControl.ItemTemplate><DataTemplate>
+                                        <Border Background="{StaticResource CardBrush}" BorderBrush="{StaticResource BorderBrush}" BorderThickness="1" CornerRadius="9" Padding="12" Margin="0,0,0,8">
+                                            <Expander Style="{StaticResource ServiceCardExpander}" AutomationProperties.Name="{Binding Name}"
+                                                      AutomationProperties.HelpText="{Binding Details}">
+                                                <Expander.Header>
+                                                    <Grid>
+                                                        <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+                                                        <StackPanel Margin="0,0,12,0">
+                                                            <TextBlock Text="{Binding Name}" FontSize="17" FontWeight="SemiBold" TextWrapping="Wrap" AutomationProperties.LiveSetting="Polite"/>
+                                                            <TextBlock Text="{Binding SourceLabel}" Foreground="{StaticResource MutedBrush}" FontSize="12" TextWrapping="Wrap" Margin="0,4,0,0"/>
+                                                        </StackPanel>
+                                                        <Border Grid.Column="1" Background="#111923" CornerRadius="5" Padding="10,5" VerticalAlignment="Top" ToolTip="{Binding Details}">
+                                                            <TextBlock Text="{Binding Status}" Foreground="{Binding StatusColor}" FontWeight="SemiBold" FontSize="12" AutomationProperties.LiveSetting="Polite"/>
+                                                        </Border>
+                                                    </Grid>
+                                                </Expander.Header>
+                                                <TextBlock Text="{Binding Details}" Foreground="{StaticResource MutedBrush}" FontSize="13" TextWrapping="Wrap" Margin="29,8,0,0"/>
+                                            </Expander>
+                                        </Border>
+                                    </DataTemplate></ItemsControl.ItemTemplate>
+                                </ItemsControl>
+                                </StackPanel>
                             </DataTemplate></ItemsControl.ItemTemplate>
                         </ItemsControl>
                         </StackPanel>
@@ -721,7 +854,9 @@
                     <Button Content="Show services" Click="ShowServices_Click" HorizontalAlignment="Center"/>
                 </StackPanel>
             </Grid>
-            <Grid Grid.Row="4" Margin="0,14,12,0"><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions><TextBlock Text="{Binding Notice}" Foreground="{StaticResource MutedBrush}" FontSize="11" TextTrimming="CharacterEllipsis" ToolTip="{Binding Notice}"/><TextBlock Grid.Column="1" Text="{Binding LastChecked}" Foreground="{StaticResource MutedBrush}" FontSize="10" Margin="15,0,0,0"/></Grid>
+            <controls:CodexActivityStrip Grid.Row="4" Margin="0,14,0,0" VisibleAgents="{Binding CodexCrewVisibleAgents, Mode=TwoWay}"
+                                         WatcherRequested="CodexAlerts_Click"/>
+            <Grid Grid.Row="5" Margin="0,14,12,0"><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions><TextBlock Text="{Binding Notice}" Foreground="{StaticResource MutedBrush}" FontSize="11" TextTrimming="CharacterEllipsis" ToolTip="{Binding Notice}"/><TextBlock Grid.Column="1" Text="{Binding LastChecked}" Foreground="{StaticResource MutedBrush}" FontSize="10" Margin="15,0,0,0"/></Grid>
         </Grid>
         <GridSplitter x:Name="NextCommitSplitter" Grid.Column="2" Width="6" HorizontalAlignment="Center" VerticalAlignment="Stretch" Margin="0,24,0,16"
                       Background="{StaticResource BorderBrush}" ResizeDirection="Columns" ResizeBehavior="PreviousAndNext" ShowsPreview="True"
@@ -766,23 +901,37 @@
                     <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="*"/></Grid.RowDefinitions>
                     <Border Background="{StaticResource CardBrush}" BorderBrush="{StaticResource BorderBrush}" BorderThickness="1" CornerRadius="7" Padding="10" Margin="0,0,0,12">
                         <StackPanel>
-                            <TextBlock Text="Git comparison" Foreground="{StaticResource TextBrush}" FontWeight="SemiBold"/>
+                            <Grid>
+                                <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+                                <TextBlock Text="Git comparison" Foreground="{StaticResource TextBrush}" FontWeight="SemiBold" VerticalAlignment="Center"/>
+                                <Button Grid.Column="1" Click="DashboardGitOptions_Click" Padding="6,4" Background="Transparent"
+                                        ToolTip="Git comparison options" AutomationProperties.Name="Git comparison options">
+                                    <TextBlock Text="&#xE713;" FontFamily="Segoe MDL2 Assets" FontSize="14"/>
+                                    <Button.ContextMenu>
+                                        <ContextMenu Style="{StaticResource ServiceToolContextMenu}">
+                                            <MenuItem Header="Git-only conflict test" Style="{StaticResource ServiceToolMenuItem}" Click="DashboardGitConflictCheck_Click"
+                                                      IsEnabled="{Binding CanRequestDashboardGitCheck}" ToolTipService.ShowOnDisabled="True"
+                                                      ToolTip="{Binding DashboardGitConflictSchedule}" AutomationProperties.Name="Queue Git-only conflict test"/>
+                                            <MenuItem Header="Details…" Style="{StaticResource ServiceToolMenuItem}" Click="DashboardGitConflictDetails_Click"
+                                                      IsEnabled="{Binding HasDashboardGitConflictResult}" ToolTip="Exact compared commits, conflict paths, and Git diagnostics"/>
+                                            <Separator Style="{StaticResource ServiceToolMenuSeparator}"/>
+                                            <MenuItem Header="Manual only · committed history" Style="{StaticResource ServiceToolMenuItem}" IsEnabled="False"/>
+                                        </ContextMenu>
+                                    </Button.ContextMenu>
+                                </Button>
+                            </Grid>
                             <TextBlock Text="{Binding DashboardGitComparisonLabel}" Foreground="{StaticResource MutedBrush}" FontSize="11" TextWrapping="Wrap" Margin="0,5,0,10"/>
                             <Grid>
                                 <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="*"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
                                 <StackPanel><TextBlock Text="Changed files" Foreground="{StaticResource MutedBrush}" FontSize="10"/><TextBlock Text="{Binding DashboardGitChangedFiles}" Foreground="{StaticResource TextBrush}" FontWeight="SemiBold" FontSize="17" Margin="0,3,0,0"/></StackPanel>
-                                <StackPanel Grid.Column="1" Margin="8,0,0,0" ToolTip="Tracked text compared with the last fetched remote branch. Includes local commits and edits; untracked and binary contents excluded."><TextBlock Text="Lines added" Foreground="{StaticResource MutedBrush}" FontSize="10"/><TextBlock Text="{Binding DashboardGitAddedLines}" Foreground="{StaticResource AccentBrush}" FontWeight="SemiBold" FontSize="17" Margin="0,3,0,0"/></StackPanel>
-                                <StackPanel Grid.Column="2" Margin="8,0,0,0" ToolTip="Tracked text compared with the last fetched remote branch. Includes local commits and edits; untracked and binary contents excluded."><TextBlock Text="Lines removed" Foreground="{StaticResource MutedBrush}" FontSize="10"/><TextBlock Text="{Binding DashboardGitRemovedLines}" Foreground="#FFACA9" FontWeight="SemiBold" FontSize="17" Margin="0,3,0,0"/></StackPanel>
+                                <StackPanel Grid.Column="1" Margin="8,0,0,0" ToolTip="{Binding DashboardGitLineTotalsTooltip}"><TextBlock Text="Lines added" Foreground="{StaticResource MutedBrush}" FontSize="10"/><TextBlock Text="{Binding DashboardGitAddedLines}" Foreground="{StaticResource AccentBrush}" FontWeight="SemiBold" FontSize="17" Margin="0,3,0,0"/></StackPanel>
+                                <StackPanel Grid.Column="2" Margin="8,0,0,0" ToolTip="{Binding DashboardGitLineTotalsTooltip}"><TextBlock Text="Lines removed" Foreground="{StaticResource MutedBrush}" FontSize="10"/><TextBlock Text="{Binding DashboardGitRemovedLines}" Foreground="#FFACA9" FontWeight="SemiBold" FontSize="17" Margin="0,3,0,0"/></StackPanel>
                             </Grid>
-                            <TextBlock Text="{Binding DashboardGitComparisonDetail}" Foreground="{StaticResource MutedBrush}" FontSize="11" TextWrapping="Wrap" Margin="0,8,0,0"/>
-                            <Border Height="1" Background="{StaticResource BorderBrush}" Margin="0,10,0,10"/>
-                            <WrapPanel>
-                                <Button Content="Git-only conflict test" Click="DashboardGitConflictCheck_Click" IsEnabled="{Binding CanRequestDashboardGitCheck}" Padding="9,6" FontSize="11" Margin="0,0,6,4"
-                                        ToolTip="Check committed history against the saved remote release branch. Waits until all local Codex agents finish. Uncommitted edits are excluded." AutomationProperties.Name="Queue Git-only conflict test"/>
-                                <Button Content="Details…" Click="DashboardGitConflictDetails_Click" IsEnabled="{Binding HasDashboardGitConflictResult}" Padding="9,6" FontSize="11" Margin="0,0,0,4"/>
-                            </WrapPanel>
-                            <TextBlock Text="{Binding DashboardGitConflictStatus}" Foreground="{Binding DashboardGitConflictStatusColor}" FontSize="11" TextWrapping="Wrap" Margin="0,4,0,0" AutomationProperties.LiveSetting="Polite"/>
-                            <TextBlock Text="{Binding DashboardGitConflictSchedule}" Foreground="{StaticResource MutedBrush}" FontSize="10" TextWrapping="Wrap" Margin="0,5,0,0"/>
+                            <TextBlock Text="{Binding DashboardGitComparisonDetail}" Foreground="{StaticResource MutedBrush}" FontSize="11" TextWrapping="Wrap" Margin="0,8,0,0"
+                                       ToolTip="Untracked and binary contents are excluded from line totals. Ahead/behind counts appear when nonzero."/>
+                            <TextBlock Text="{Binding DashboardGitConflictStatus}" Foreground="{Binding DashboardGitConflictStatusColor}" FontSize="11" TextWrapping="Wrap" Margin="0,6,0,0"
+                                       Visibility="{Binding HasDashboardGitConflictStatus, Converter={StaticResource BoolToVisibility}}"
+                                       ToolTip="{Binding DashboardGitConflictSchedule}" AutomationProperties.LiveSetting="Polite"/>
                         </StackPanel>
                     </Border>
                     <StackPanel Grid.Row="1" Margin="0,0,0,10">

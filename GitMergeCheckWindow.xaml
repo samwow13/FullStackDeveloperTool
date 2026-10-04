@@ -7,12 +7,13 @@
     <Grid Margin="22">
         <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="*"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
         <TextBlock x:Name="Heading" FontSize="23" FontWeight="SemiBold" TextWrapping="Wrap" Margin="0,0,0,12" AutomationProperties.LiveSetting="Polite"/>
-        <TextBlock Grid.Row="1" Text="Committed branch versus latest release. Uncommitted edits are excluded. No merge was started; local files remain unchanged." TextWrapping="Wrap" Foreground="{StaticResource MutedBrush}" Margin="0,0,0,16"/>
+        <TextBlock x:Name="Introduction" Grid.Row="1" Text="Committed branch versus latest remote source. Uncommitted edits are excluded. No merge was started; local files remain unchanged." TextWrapping="Wrap" Foreground="{StaticResource MutedBrush}" Margin="0,0,0,16"/>
         <TextBox x:Name="Details" Grid.Row="2" IsReadOnly="True" TextWrapping="Wrap" VerticalScrollBarVisibility="Auto" FontFamily="Cascadia Code, Consolas" AutomationProperties.Name="Git-only conflict test result, compared commits and conflicting paths"/>
         <WrapPanel Grid.Row="3" HorizontalAlignment="Right" Margin="0,18,0,0">
             <Button Content="Open repository folder" Click="OpenFolder_Click" Margin="0,0,8,6"/>
             <Button Content="Copy details" Click="Copy_Click" Margin="0,0,8,6"/>
-            <Button Content="Close" IsCancel="True" IsDefault="True" Margin="0,0,0,6"/>
+            <Button x:Name="ReviewMerge" Content="Review local merge…" Click="ReviewMerge_Click" Visibility="Collapsed" Style="{StaticResource PrimaryButton}" Margin="0,0,8,6"/>
+            <Button x:Name="BackToGit" Content="Back to Git" IsCancel="True" IsDefault="True" Margin="0,0,0,6"/>
         </WrapPanel>
     </Grid>
 </Window>

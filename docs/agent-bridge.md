@@ -4,6 +4,12 @@ Full Stack Launcher owns configured project services. Its agent bridge lets a lo
 
 ## Build and connect
 
+For an installed build, use **Functions > First Time Setup**. Copy the generated integration section into the project's existing `AGENTS.md` without replacing current instructions, then copy the setup prompt into your agent chat. Its command, arguments, and working directory come from the running application; `--settings` always names the dashboard's exact resolved settings file. Keep the executable in a stable location and regenerate the connection details after moving it.
+
+**Connect Codex** is an explicit opt-in to run the installed native Codex CLI's supported `mcp add` command. It reads the server list and inspects an existing `fullStackLauncher` entry first, reuses an exact enabled match, and refuses conflicting or restricted entries. It verifies registration through `mcp get`; it does not restart Codex, enable computer use, or prove that an existing chat has discovered the tools. Other MCP entries are not intentionally edited. Avoid editing MCP configuration in another client during registration: the CLI provides no conditional create operation against concurrent external changes.
+
+Reconnect MCP or restart the agent client and open a new chat when necessary. Then call `launcher_projects` through that client. A successful response, including an empty project list, proves that the client can reach the running dashboard. Check configured services only with read-only list/status tools; setup does not start or stop them. If the native CLI is unavailable, use the displayed manual stdio fields or let the prompted agent configure them with its authorized local tools or computer use. Opening the dialog and copying its content do not change `AGENTS.md`, client configuration, or launcher settings.
+
 The agent restart warning update is packaged at `publish\agent-restart-warnings-20261002\FullStackLauncher.exe`. Close the old dashboard through its normal close flow, resolve any draft/service prompts, and open this updated EXE to activate the popup and notification behavior. Running processes keep their old code until restarted. The existing adapter can forward the additive event and heartbeat fields; use the updated EXE for its MCP adapter as well to refresh tool descriptions. Live popup, restart and notification behavior has not been exercised.
 
 1. Package the launcher application without running test projects:
@@ -24,7 +30,7 @@ The agent restart warning update is packaged at `publish\agent-restart-warnings-
 
    If the dashboard uses an explicit `--settings` file, append `--settings 'C:\path\to\settings.json'` to the MCP command too. Both processes must use the same resolved settings path. Restart Codex desktop or its MCP connection after adding the server. [Official OpenAI Codex MCP setup](https://learn.chatgpt.com/docs/extend/mcp?surface=cli) documents local stdio commands, `codex mcp add`, `codex mcp list`, and shared desktop/CLI configuration.
 
-The bridge changes no global Codex configuration by itself. The command above is the explicit opt-in. It uses the launcher's existing EXE in `--agent-mcp` mode. That process connects to the dashboard through a Windows current-user named pipe. It does not load or edit project settings and cannot run a service without the dashboard.
+The bridge changes no global Codex configuration by itself. **Connect Codex** or the command above is the explicit opt-in. It uses the launcher's existing EXE in `--agent-mcp` mode. That process connects to the dashboard through a Windows current-user named pipe. It does not load or edit project settings and cannot run a service without the dashboard.
 
 ## Agent workflow
 

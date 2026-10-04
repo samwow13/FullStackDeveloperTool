@@ -20,24 +20,29 @@ internal sealed class ConsoleProcessSession : IDisposable
     private readonly StreamReader _error;
     private Task _outputCompletion = Task.CompletedTask;
     private bool _disposed;
+    private Process? _drain;
+    private bool _keepRunningPrepared;
 
     private ConsoleProcessSession(Process process, SafeFileHandle job, SafeFileHandle thread,
-        SafeFileHandle output, SafeFileHandle error)
+        SafeFileHandle output, SafeFileHandle error, string jobName)
     {
         Process = process;
         _job = job;
         _thread = thread;
         _output = new(new FileStream(output, FileAccess.Read));
         _error = new(new FileStream(error, FileAccess.Read));
+        JobName = jobName;
     }
 
     public Process Process { get; }
     public Task OutputCompletion => _outputCompletion;
     public bool OutputDrainAttempted { get; set; }
+    internal string JobName { get; }
 
     public static ConsoleProcessSession Create(string command, string directory)
     {
-        var job = CreateJobObject(IntPtr.Zero, null);
+        var jobName = "Local\\FullStackLauncher.Console." + Guid.NewGuid().ToString("N");
+        var job = CreateJobObject(IntPtr.Zero, jobName);
         if (job.IsInvalid) throw new Win32Exception(Marshal.GetLastWin32Error(), "Windows could not create console process supervision.");
         SafeFileHandle? thread = null;
         SafeFileHandle? outputRead = null, outputWrite = null, errorRead = null, errorWrite = null, inputRead = null, inputWrite = null;
@@ -92,7 +97,7 @@ internal sealed class ConsoleProcessSession : IDisposable
 
             process = Process.GetProcessById(created.ProcessId);
             _ = process.Handle; // Open the managed handle while the suspended process is still present.
-            var session = new ConsoleProcessSession(process, job, thread, outputRead, errorRead);
+            var session = new ConsoleProcessSession(process, job, thread, outputRead, errorRead, jobName);
             process = null;
             thread = null;
             outputRead = errorRead = null;
@@ -129,29 +134,36 @@ internal sealed class ConsoleProcessSession : IDisposable
         _thread.Dispose();
     }
 
-    public IReadOnlyList<InspectedProcess> ReadProcesses()
+    public IReadOnlyList<InspectedProcess> ReadProcesses() => ReadJobProcesses(_job);
+
+    internal static IReadOnlyList<InspectedProcess> ReadJobProcesses(SafeFileHandle job)
     {
         var result = new List<InspectedProcess>();
-        foreach (var id in ReadProcessIds())
+        var executablePath = new StringBuilder(32768);
+        foreach (var id in ReadProcessIds(job))
         {
             try
             {
                 using var process = Process.GetProcessById(id);
-                if (!IsProcessInJob(process.SafeHandle, _job, out var belongs))
+                if (!IsProcessInJob(process.SafeHandle, job, out var belongs))
                     throw new Win32Exception(Marshal.GetLastWin32Error(), "Windows could not verify a console child process.");
                 // A PID alone is insufficient: membership is checked on the opened process handle.
                 if (!belongs || process.HasExited) continue;
-                result.Add(new(id, 0, process.ProcessName, "", "", process.StartTime.ToUniversalTime().Ticks));
+                executablePath.Clear();
+                var capacity = executablePath.Capacity;
+                var executable = QueryFullProcessImageName(process.SafeHandle, 0, executablePath, ref capacity)
+                    ? executablePath.ToString() : "";
+                result.Add(new(id, 0, process.ProcessName, executable, "", process.StartTime.ToUniversalTime().Ticks));
             }
             catch (ArgumentException) { }
             catch (InvalidOperationException) { }
         }
-        if (result.Count == 0 && ReadProcessIds().Count > 0)
+        if (result.Count == 0 && ReadProcessIds(job).Count > 0)
             throw new InvalidOperationException("Console child processes changed during inspection; retry the operation.");
         return result;
     }
 
-    private IReadOnlyList<int> ReadProcessIds()
+    private static IReadOnlyList<int> ReadProcessIds(SafeFileHandle job)
     {
         var capacity = 32;
         for (var attempt = 0; attempt < 8; attempt++)
@@ -160,7 +172,7 @@ internal sealed class ConsoleProcessSession : IDisposable
             var buffer = Marshal.AllocHGlobal(size);
             try
             {
-                if (!QueryInformationJobObject(_job, 3, buffer, size, out _))
+                if (!QueryInformationJobObject(job, 3, buffer, size, out _))
                 {
                     var error = Marshal.GetLastWin32Error();
                     if (error == 234) { capacity = checked(capacity * 4); continue; }
@@ -189,6 +201,65 @@ internal sealed class ConsoleProcessSession : IDisposable
             throw new Win32Exception(Marshal.GetLastWin32Error(), "Windows could not stop the console process tree.");
     }
 
+    internal static SafeFileHandle? OpenRetainedJob(string name)
+    {
+        // Runtime records may only refer to this launcher's random named console jobs.
+        const string prefix = "Local\\FullStackLauncher.Console.";
+        if (!name.StartsWith(prefix, StringComparison.Ordinal) || !Guid.TryParseExact(name[prefix.Length..], "N", out _))
+            throw new InvalidOperationException("The saved console process identity is invalid.");
+        var job = OpenJobObject(0x000E, false, name); // Query, set attributes, terminate.
+        if (!job.IsInvalid) return job;
+        var error = Marshal.GetLastWin32Error();
+        job.Dispose();
+        if (error == 2) return null; // No processes/handles remain in the previous job.
+        throw new Win32Exception(error, "Windows could not inspect the previous console process tree.");
+    }
+
+    internal static void StopRetainedJob(SafeFileHandle job)
+    {
+        if (!TerminateJobObject(job, 1))
+            throw new Win32Exception(Marshal.GetLastWin32Error(), "Windows could not stop the previous console process tree.");
+    }
+
+    internal void PrepareKeepRunning()
+    {
+        if (_keepRunningPrepared && _drain is not null && !_drain.HasExited) return;
+        _drain?.Dispose();
+        _drain = ServiceOutputDrain.Prepare(((FileStream)_output.BaseStream).SafeFileHandle,
+            ((FileStream)_error.BaseStream).SafeFileHandle, _job);
+        try
+        {
+            SetKillOnClose(false);
+            _keepRunningPrepared = true;
+        }
+        catch { CancelKeepRunningPreparation(); throw; }
+    }
+
+    internal void CancelKeepRunningPreparation()
+    {
+        if (_keepRunningPrepared) SetKillOnClose(true);
+        _keepRunningPrepared = false;
+        if (_drain is null) return;
+        try { if (!_drain.HasExited) _drain.Kill(); }
+        finally { _drain.Dispose(); _drain = null; }
+    }
+
+    private void SetKillOnClose(bool enabled)
+    {
+        var limits = new ExtendedLimitInformation { Basic = new BasicLimitInformation { LimitFlags = enabled ? 0x2000u : 0u } };
+        if (!SetInformationJobObject(_job, 9, ref limits, Marshal.SizeOf<ExtendedLimitInformation>()))
+            throw new Win32Exception(Marshal.GetLastWin32Error(), "Windows could not update console process lifetime. Keep the launcher open and try again.");
+    }
+
+    internal void DisposeKeepingRunning()
+    {
+        if (_disposed) return;
+        if (!_keepRunningPrepared) throw new InvalidOperationException("Console services must be prepared before leaving them running.");
+        _drain?.Dispose();
+        _drain = null;
+        DisposeHandles();
+    }
+
     private static async Task ReadOutputAsync(StreamReader reader, bool error, Action<string, bool> receiveOutput)
     {
         try
@@ -208,6 +279,12 @@ internal sealed class ConsoleProcessSession : IDisposable
     public void Dispose()
     {
         if (_disposed) return;
+        CancelKeepRunningPreparation();
+        DisposeHandles();
+    }
+
+    private void DisposeHandles()
+    {
         _disposed = true;
         // Closing the last job handle terminates only this run's members, even if the parent exited.
         _job.Dispose();
@@ -246,10 +323,12 @@ internal sealed class ConsoleProcessSession : IDisposable
         public UIntPtr ProcessMemoryLimit, JobMemoryLimit, PeakProcessMemoryUsed, PeakJobMemoryUsed;
     }
     [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)] private static extern SafeFileHandle CreateJobObject(IntPtr attributes, string? name);
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)] private static extern SafeFileHandle OpenJobObject(uint access, [MarshalAs(UnmanagedType.Bool)] bool inherit, string name);
     [DllImport("kernel32.dll", SetLastError = true)] [return: MarshalAs(UnmanagedType.Bool)] private static extern bool SetInformationJobObject(SafeFileHandle job, int informationClass, ref ExtendedLimitInformation information, int length);
     [DllImport("kernel32.dll", SetLastError = true)] [return: MarshalAs(UnmanagedType.Bool)] private static extern bool AssignProcessToJobObject(SafeFileHandle job, IntPtr process);
     [DllImport("kernel32.dll", SetLastError = true)] [return: MarshalAs(UnmanagedType.Bool)] private static extern bool QueryInformationJobObject(SafeFileHandle job, int informationClass, IntPtr information, int length, out int returnedLength);
     [DllImport("kernel32.dll", SetLastError = true)] [return: MarshalAs(UnmanagedType.Bool)] private static extern bool IsProcessInJob(SafeProcessHandle process, SafeFileHandle job, [MarshalAs(UnmanagedType.Bool)] out bool result);
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)] [return: MarshalAs(UnmanagedType.Bool)] private static extern bool QueryFullProcessImageName(SafeProcessHandle process, uint flags, StringBuilder path, ref int size);
     [DllImport("kernel32.dll", SetLastError = true)] [return: MarshalAs(UnmanagedType.Bool)] private static extern bool TerminateJobObject(SafeFileHandle job, uint exitCode);
     [DllImport("kernel32.dll", SetLastError = true)] [return: MarshalAs(UnmanagedType.Bool)] private static extern bool CreatePipe(out SafeFileHandle read, out SafeFileHandle write, ref SecurityAttributes attributes, int size);
     [DllImport("kernel32.dll", SetLastError = true)] [return: MarshalAs(UnmanagedType.Bool)] private static extern bool SetHandleInformation(SafeFileHandle handle, uint mask, uint flags);

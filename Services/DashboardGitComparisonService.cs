@@ -70,7 +70,7 @@ public static class DashboardGitComparisonService
 
     public static async Task<DashboardGitConflictCheck> CheckAsync(DashboardGitComparison prepared,
         CancellationToken token = default, IProgress<string>? progress = null,
-        Func<CancellationToken, Task>? ensureIdle = null)
+        Func<CancellationToken, Task>? ensureCurrentContext = null)
     {
         var scope = prepared.Scope;
         if (!prepared.CanCheckConflicts || prepared.Snapshot is not { } reviewed
@@ -84,7 +84,7 @@ public static class DashboardGitComparisonService
 
         try
         {
-            if (ensureIdle is not null) await ensureIdle(token).ConfigureAwait(false);
+            if (ensureCurrentContext is not null) await ensureCurrentContext(token).ConfigureAwait(false);
             var current = await GitRepositoryService.ReadAsync(scope.RepositoryRoot, token).ConfigureAwait(false);
             await RequireScopeAsync(scope, current, token).ConfigureAwait(false);
             RequireSameSnapshot(reviewed, current);
@@ -99,9 +99,9 @@ public static class DashboardGitComparisonService
                     throw new InvalidOperationException(unavailable);
                 async Task EnsureReviewedScopeAsync(CancellationToken checkToken)
                 {
-                    if (ensureIdle is not null) await ensureIdle(checkToken).ConfigureAwait(false);
+                    if (ensureCurrentContext is not null) await ensureCurrentContext(checkToken).ConfigureAwait(false);
                     // The active connection ledger lives outside the Git snapshot fingerprint.
-                    // Read it again after agent confirmation, before each core effect. The core
+                    // Read it again after context validation, before each core effect. The core
                     // already owns its repository lease and validates the actual Git identity.
                     await RequireScopeAsync(scope, reviewed, checkToken).ConfigureAwait(false);
                     checkToken.ThrowIfCancellationRequested();

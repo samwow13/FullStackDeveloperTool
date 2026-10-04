@@ -280,9 +280,10 @@ public partial class MainWindow
         if (operation is not ("start" or "stop" or "restart"))
             throw new ArgumentException("Operation must be start, stop, or restart.");
         _agentCoordination.RequireLease(project.Id, sessionToken, request.LeaseToken ?? "", service.Profile.Id);
-        if (_batchBusy || _forceStopBatchBusy || _savingProjectEdits || IsEditing || service.IsBusy || service.IsStopping)
+        if (_batchBusy || _forceStopBatchBusy || _addingProjectService || _savingProjectEdits || IsEditing || service.IsBusy || service.IsStopping)
             throw new InvalidOperationException("Dashboard service controls are busy. Retry after they finish.");
 
+        service.SetActiveOperation(operation switch { "start" => "Starting", "restart" => "Restarting", _ => "Stopping" });
         service.IsBusy = true;
         UpdateActions();
         var attempted = false;
@@ -291,7 +292,7 @@ public partial class MainWindow
         {
             await service.Runner.RefreshAsync();
             service.Update();
-            if (_savingProjectEdits || IsEditing || _batchBusy || _forceStopBatchBusy ||
+            if (_savingProjectEdits || _addingProjectService || IsEditing || _batchBusy || _forceStopBatchBusy ||
                 service.IsStopping || _agentCoordination.DashboardActionRevision(project.Id) != dashboardActionRevision)
                 throw new InvalidOperationException("Dashboard editing or a service action began during inspection. Check fresh status before another agent action.");
             var before = service.Runner.Snapshot;
@@ -328,7 +329,7 @@ public partial class MainWindow
                 {
                     cancellationToken.ThrowIfCancellationRequested();
                     if (_closeRequested || _closing || _closed || _forceStopBatchBusy || _batchBusy ||
-                        _savingProjectEdits || IsEditing || service.IsStopping ||
+                        _savingProjectEdits || _addingProjectService || IsEditing || service.IsStopping ||
                         _agentCoordination.DashboardActionRevision(project.Id) != dashboardActionRevision)
                         throw new InvalidOperationException("Dashboard controls changed during restart. No further agent restart action permitted.");
                     _agentCoordination.RequireLease(project.Id, sessionToken, request.LeaseToken ?? "", service.Profile.Id);
@@ -392,6 +393,7 @@ public partial class MainWindow
         {
             _agentCoordination.EndServiceAction(project.Id, sessionToken, service.Profile.Id);
             service.IsBusy = false;
+            service.SetActiveOperation(null);
             UpdateActions();
         }
     }

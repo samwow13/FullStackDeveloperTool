@@ -27,7 +27,7 @@ public partial class GitWorkspaceWindow
         : _snapshot!.IsDetached ? "Switch to a local branch first."
         : _snapshot.IsUnborn ? "Create the first local commit before merging an existing release branch."
         : _snapshot.OperationState != null ? "Finish the active Git operation first."
-        : "Merge the selected release branch into your current local branch. This action does not create a branch or push. Use Commit all & push separately when ready.");
+        : "Verify the remote source, then check for incoming commits and merge conflicts. If your current branch already includes the source, return here to commit your work. Otherwise review the local merge. Use Commit all & push separately when ready.");
     public string SyncRecoverySummary
     {
         get
@@ -51,32 +51,76 @@ public partial class GitWorkspaceWindow
         _powerReadError = null;
         if (Root is not { } root) { Changed(); return; }
         try { _powerDetails = await GitRepositoryService.ReadPowerDetailsAsync(root, SelectedRemote?.Name ?? "", token); }
+        catch (GitCommandExitUnconfirmedException) { throw; }
         catch (Exception ex)
         {
-            _powerReadError = "Git workflow settings could not be read. Refresh before committing or merging a release branch. See Activity for details.";
-            AddActivity("Read Git workflow settings", root, SafeError(ex));
+            _powerReadError = "Git workflow settings could not be read. Refresh before committing or merging a release branch. Review error details below.";
+            ReportError(SafeError(ex));
         }
         Changed();
     }
 
-    private async Task<bool> ChooseReleaseBranchAsync()
+    private async Task<bool> ChooseReleaseBranchAsync(GitReleaseBranchMode mode = GitReleaseBranchMode.Choose)
     {
         if (!CanChangeReleaseBranch || Root is not { } root || SelectedRemote is not { } remote) return false;
-        IReadOnlyList<GitRemoteBranchChoice>? branches = null;
-        if (!await ExecuteAsync("Read remote release branches", async token =>
+        var currentBranch = _snapshot!.Branch;
+        var savedSource = _powerDetails?.ReleaseBranch;
+        var picker = new GitReleaseBranchWindow(root, remote.Name, remote.FetchUrl, async pickerToken =>
         {
-            branches = await GitRepositoryService.ListRemoteBranchesAsync(root, remote.Name, token);
-            return $"Read {branches.Count:N0} branch(es) from {remote.Name}. No files were merged or pushed.";
-        }, refresh: false, useResultAsStatus: true) || branches == null) return false;
-        if (branches.Count == 0)
+            // The picker renders first and owns loading feedback. Local status stays behind it.
+            await RefreshAsync(showLoading: false, cancellationToken: pickerToken);
+            if (_unconfirmedGitCommand is { } unconfirmed) throw unconfirmed;
+            pickerToken.ThrowIfCancellationRequested();
+            if (_gitLoadFailed || _snapshot == null)
+                throw new InvalidOperationException(string.IsNullOrWhiteSpace(LatestErrorDetails) ? GitLoadFailure : LatestErrorDetails);
+            if (!CanChangeReleaseBranch)
+                throw new InvalidOperationException(PowerAvailabilityText);
+            if (_snapshot.Branch != currentBranch || !string.Equals(Root, root, StringComparison.OrdinalIgnoreCase)
+                || SelectedRemote is not { } currentRemote || currentRemote.Name != remote.Name
+                || AgentGitChangeStore.ConnectionId(currentRemote) != AgentGitChangeStore.ConnectionId(remote))
+                throw new InvalidOperationException("The current branch or active remote changed. Close this chooser, review the Git workspace, and verify the source branch again.");
+
+            IReadOnlyList<GitRemoteBranchChoice>? branches = null;
+            Exception? readFailure = null;
+            var loaded = await ExecuteAsync("Read remote release branches", async token =>
+            {
+                using var linked = CancellationTokenSource.CreateLinkedTokenSource(token, pickerToken);
+                try
+                {
+                    branches = await GitRepositoryService.ListRemoteBranchesAsync(root, remote.Name, linked.Token);
+                    return $"Read {branches.Count:N0} branch(es) from {remote.Name}. No files were merged or pushed.";
+                }
+                catch (Exception exception) { readFailure = exception; throw; }
+            }, refresh: false, useResultAsStatus: true,
+                cancellationContext: " Branch loading canceled. No merge, checkpoint or push was started.");
+            if (_unconfirmedGitCommand is { } command) throw command;
+            pickerToken.ThrowIfCancellationRequested();
+            if (!loaded || branches == null)
+                throw readFailure ?? new InvalidOperationException("Remote branches could not load. Retry in this chooser or return to Git to review the connection.");
+            return branches;
+        }, savedSource,
+            currentBranch, mode) { Owner = this };
+        var accepted = picker.ShowDialog() == true;
+        if (picker.UnconfirmedCommand is { } pendingCommand)
         {
-            SetStatus("This remote has no branches yet. Publish an initial branch before choosing a release source.");
+            HoldUnconfirmedBranchCommand(pendingCommand);
             return false;
         }
-        var picker = new GitReleaseBranchWindow(root, remote.Name, remote.FetchUrl, branches, _powerDetails?.ReleaseBranch) { Owner = this };
-        if (picker.ShowDialog() != true || picker.SelectedBranch is not { } selected) return false;
-        return await ExecuteAsync("Save release branch", token => GitRepositoryService.SaveReleaseBranchAsync(root, remote.Name, selected, token), useResultAsStatus: true)
-            && _powerDetails?.ReleaseBranch == selected;
+        if (!accepted || picker.SelectedBranch is not { } selected) return false;
+        savedSource = _powerDetails?.ReleaseBranch;
+        // Confirming the saved source is read-only; save only an explicitly changed choice.
+        if (selected != savedSource
+            && (!await ExecuteAsync("Save release branch", token => GitRepositoryService.SaveReleaseBranchAsync(root, remote.Name, selected, token), useResultAsStatus: true)
+                || _powerDetails?.ReleaseBranch != selected)) return false;
+        if (mode != GitReleaseBranchMode.Choose
+            && (_snapshot?.Branch != currentBranch || !string.Equals(Root, root, StringComparison.OrdinalIgnoreCase)
+                || SelectedRemote is not { } currentRemote || currentRemote.Name != remote.Name
+                || AgentGitChangeStore.ConnectionId(currentRemote) != AgentGitChangeStore.ConnectionId(remote)))
+        {
+            SetStatus("The current branch or active remote changed during verification. The saved release choice is retained. Verify the release branch again.");
+            return false;
+        }
+        return true;
     }
 
     private async void ChangeReleaseBranch_Click(object sender, RoutedEventArgs e) => await ChooseReleaseBranchAsync();
@@ -84,34 +128,69 @@ public partial class GitWorkspaceWindow
     private async void CheckReleaseMerge_Click(object sender, RoutedEventArgs e)
     {
         if (!CanCheckReleaseMerge) return;
-        await RefreshAsync();
-        if (!CanCheckReleaseMerge) return;
-        if (string.IsNullOrEmpty(_powerDetails?.ReleaseBranch) && !await ChooseReleaseBranchAsync()) return;
+        if (!await ChooseReleaseBranchAsync(GitReleaseBranchMode.VerifyConflictTest)) return;
         if (!CanCheckReleaseMerge || Root is not { } root || SelectedRemote is not { } remote
             || _powerDetails?.ReleaseBranch is not { } source) return;
-        var scope = new DashboardGitComparisonScope(root, _snapshot!.Branch, remote.Name, AgentGitChangeStore.ConnectionId(remote));
-        if (Owner is MainWindow dashboard && dashboard.QueueDashboardGitConflictCheck(scope))
-            SetStatus($"Git-only conflict test queued against {remote.Name}/{source}. It runs when all local agents finish. View its result and Details in Next commit. Uncommitted edits are excluded.");
-        else SetStatus("Open the Git workspace from the launcher dashboard to queue a conflict test after all local agents finish.");
+        var result = await CheckVerifiedReleaseAsync(root, remote, source, forLocalMerge: false);
+        if (result != null) new GitMergeCheckWindow(root, result) { Owner = this }.ShowDialog();
+    }
+
+    private async Task<GitMergeCheckResult?> CheckVerifiedReleaseAsync(string root, GitRemoteInfo remote, string source, bool forLocalMerge)
+    {
+        GitMergeCheckResult? result = null;
+        CancellationTokenSource? operation = null;
+        var progress = new Progress<string>(message =>
+        {
+            if (_busy && ReferenceEquals(_operation, operation)) SetStatus(message);
+        });
+        var checkedSource = await ExecuteAsync($"Compare current branch with {remote.Name}/{source}", async token =>
+        {
+            operation = _operation;
+            result = await GitRepositoryService.CheckReleaseMergeAsync(root, remote.Name, source, token, progress,
+                skipUpToDateSimulation: forLocalMerge);
+            return result.IncomingCommits == 0
+                ? $"Local branch {result.CurrentBranch} is up to date with {remote.Name}/{source}; it already includes every source commit. No merge or checkpoint is needed. Use Commit all & push when ready."
+                : $"{remote.Name}/{source} has {result.IncomingCommits:N0} incoming commit(s) for {result.CurrentBranch}. "
+                    + (result.HasConflicts ? "Git found merge conflicts." : "Git found no merge conflicts between the committed branches.")
+                    + " Uncommitted edits are excluded. Review the comparison details before continuing.";
+        }, refresh: false, useResultAsStatus: true,
+            cancellationContext: " Conflict test canceled. No merge, checkpoint or push was started; local files remain unchanged.");
+        if (!checkedSource || result == null) return null;
+        if (Owner is MainWindow dashboard)
+            dashboard.RecordWorkspaceGitConflictCheck(new(root, result.CurrentBranch, remote.Name, AgentGitChangeStore.ConnectionId(remote)), result);
+        return result;
     }
 
     private async void SyncRelease_Click(object sender, RoutedEventArgs e)
     {
         if (!CanPrepareSync) return;
-        await RefreshAsync();
-        if (!CanPrepareSync) return;
-        if (string.IsNullOrEmpty(_powerDetails?.ReleaseBranch) && !await ChooseReleaseBranchAsync()) return;
+        if (!await ChooseReleaseBranchAsync(GitReleaseBranchMode.VerifyLocalMerge)) return;
         if (!CanPrepareSync || _snapshot is not { } snapshot || Root is not { } root || SelectedRemote is not { } remote
             || _powerDetails?.ReleaseBranch is not { } source) return;
+        var comparison = await CheckVerifiedReleaseAsync(root, remote, source, forLocalMerge: true);
+        if (comparison == null) return;
+        var continueToReview = new GitMergeCheckWindow(root, comparison, reviewLocalMerge: true) { Owner = this }.ShowDialog() == true;
+        if (comparison.IncomingCommits == 0 || !continueToReview) return;
+        if (!CanPrepareSync) return;
         var prompt = new GitCommitWindow(snapshot, remote, null,
-            mode: GitCommitMode.PrepareSync, sourceLabel: $"{remote.Name}/{source}") { Owner = this };
+            mode: GitCommitMode.PrepareSync, sourceLabel: $"{remote.Name}/{source}",
+            recoveryNote: comparison.HasConflicts
+                ? "The Git comparison found conflicts between the committed branches. Continuing starts a local merge and leaves conflicts for you to resolve and stage in Git or your editor. Uncommitted edits may add more conflicts."
+                : "The Git comparison found no conflicts between the committed branches. Uncommitted edits are excluded and may produce conflicts after the protective checkpoint.") { Owner = this };
         var accepted = prompt.ShowDialog() == true;
         if (!accepted) return;
         _syncMessageDraft = "";
         GitSyncResult? result = null;
-        var prepared = await ExecuteAsync("Fetch and merge release branch", async token =>
+        CancellationTokenSource? operation = null;
+        var progress = new Progress<string>(message =>
         {
-            result = await GitRepositoryService.PrepareSyncAsync(root, remote.Name, source, token);
+            if (_busy && ReferenceEquals(_operation, operation)) SetStatus(message);
+        });
+        var prepared = await ExecuteAsync($"Merge {remote.Name}/{source} into {snapshot.Branch} locally", async token =>
+        {
+            operation = _operation;
+            result = await GitRepositoryService.PrepareSyncAsync(root, remote.Name, source, token,
+                reviewedCheck: comparison, reviewedSnapshot: snapshot, progress: progress);
             return result.Message;
         }, useResultAsStatus: true);
         if ((result?.ConflictedPaths.Count ?? 0) > 0 || (!prepared && HasSyncRecovery))
@@ -223,7 +302,7 @@ public partial class GitWorkspaceWindow
         {
             var detail = SafeError(exception);
             SetStatus(detail);
-            AddActivity("Prepare commit review", Root ?? "", detail);
+            ReportError(detail);
             return null;
         }
     }

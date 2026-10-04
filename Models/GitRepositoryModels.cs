@@ -88,12 +88,14 @@ public sealed record GitRemoteInfo
     public string? PostPushLinkError { get; init; }
 }
 
-/// <summary>Tracked working-tree changes from the selected remote's cached branch tip.</summary>
+/// <summary>Tracked working-tree changes from the cached remote branch tip, or local HEAD when that ref is unavailable.</summary>
 public sealed record GitRemoteComparison
 {
     public string Remote { get; init; } = "";
     public string Branch { get; init; } = "";
     public bool Available { get; init; }
+    public bool IsLocalComparison { get; init; }
+    public bool LineTotalsAvailable => Available || IsLocalComparison;
     public string? UnavailableReason { get; init; }
     public int Ahead { get; init; }
     public int Behind { get; init; }

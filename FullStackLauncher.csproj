@@ -13,13 +13,12 @@
     <!-- Local data must never become implicit compile, resource, or content items. -->
     <DefaultItemExcludes>$(DefaultItemExcludes);Tests\**;artifacts\**;portable\**;publish\**;**\bin\**;**\obj\**;**\TestResults\**;**\node_modules\**;**\.git\**;**\.vs\**;**\monitor-runtime\**;**\api-runtime\**</DefaultItemExcludes>
     <DefaultItemExcludes>$(DefaultItemExcludes);**\.env;**\.env.*;**\secrets.json*;**\appsettings.Local.json*;**\appsettings.*.Local.json*;**\database-connections\**;**\database-connections*.dat*;**\api-secrets\**;**\api-secrets*.dat*;**\*.pfx;**\*.p12;**\*.key;**\*.pem</DefaultItemExcludes>
-    <DefaultItemExcludes>$(DefaultItemExcludes);**\launcher*.json*;**\*.settings.json*;**\*.local.json*;**\*.settings.local.json;**\*.local.settings.json;**\*.json.bak;**\*.json.*.bak;**\*.json.*.tmp;**\codex-monitor.settings.json*;**\project-tasks.json*;**\*.project-tasks.json*;**\window-snip-targets.json*;**\*.window-snip-targets.json*</DefaultItemExcludes>
+    <DefaultItemExcludes>$(DefaultItemExcludes);**\launcher*.json*;**\*.settings.json*;**\*.local.json*;**\*.settings.local.json;**\*.local.settings.json;**\*.json.bak;**\*.json.*.bak;**\*.json.*.tmp;**\codex-monitor.settings.json*;**\*.codex-crew-reset.json*;**\project-tasks.json*;**\*.project-tasks.json*;**\window-snip-targets.json*;**\*.window-snip-targets.json*</DefaultItemExcludes>
   </PropertyGroup>
   <ItemGroup>
     <Using Remove="System.Windows.Forms" />
     <Using Remove="System.Drawing" />
     <PackageReference Include="Npgsql" Version="10.0.3" />
-    <PackageReference Include="Microsoft.Data.SqlClient" Version="6.1.7" />
     <PackageReference Include="Microsoft.CodeAnalysis.CSharp" Version="5.0.0" />
     <Compile Remove="Tests\**\*.cs" />
     <None Remove="Assets\launcher.ico" />

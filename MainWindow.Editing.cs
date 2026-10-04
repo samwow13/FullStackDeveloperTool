@@ -14,7 +14,7 @@ public partial class MainWindow
     private string _draftProjectName = "";
     private string _editError = "";
     public bool IsEditing => _isEditing;
-    public bool CanChangeProject => !IsEditing && !_closing && !_forceStopBatchBusy;
+    public bool CanChangeProject => !IsEditing && !_addingProjectService && !_savingProjectEdits && !_closeRequested && !_closing && !_forceStopBatchBusy;
     public bool CanRemoveProject => !IsEditing && CanEdit;
     public bool CanSaveProjectEdits => IsEditing && CanEdit;
     public bool CanCancelProjectEdits => IsEditing && !_savingProjectEdits && !_closing;

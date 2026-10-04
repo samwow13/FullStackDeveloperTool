@@ -1,20 +1,19 @@
 using System.IO;
 using System.Windows;
+using System.Windows.Controls;
+using System.Windows.Controls.Primitives;
 using System.Windows.Threading;
 using FullStackLauncher.Models;
-using FullStackLauncher.ProjectTasks;
 using FullStackLauncher.Services;
 
 namespace FullStackLauncher;
 
 public partial class MainWindow
 {
-    private static readonly TimeSpan DashboardGitCheckInterval = TimeSpan.FromMinutes(10);
     private static readonly TimeSpan DashboardGitLocalRefreshInterval = TimeSpan.FromSeconds(30);
     private readonly DispatcherTimer _dashboardGitTimer = new() { Interval = TimeSpan.FromSeconds(5) };
     private readonly CancellationTokenSource _dashboardGitLifetime = new();
     private readonly Dictionary<string, DashboardGitWatch> _dashboardGitWatches = [];
-    private CodexGitCheckIdleGate? _dashboardGitIdleGate;
     private DashboardGitWatch? _dashboardGitSelectedWatch;
     private DashboardGitWatch? _dashboardGitRunningWatch;
     private CancellationTokenSource? _dashboardGitRunCancellation;
@@ -33,33 +32,43 @@ public partial class MainWindow
         internal string ConfiguredFolders { get; } = configuredFolders;
         internal DashboardGitComparison? Comparison { get; set; }
         internal GitMergeCheckResult? Result { get; set; }
-        internal DateTimeOffset NextCheck { get; set; } = now + DashboardGitCheckInterval;
+        internal DateTimeOffset RequestedAt { get; set; }
         internal DateTimeOffset NextLocalRead { get; set; } = now;
         internal bool Pending { get; set; }
+        internal string? VerifiedReleaseBranch { get; set; }
+        internal string? RunningReleaseBranch { get; set; }
         internal string Status { get; set; } = "No conflict test yet.";
     }
 
-    public string DashboardGitComparisonLabel => _dashboardGitSelectedWatch?.Comparison is { Available: true } read
-        ? $"Compared with {read.Scope.RemoteName}/{read.Scope.Branch} · last fetched"
+    public string DashboardGitComparisonLabel => _dashboardGitSelectedWatch?.Comparison?.Comparison is { IsLocalComparison: true }
+        ? "Local changes · since last local commit"
+        : _dashboardGitSelectedWatch?.Comparison is { Available: true } read
+        ? $"{read.Scope.RemoteName}/{read.Scope.Branch} · last fetched"
         : "Local changes · remote comparison unavailable";
-    public string DashboardGitChangedFiles => _dashboardGitSelectedWatch?.Comparison is { Available: true, Comparison: { } comparison }
+    public string DashboardGitChangedFiles => _dashboardGitSelectedWatch?.Comparison?.Comparison is { LineTotalsAvailable: true } comparison
         ? $"{comparison.ChangedFiles + comparison.UntrackedFiles:N0}"
         : _dashboardGitSelectedWatch?.Comparison?.Snapshot is { } snapshot ? $"{snapshot.Changes.Count:N0}" : "—";
-    public string DashboardGitAddedLines => _dashboardGitSelectedWatch?.Comparison is { Available: true, Comparison: { } comparison }
+    public string DashboardGitAddedLines => _dashboardGitSelectedWatch?.Comparison?.Comparison is { LineTotalsAvailable: true } comparison
         ? $"+{comparison.AddedLines:N0}" : "—";
-    public string DashboardGitRemovedLines => _dashboardGitSelectedWatch?.Comparison is { Available: true, Comparison: { } comparison }
+    public string DashboardGitRemovedLines => _dashboardGitSelectedWatch?.Comparison?.Comparison is { LineTotalsAvailable: true } comparison
         ? $"−{comparison.DeletedLines:N0}" : "—";
+    public string DashboardGitLineTotalsTooltip => _dashboardGitSelectedWatch?.Comparison?.Comparison is { IsLocalComparison: true }
+        ? "Tracked text compared with the last local commit (HEAD). Includes staged and unstaged edits; untracked and binary contents excluded."
+        : "Tracked text compared with the last fetched remote branch. Includes local commits and edits; untracked and binary contents excluded.";
     public string DashboardGitComparisonDetail
     {
         get
         {
             if (_dashboardGitSelectedWatch is not { } watch) return "Choose a repository and active connection in Git.";
             if (watch.Comparison is not { } read) return "Reading local Git comparison…";
-            if (!read.Available) return read.UnavailableReason ?? read.Comparison?.UnavailableReason ?? "Remote comparison unavailable. Open Git to review setup.";
-            var comparison = read.Comparison!;
-            var detail = $"{read.UncommittedFiles:N0} uncommitted · {comparison.Ahead:N0} ahead / {comparison.Behind:N0} behind";
-            if (comparison.UntrackedFiles > 0) detail += $" · {comparison.UntrackedFiles:N0} untracked (lines excluded)";
-            if (comparison.BinaryFiles > 0) detail += $" · {comparison.BinaryFiles:N0} binary (lines excluded)";
+            if (read.Comparison is not { LineTotalsAvailable: true } comparison)
+                return read.UnavailableReason ?? read.Comparison?.UnavailableReason ?? "Remote comparison unavailable. Open Git to review setup.";
+            var detail = $"{read.UncommittedFiles:N0} uncommitted";
+            if (!comparison.Available) detail += " · remote branch unavailable";
+            else if (comparison.Ahead > 0 || comparison.Behind > 0)
+                detail += $" · {comparison.Ahead:N0} ahead / {comparison.Behind:N0} behind";
+            if (comparison.UntrackedFiles > 0) detail += $" · {comparison.UntrackedFiles:N0} untracked";
+            if (comparison.BinaryFiles > 0) detail += $" · {comparison.BinaryFiles:N0} binary";
             return detail;
         }
     }
@@ -68,6 +77,8 @@ public partial class MainWindow
         && _dashboardGitSelectedWatch is { Pending: false } watch && _dashboardGitRunningWatch != watch
         && watch.Comparison?.CanCheckConflicts == true;
     public bool HasDashboardGitConflictResult => _dashboardGitSelectedWatch?.Result is not null;
+    public bool HasDashboardGitConflictStatus => _dashboardGitUnconfirmedCommand is not null
+        || _dashboardGitSelectedWatch is { RequestedAt: var requested } && requested != default;
     public string DashboardGitConflictStatus => _dashboardGitUnconfirmedCommand is not null
         ? "Git process exit is unconfirmed. Checks paused until that process is confirmed stopped."
         : _dashboardGitSelectedWatch is { } watch
@@ -81,14 +92,12 @@ public partial class MainWindow
         get
         {
             if (_dashboardGitUnconfirmedCommand is not null) return "Checks paused until the prior Git process is confirmed stopped.";
-            if (_dashboardGitSelectedWatch is not { } watch) return "Automatic check every 10 minutes when all local agents are idle.";
+            if (_dashboardGitSelectedWatch is not { } watch) return "Manual conflict tests only. Configure Git to run a test.";
             var source = watch.Comparison?.ReleaseBranch is { Length: > 0 } branch ? $"{watch.Scope.RemoteName}/{branch}" : "saved release branch";
             if (_dashboardGitRunningWatch == watch) return $"Checking {source} · committed history only.";
-            if (watch.Pending) return $"Queued for {source} · runs automatically when all local agents finish.";
-            var remaining = watch.NextCheck - DateTimeOffset.UtcNow;
-            var seconds = Math.Max(0, (int)Math.Ceiling(remaining.TotalSeconds));
+            if (watch.Pending) return $"Queued for {source} · committed history only.";
             var checkedAt = watch.Result is { } result ? $"Checked {result.CheckedAt.ToLocalTime():HH:mm} · " : "";
-            return $"{checkedAt}Next check in {seconds / 60}:{seconds % 60:00} · {source}.";
+            return $"{checkedAt}{source} · manual only · uncommitted edits excluded.";
         }
     }
 
@@ -147,26 +156,55 @@ public partial class MainWindow
         catch (Exception) { return false; }
     }
 
-    internal bool QueueDashboardGitConflictCheck(DashboardGitComparisonScope scope)
+    internal bool QueueDashboardGitConflictCheck(DashboardGitComparisonScope scope, string? verifiedReleaseBranch = null)
     {
         if (_closeRequested || _closing || _closed || IsEditing || SelectedProject is not { IsArchived: false } project) return false;
         DashboardGitWatch watch;
         try { watch = GetDashboardGitWatch(project, scope); }
         catch (Exception) { return false; }
-        if (_dashboardGitRunningWatch == watch) return true;
+        if (_dashboardGitRunningWatch == watch)
+            return verifiedReleaseBranch is null || watch.RunningReleaseBranch == verifiedReleaseBranch;
         watch.Result = null;
+        watch.VerifiedReleaseBranch = verifiedReleaseBranch ?? (watch.Pending ? watch.VerifiedReleaseBranch : null);
         watch.Pending = true;
-        watch.Status = "Conflict test queued; checking that all local agents are idle.";
-        watch.NextCheck = DateTimeOffset.UtcNow;
+        watch.Status = "Conflict test requested…";
+        watch.RequestedAt = DateTimeOffset.UtcNow;
         NotifyDashboardGitChanged();
         _ = PollDashboardGitAsync();
         return true;
+    }
+
+    internal void RecordWorkspaceGitConflictCheck(DashboardGitComparisonScope scope, GitMergeCheckResult result)
+    {
+        if (_closeRequested || _closing || _closed || IsEditing || SelectedProject is not { IsArchived: false } project
+            || result.CurrentBranch != scope.Branch || result.Remote != scope.RemoteName) return;
+        DashboardGitWatch watch;
+        try { watch = GetDashboardGitWatch(project, scope); }
+        catch (Exception) { return; }
+        // A separately requested dashboard check keeps its own outcome and lifetime.
+        if (_dashboardGitRunningWatch == watch || watch.Pending || !IsCurrentDashboardGitWatch(watch)) return;
+        watch.Result = result;
+        watch.RequestedAt = result.CheckedAt;
+        CompleteDashboardGitAttempt(watch, result.HasConflicts
+            ? $"Conflicts found · {result.Remote}/{result.SourceBranch}"
+            : $"No conflicts · {result.Remote}/{result.SourceBranch}");
+        watch.NextLocalRead = DateTimeOffset.MinValue;
+        NotifyDashboardGitChanged();
     }
 
     private void DashboardGitConflictCheck_Click(object sender, RoutedEventArgs e)
     {
         if (CanRequestDashboardGitCheck && _dashboardGitSelectedWatch is { } watch)
             QueueDashboardGitConflictCheck(watch.Scope);
+    }
+
+    private void DashboardGitOptions_Click(object sender, RoutedEventArgs e)
+    {
+        if (sender is not Button button || button.ContextMenu is not { } menu) return;
+        menu.DataContext = this;
+        menu.PlacementTarget = button;
+        menu.Placement = PlacementMode.Bottom;
+        menu.IsOpen = true;
     }
 
     private void DashboardGitConflictDetails_Click(object sender, RoutedEventArgs e)
@@ -203,24 +241,11 @@ public partial class MainWindow
                 await ReadDashboardGitComparisonAsync(selected, pollToken);
             if (_closeRequested || _closing || _closed) return;
 
-            var now = DateTimeOffset.UtcNow;
             var pending = _dashboardGitWatches.Values.Where(IsCurrentDashboardGitWatch)
-                .Where(watch => watch.Pending || now >= watch.NextCheck).OrderBy(watch => watch.NextCheck).ToArray();
-            foreach (var watch in pending)
-            {
-                if (!watch.Pending) watch.Result = null;
-                watch.Pending = true;
-            }
+                .Where(watch => watch.Pending).OrderBy(watch => watch.RequestedAt).ToArray();
             if (pending.Length == 0 && _dashboardGitRunningWatch is null) return;
-            _dashboardGitIdleGate ??= new(Environment.GetEnvironmentVariable("CODEX_HOME")
-                ?? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".codex"));
-            var idle = await _dashboardGitIdleGate.ReadAsync(pollToken);
-            var queueBlocker = await Task.Run(ReadDashboardGitQueueBlocker, pollToken);
             if (_closeRequested || _closing || _closed) return;
-            var blocked = IsEditing || _savingProjectEdits ? "Waiting for project editing to finish."
-                : _settings.Projects.Any(project => _agentCoordination.HasActiveProjectWork(project.Id))
-                    ? "Waiting for agents to release launcher service use and reservations."
-                    : queueBlocker ?? (!idle.Ready ? idle.Status : null);
+            var blocked = IsEditing || _savingProjectEdits ? "Waiting for project editing to finish." : null;
             if (_dashboardGitRunningWatch is not null)
             {
                 if (blocked is not null || !IsCurrentDashboardGitWatch(_dashboardGitRunningWatch))
@@ -236,7 +261,7 @@ public partial class MainWindow
                 return;
             }
             if (!_closeRequested && !_closing && !_closed && pending.FirstOrDefault() is { } next)
-                _dashboardGitRunTask = RunDashboardGitConflictCheckAsync(next, idle);
+                _dashboardGitRunTask = RunDashboardGitConflictCheckAsync(next);
         }
         catch (GitCommandExitUnconfirmedException exception)
         {
@@ -246,7 +271,7 @@ public partial class MainWindow
         catch (Exception)
         {
             foreach (var watch in _dashboardGitWatches.Values.Where(watch => watch.Pending))
-                watch.Status = "Reliable agent or Git status unavailable; conflict test remains queued.";
+                watch.Status = "Git status unavailable; conflict test remains queued.";
             _dashboardGitRunCancellation?.Cancel();
         }
         finally
@@ -261,8 +286,16 @@ public partial class MainWindow
     private async Task ReadDashboardGitComparisonAsync(DashboardGitWatch watch, CancellationToken token)
     {
         watch.NextLocalRead = DateTimeOffset.UtcNow + DashboardGitLocalRefreshInterval;
+        var resultBeforeRead = watch.Result;
         var read = await DashboardGitComparisonService.ReadAsync(watch.Scope, token);
         if (!IsCurrentDashboardGitWatch(watch)) return;
+        if (!ReferenceEquals(watch.Result, resultBeforeRead))
+        {
+            // A workspace comparison can finish while this older local read is waiting.
+            // Read again before attaching status or invalidating the newer result.
+            watch.NextLocalRead = DateTimeOffset.MinValue;
+            return;
+        }
         watch.Comparison = read;
         if (watch.Result is { } result && (read.Snapshot?.HeadCommit != result.CurrentCommit
             || read.ReleaseBranch != result.SourceBranch))
@@ -273,12 +306,11 @@ public partial class MainWindow
         NotifyDashboardGitChanged();
     }
 
-    private async Task RunDashboardGitConflictCheckAsync(DashboardGitWatch watch, CodexGitCheckIdleUpdate ready)
+    private async Task RunDashboardGitConflictCheckAsync(DashboardGitWatch watch)
     {
         _dashboardGitRunningWatch = watch;
         using var operation = CancellationTokenSource.CreateLinkedTokenSource(_dashboardGitLifetime.Token);
         _dashboardGitRunCancellation = operation;
-        var interruptedByAgents = false;
         try
         {
             watch.Result = null;
@@ -295,25 +327,21 @@ public partial class MainWindow
                 CompleteDashboardGitAttempt(watch, watch.Comparison?.ConflictCheckUnavailableReason ?? "Git conflict test unavailable. Open Git to review setup.");
                 return;
             }
+            if (watch.VerifiedReleaseBranch is { } verifiedRelease && prepared.ReleaseBranch != verifiedRelease)
+            {
+                CompleteDashboardGitAttempt(watch, "The verified release branch changed while the conflict test was queued. Open Git and verify the release branch again.");
+                return;
+            }
+            watch.RunningReleaseBranch = prepared.ReleaseBranch;
 
-            async Task EnsureIdleAsync(CancellationToken token)
+            async Task EnsureCurrentContextAsync(CancellationToken token)
             {
                 token.ThrowIfCancellationRequested();
                 bool DashboardAllowsCheck() => !_closeRequested && !_closing
-                    && !IsEditing && !_savingProjectEdits && IsCurrentDashboardGitWatch(watch)
-                    && !_settings.Projects.Any(project => _agentCoordination.HasActiveProjectWork(project.Id));
+                    && !IsEditing && !_savingProjectEdits && IsCurrentDashboardGitWatch(watch);
                 var dashboardAllowsCheck = await Dispatcher.InvokeAsync(DashboardAllowsCheck, DispatcherPriority.Normal, token);
-                var blocker = await Task.Run(ReadDashboardGitQueueBlocker, token);
-                if (!dashboardAllowsCheck || blocker is not null || _dashboardGitIdleGate is null
-                    || !await _dashboardGitIdleGate.ConfirmReadyAsync(ready, token))
+                if (!dashboardAllowsCheck)
                 {
-                    interruptedByAgents = true;
-                    operation.Cancel();
-                    throw new OperationCanceledException(token);
-                }
-                if (!await Dispatcher.InvokeAsync(DashboardAllowsCheck, DispatcherPriority.Normal, token))
-                {
-                    interruptedByAgents = true;
                     operation.Cancel();
                     throw new OperationCanceledException(token);
                 }
@@ -325,15 +353,15 @@ public partial class MainWindow
                 watch.Status = message;
                 NotifyDashboardGitChanged();
             });
-            var checkedConflict = await DashboardGitComparisonService.CheckAsync(prepared, operation.Token, progress, EnsureIdleAsync);
-            await EnsureIdleAsync(operation.Token);
+            var checkedConflict = await DashboardGitComparisonService.CheckAsync(prepared, operation.Token, progress, EnsureCurrentContextAsync);
+            await EnsureCurrentContextAsync(operation.Token);
             if (!IsCurrentDashboardGitWatch(watch)) return;
             if (checkedConflict.Result is { } result)
             {
                 watch.Result = result;
                 CompleteDashboardGitAttempt(watch, result.HasConflicts
-                    ? $"Conflicts found against {result.Remote}/{result.SourceBranch}. Uncommitted edits excluded."
-                    : $"No conflicts against {result.Remote}/{result.SourceBranch}. Uncommitted edits excluded.");
+                    ? $"Conflicts found · {result.Remote}/{result.SourceBranch}"
+                    : $"No conflicts · {result.Remote}/{result.SourceBranch}");
             }
             else CompleteDashboardGitAttempt(watch, checkedConflict.UnavailableReason ?? "No conflict result was confirmed.");
         }
@@ -345,10 +373,11 @@ public partial class MainWindow
         {
             if (IsCurrentDashboardGitWatch(watch))
             {
-                watch.Pending = true;
-                watch.Status = interruptedByAgents || !_closeRequested && !_closing && !_closed
-                    ? "Conflict test deferred; waiting for all local agents to finish."
-                    : "Conflict test paused while the launcher closes.";
+                watch.Pending = _closeRequested || _closing;
+                if (!watch.Pending) watch.VerifiedReleaseBranch = null;
+                watch.Status = watch.Pending
+                    ? "Conflict test paused while the launcher closes."
+                    : "Conflict test canceled; run it again when ready.";
             }
         }
         catch (Exception)
@@ -359,6 +388,7 @@ public partial class MainWindow
         finally
         {
             if (ReferenceEquals(_dashboardGitRunCancellation, operation)) _dashboardGitRunCancellation = null;
+            watch.RunningReleaseBranch = null;
             _dashboardGitRunningWatch = null;
             NotifyDashboardGitChanged();
         }
@@ -376,27 +406,10 @@ public partial class MainWindow
             && repository.Connections.Any(connection => connection.IsActive && connection.RemoteName == watch.Scope.RemoteName));
     }
 
-    private static string? ReadDashboardGitQueueBlocker()
-    {
-        var store = new ProjectTaskStore();
-        var data = store.Load();
-        if (!store.CanSave) return "Queue activity unavailable; conflict test remains queued.";
-        if (data.Receipts.Any(receipt => (receipt.State is ProjectTaskRunState.Starting or ProjectTaskRunState.Running or ProjectTaskRunState.Recovering or ProjectTaskRunState.NeedsAttention)
-                && receipt.FinishedAt is null && receipt.QueueReviewCompletedAt is null && receipt.ConnectionReviewCompletedAt is null
-            || receipt.SubmissionStartedAt is not null && receipt.FinishedAt is null
-                && receipt.QueueReviewCompletedAt is null && receipt.ConnectionReviewCompletedAt is null))
-            return "Waiting for queued tasks or connection checks to finish.";
-        if (!data.PauseAllQueues && data.Queues.Any(queue => queue.Enabled
-            && (queue.ExternalPredecessor is not null && queue.ExternalPredecessorSatisfiedAt is null || data.QueueItems.Any(item => item.ProjectId == queue.ProjectId && item.Enabled
-                && item.State is ProjectQueueItemState.Pending or ProjectQueueItemState.Starting or ProjectQueueItemState.Running))))
-            return "Waiting for all enabled queue work to finish.";
-        return null;
-    }
-
     private static void CompleteDashboardGitAttempt(DashboardGitWatch watch, string status)
     {
         watch.Pending = false;
-        watch.NextCheck = DateTimeOffset.UtcNow + DashboardGitCheckInterval;
+        watch.VerifiedReleaseBranch = null;
         watch.Status = status;
     }
 
@@ -413,8 +426,8 @@ public partial class MainWindow
     private void NotifyDashboardGitChanged()
     {
         foreach (var name in new[] { nameof(DashboardGitComparisonLabel), nameof(DashboardGitChangedFiles), nameof(DashboardGitAddedLines),
-            nameof(DashboardGitRemovedLines), nameof(DashboardGitComparisonDetail), nameof(CanRequestDashboardGitCheck),
-            nameof(HasDashboardGitConflictResult), nameof(DashboardGitConflictStatus), nameof(DashboardGitConflictStatusColor), nameof(DashboardGitConflictSchedule) })
+            nameof(DashboardGitRemovedLines), nameof(DashboardGitLineTotalsTooltip), nameof(DashboardGitComparisonDetail), nameof(CanRequestDashboardGitCheck),
+            nameof(HasDashboardGitConflictResult), nameof(HasDashboardGitConflictStatus), nameof(DashboardGitConflictStatus), nameof(DashboardGitConflictStatusColor), nameof(DashboardGitConflictSchedule) })
             Changed(name);
     }
 

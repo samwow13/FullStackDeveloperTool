@@ -19,11 +19,14 @@ public sealed class ApiSecretStore
     private const int MaximumFileBytes = 4 * 1024 * 1024;
     private const int MaximumProtectedFileBytes = MaximumFileBytes + 65536;
     private const string ProductionSuffix = "-launcher-production";
+    private const string ProjectScopePrefix = "project:";
     private static readonly byte[] ProtectedHeader = Encoding.ASCII.GetBytes("FSLAPI01");
     private readonly string _workingDirectory;
 
     public string ProjectFilePath { get; }
+    /// <summary>The declared .NET ID, or a project scope ID when no declaration exists.</summary>
     public string UserSecretsId { get; }
+    public bool HasUserSecretsReference { get; }
 
     public ApiSecretStore(string workingDirectory)
     {
@@ -32,7 +35,7 @@ public sealed class ApiSecretStore
             if (string.IsNullOrWhiteSpace(workingDirectory))
                 throw new ApiSecretStoreException("Choose an API working folder before managing configuration.");
             _workingDirectory = Path.GetFullPath(workingDirectory);
-            (ProjectFilePath, UserSecretsId) = DiscoverProject(_workingDirectory);
+            (ProjectFilePath, UserSecretsId, HasUserSecretsReference) = DiscoverProject(_workingDirectory);
         }
         catch (Exception ex) when (IsFileError(ex))
         {
@@ -227,11 +230,12 @@ public sealed class ApiSecretStore
     {
         var current = DiscoverProject(_workingDirectory);
         if (!current.Path.Equals(ProjectFilePath, StringComparison.OrdinalIgnoreCase) ||
-            !current.Id.Equals(UserSecretsId, StringComparison.Ordinal))
+            !current.Id.Equals(UserSecretsId, StringComparison.Ordinal) ||
+            current.HasUserSecretsReference != HasUserSecretsReference)
             throw new ApiSecretStoreException("The API project or its user-secrets reference changed. Close and reopen configuration before continuing.");
     }
 
-    private static (string Path, string Id) DiscoverProject(string directory)
+    private static (string Path, string Id, bool HasUserSecretsReference) DiscoverProject(string directory)
     {
         if (!Directory.Exists(directory))
             throw new ApiSecretStoreException("The configured API working folder is unavailable.");
@@ -247,9 +251,17 @@ public sealed class ApiSecretStore
         var document = XDocument.Load(reader);
         if (document.Root?.Name.LocalName != "Project")
             throw new ApiSecretStoreException("The configured .csproj file is not a valid API project document.");
+        var projectPath = Path.GetFullPath(projects[0]);
         var references = document.Descendants().Where(x => x.Name.LocalName == "UserSecretsId").ToArray();
+        if (references.Length == 0)
+        {
+            // The colon cannot occur in a valid explicit .NET ID. The by-project directory
+            // is also disjoint from existing ID-hash stores, preserving their exact format.
+            var projectScope = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(projectPath.ToUpperInvariant())));
+            return (projectPath, ProjectScopePrefix + projectScope, false);
+        }
         if (references.Length != 1)
-            throw new ApiSecretStoreException("The API project must declare exactly one literal UserSecretsId. Initialize .NET user-secrets for the API, then reopen configuration.");
+            throw new ApiSecretStoreException("The API project contains ambiguous UserSecretsId declarations. Keep one unconditional literal declaration, or remove the declarations before reopening configuration.");
         var reference = references[0];
         var id = reference.Value.Trim();
         if (reference.HasElements || reference.Parent?.Name.LocalName != "PropertyGroup" ||
@@ -260,7 +272,7 @@ public sealed class ApiSecretStore
             id.Length is < 1 or > 180 || id is "." or ".." || id.EndsWith('.') || IsWindowsDeviceName(id) ||
             id.Any(c => !(char.IsAsciiLetterOrDigit(c) || c is '-' or '_' or '.')))
             throw new ApiSecretStoreException("The API UserSecretsId must be one unconditional, literal identifier containing only letters, digits, dots, hyphens, or underscores.");
-        return (Path.GetFullPath(projects[0]), id);
+        return (projectPath, id, true);
     }
 
     private static bool IsWindowsDeviceName(string id)
@@ -280,12 +292,16 @@ public sealed class ApiSecretStore
         var root = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
         if (string.IsNullOrWhiteSpace(root))
             throw new ApiSecretStoreException("The Windows user profile location for encrypted configuration is unavailable.");
-        var scope = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(UserSecretsId)));
-        return (id, Path.Combine(root, "FullStackLauncher", "api-secrets", scope, production ? "prod.dat" : "local.dat"));
+        var directory = HasUserSecretsReference
+            ? Path.Combine(root, "FullStackLauncher", "api-secrets", Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(UserSecretsId))))
+            : Path.Combine(root, "FullStackLauncher", "api-secrets", "by-project", UserSecretsId[ProjectScopePrefix.Length..]);
+        return (id, Path.Combine(directory, production ? "prod.dat" : "local.dat"));
     }
 
     private string ResolveLegacyPath(bool production)
     {
+        if (!HasUserSecretsReference)
+            throw new ApiSecretStoreException("This API has no declared .NET user-secrets reference. Enter values in its encrypted project configuration instead; no legacy file was read.");
         var id = production ? UserSecretsId + ProductionSuffix : UserSecretsId;
         var root = Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData);
         if (string.IsNullOrWhiteSpace(root))
@@ -297,6 +313,7 @@ public sealed class ApiSecretStore
     // while a valid protected store remains authoritative and readable.
     private bool LegacyStoreExists(bool production)
     {
+        if (!HasUserSecretsReference) return false;
         try { _ = File.GetAttributes(ResolveLegacyPath(production)); return true; }
         catch (FileNotFoundException) { return false; }
         catch (DirectoryNotFoundException) { return false; }

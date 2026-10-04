@@ -10,7 +10,7 @@ public partial class GitMergeCheckWindow : Window
 {
     private readonly string _root;
 
-    public GitMergeCheckWindow(string root, GitMergeCheckResult result)
+    public GitMergeCheckWindow(string root, GitMergeCheckResult result, bool reviewLocalMerge = false)
     {
         _root = root;
         InitializeComponent();
@@ -23,14 +23,37 @@ public partial class GitMergeCheckWindow : Window
             : "No Git conflicts detected between these commits";
         Heading.Foreground = result.HasConflicts
             ? new SolidColorBrush(Color.FromRgb(255, 188, 139)) : (Brush)FindResource("AccentBrush");
+        if (reviewLocalMerge)
+        {
+            Title = "Local merge comparison";
+            if (result.IncomingCommits == 0)
+            {
+                Heading.Text = $"{result.CurrentBranch} is up to date with {result.Remote}/{result.SourceBranch}";
+                Introduction.Text = "Your current branch already includes every commit from this remote source. No merge or checkpoint is needed. Return to Git and use Commit all & push when ready. Existing local edits are preserved.";
+            }
+            else
+            {
+                Introduction.Text = $"The remote source has {result.IncomingCommits:N0} commit(s) missing from your current branch. "
+                    + (result.HasConflicts ? "Git found conflicts. Review the local merge only if you are ready to resolve them."
+                        : "Git found no conflicts between the committed branches.")
+                    + " Uncommitted edits are excluded. No merge has started. Review the next step before changing local files.";
+                ReviewMerge.Visibility = Visibility.Visible;
+                ReviewMerge.IsDefault = true;
+                BackToGit.IsDefault = false;
+            }
+        }
         var paths = result.ConflictedPaths.Count > 0
             ? "\n\nConflicting paths (relative to this repository):\n" + string.Join("\n", result.ConflictedPaths.Select(path => "• " + DisplayPath(path))) : "";
         var diagnostics = string.IsNullOrWhiteSpace(result.GitDiagnostics) ? "" : "\n\nGit details:\n" + result.GitDiagnostics;
-        var scope = result.HasUncommittedChanges
+        var scope = reviewLocalMerge && result.IncomingCommits == 0
+            ? "\n\nUncommitted edits are preserved. The current branch already includes the selected source commit; this action does not checkpoint or merge those edits. Later remote updates require another comparison."
+            : result.HasUncommittedChanges
             ? "\n\nThis repository has uncommitted changes. They were excluded. An actual merge checkpoints those changes first and may produce different conflicts."
             : "\n\nThis result covers only the exact commits above. Later local edits or release updates can change the outcome.";
-        Details.Text = SensitiveDataProtection.Redact($"Repository:\n{root}\n\nCurrent branch: {result.CurrentBranch}\nCurrent commit: {result.CurrentCommit}\nRelease source: {result.Remote}/{result.SourceBranch}\nRelease commit: {result.SourceCommit}\nChecked: {result.CheckedAt.ToLocalTime():g}\n\n{result.Message}{paths}{diagnostics}{scope}\n\nOnly Git history was checked. No application build or tests ran. Submodule contents were not checked.");
+        Details.Text = SensitiveDataProtection.Redact($"Repository:\n{root}\n\nCurrent branch: {result.CurrentBranch}\nCurrent commit: {result.CurrentCommit}\nRemote source: {result.Remote}/{result.SourceBranch}\nSource commit: {result.SourceCommit}\nIncoming commits: {result.IncomingCommits:N0}\nChecked: {result.CheckedAt.ToLocalTime():g}\n\n{result.Message}{paths}{diagnostics}{scope}\n\nOnly Git history was checked. No application build or tests ran. Submodule contents were not checked.");
     }
+
+    private void ReviewMerge_Click(object sender, RoutedEventArgs e) => DialogResult = true;
 
     private static string DisplayPath(string path) => path.Replace("\r", "\\r").Replace("\n", "\\n").Replace("\t", "\\t");
 

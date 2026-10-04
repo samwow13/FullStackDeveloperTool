@@ -114,9 +114,11 @@ public static partial class GitRepositoryService
             }
         });
 
-    public static Task<GitSyncResult> PrepareSyncAsync(string root, string remote, string sourceBranch, CancellationToken token = default) =>
+    public static Task<GitSyncResult> PrepareSyncAsync(string root, string remote, string sourceBranch, CancellationToken token = default,
+        GitMergeCheckResult? reviewedCheck = null, IProgress<string>? progress = null, GitRepositorySnapshot? reviewedSnapshot = null) =>
         InRepositoryAsync(root, token, async snapshot =>
         {
+            progress?.Report("Verifying the compared local branch and remote source…");
             RequireNoOperation(snapshot);
             if (snapshot.IsDetached || snapshot.IsUnborn)
                 throw new InvalidOperationException("Start a release merge from a named local branch with an existing commit and shared release history.");
@@ -126,50 +128,92 @@ public static partial class GitRepositoryService
             await ValidateBranchAsync(root, sourceBranch, token).ConfigureAwait(false);
             var url = await RequirePowerRemoteAsync(root, remote, token).ConfigureAwait(false);
             var destinationBranch = snapshot.Branch;
+            if (reviewedCheck is null || !IsObjectId(reviewedCheck.SourceCommit)
+                || reviewedCheck.CurrentBranch != destinationBranch || reviewedCheck.CurrentCommit != snapshot.HeadCommit
+                || reviewedCheck.Remote != remote || reviewedCheck.SourceBranch != sourceBranch)
+                throw new InvalidOperationException("The reviewed branch comparison is missing or no longer matches this local branch and remote source. Run Merge Locally again to compare the current branches before merging.");
+            if (reviewedSnapshot is not null)
+            {
+                RequireSameLocalState(reviewedSnapshot, snapshot);
+                if (reviewedSnapshot.StateFingerprint.Length == 0 || reviewedSnapshot.StateFingerprint != snapshot.StateFingerprint)
+                    throw new InvalidOperationException("The repository or remote configuration changed after the merge review. Refresh and compare the branches again before merging.");
+            }
+            if (await ReadReleaseBranchAsync(root, remote, token).ConfigureAwait(false) != sourceBranch)
+                throw new InvalidOperationException("The selected remote source changed after the branch comparison. Refresh and compare the selected branch again before merging.");
+
+            progress?.Report($"Checking the latest {remote}/{sourceBranch} commit…");
+            if (await ReadMergeCheckSourceAsync(root, url, sourceBranch, token).ConfigureAwait(false) != reviewedCheck.SourceCommit)
+                throw new InvalidOperationException("The remote source changed after the branch comparison. Run Merge Locally again to compare its latest commit; no local checkpoint or merge was started.");
+            await RequireUnchangedPowerRemoteAsync(root, remote, url, token).ConfigureAwait(false);
+            RequireSameLocalState(snapshot, await ReadCoreAsync(root, token).ConfigureAwait(false));
+
+            // An exact successful fetch is required. A failure must never consume an older cached ref.
+            // Until incoming history is confirmed, keep local files, history and recovery tracking untouched.
+            progress?.Report($"Fetching {remote}/{sourceBranch} for the local merge…");
+            var fetched = await GitAsync(root,
+                ["-c", "fetch.pruneTags=false", "fetch", "--no-prune", "--no-prune-tags", "--no-tags", "--no-recurse-submodules", "--no-write-fetch-head", "--", remote,
+                    $"+refs/heads/{sourceBranch}:refs/remotes/{remote}/{sourceBranch}"], token, network: true).ConfigureAwait(false);
+            EnsureSuccess(fetched);
+            await RequireUnchangedPowerRemoteAsync(root, remote, url, token).ConfigureAwait(false);
+            var source = await GitAsync(root, ["rev-parse", "--verify", $"refs/remotes/{remote}/{sourceBranch}^{{commit}}"], token).ConfigureAwait(false);
+            EnsureSuccess(source);
+            var sourceCommit = source.Output.Trim();
+            if (!IsObjectId(sourceCommit) || sourceCommit != reviewedCheck.SourceCommit)
+                throw new InvalidOperationException("The fetched remote source no longer matches the reviewed branch comparison. Run Merge Locally again; no local checkpoint or merge was started.");
+            if (await ReadMergeCheckSourceAsync(root, url, sourceBranch, token).ConfigureAwait(false) != sourceCommit)
+                throw new InvalidOperationException("The remote source changed while preparing the local merge. Run Merge Locally again to compare its latest commit; no local checkpoint or merge was started.");
+            await RequireUnchangedPowerRemoteAsync(root, remote, url, token).ConfigureAwait(false);
+            var refreshed = await ReadCoreAsync(root, token).ConfigureAwait(false);
+            RequireSameLocalState(snapshot, refreshed);
+            snapshot = refreshed;
+            if (await ReadReleaseBranchAsync(root, remote, token).ConfigureAwait(false) != sourceBranch)
+                throw new InvalidOperationException("The selected remote source changed while preparing the local merge. Refresh and compare the selected branch again; no local checkpoint or merge was started.");
+
+            progress?.Report($"Checking for remote commits missing from {destinationBranch}…");
+            if (await IsAncestorAsync(root, sourceCommit, snapshot.HeadCommit, token).ConfigureAwait(false))
+            {
+                RequireSameLocalState(snapshot, await ReadCoreAsync(root, token).ConfigureAwait(false));
+                progress?.Report("Local branch is up to date. Returning to the Git workspace…");
+                return new GitSyncResult
+                {
+                    Message = $"{destinationBranch} is up to date with {remote}/{sourceBranch}; the selected remote source has no commits missing locally. No checkpoint or merge was needed. Continue reviewing and committing your local work in the Git workspace."
+                };
+            }
+            // The reviewed comparison uses these exact immutable commits. Recheck configuration
+            // that could have changed since its simulation before any checkpoint or merge begins.
+            await RequireMergeTreeSupportAsync(root, token).ConfigureAwait(false);
+            await RequireNoExternalMergeCommandsAsync(root, token).ConfigureAwait(false);
             // Merge stays on the reviewed current branch. Branch creation belongs to Commit all & push.
             await RequireCommitIdentityAsync(root, token).ConfigureAwait(false);
             var pending = new GitPendingSync
             {
                 RepositoryRoot = snapshot.RepositoryRoot!, Remote = remote, RemoteFingerprint = RemoteTargetFingerprint(url),
                 DestinationBranch = destinationBranch, SourceBranch = sourceBranch, OriginalHead = snapshot.HeadCommit,
-                PreparedHead = snapshot.HeadCommit, Stage = GitSyncStage.Preparing
+                SourceCommit = sourceCommit, PreparedHead = snapshot.HeadCommit, Stage = GitSyncStage.BranchReady
             };
+            progress?.Report("Recording recovery details for the local merge…");
             await WritePendingSyncAsync(root, pending, create: true, token).ConfigureAwait(false);
             try
             {
-                // An exact successful fetch is required. A failure must never consume an older cached ref.
-                var fetched = await GitAsync(root,
-                    ["-c", "fetch.pruneTags=false", "fetch", "--no-prune", "--no-prune-tags", "--no-tags", "--no-recurse-submodules", "--no-write-fetch-head", "--", remote,
-                        $"+refs/heads/{sourceBranch}:refs/remotes/{remote}/{sourceBranch}"], token, network: true).ConfigureAwait(false);
-                EnsureSuccess(fetched);
-                await RequireUnchangedPowerRemoteAsync(root, remote, url, token).ConfigureAwait(false);
-                var source = await GitAsync(root, ["rev-parse", "--verify", $"refs/remotes/{remote}/{sourceBranch}^{{commit}}"], token).ConfigureAwait(false);
-                EnsureSuccess(source);
-                var sourceCommit = source.Output.Trim();
-                if (!IsObjectId(sourceCommit)) throw new InvalidOperationException("The freshly fetched release commit could not be verified.");
-                pending = pending with { SourceCommit = sourceCommit, Stage = GitSyncStage.Fetched };
-                await WritePendingSyncAsync(root, pending, false, token).ConfigureAwait(false);
-                var refreshed = await ReadCoreAsync(root, token).ConfigureAwait(false);
-                RequireSameLocalState(snapshot, refreshed);
-                snapshot = refreshed;
-                await SaveReleaseBranchCoreAsync(root, remote, sourceBranch, url, token).ConfigureAwait(false);
-                pending = pending with { Stage = GitSyncStage.BranchReady };
-                await WritePendingSyncAsync(root, pending, false, token).ConfigureAwait(false);
                 if (snapshot.Changes.Count > 0)
                 {
+                    progress?.Report("Preserving uncommitted changes in a local checkpoint…");
                     var checkpointMessage = $"Save local changes before merging {remote}/{sourceBranch} into {destinationBranch}";
                     snapshot = await CommitAllCoreAsync(root, snapshot, checkpointMessage, null, token).ConfigureAwait(false);
                     pending = pending with { CheckpointCommit = snapshot.HeadCommit, PreparedHead = snapshot.HeadCommit, Stage = GitSyncStage.Checkpointed };
                     await WritePendingSyncAsync(root, pending, false, token).ConfigureAwait(false);
                 }
                 RequireClean(snapshot);
+                RequireSameLocalState(snapshot, await ReadCoreAsync(root, token).ConfigureAwait(false));
                 await RequireUnchangedPowerRemoteAsync(root, remote, url, token).ConfigureAwait(false);
                 pending = pending with { PreparedHead = snapshot.HeadCommit, Stage = GitSyncStage.MergeStarted };
                 await WritePendingSyncAsync(root, pending, false, token).ConfigureAwait(false);
+                progress?.Report($"Integrating {remote}/{sourceBranch} into {destinationBranch} locally…");
                 var merge = await GitAsync(root,
                     ["-c", $"branch.{destinationBranch}.mergeOptions=", "-c", "submodule.recurse=false", "-c", "rerere.enabled=false", "-c", "rerere.autoupdate=false",
                         "merge", "--no-ff", "--no-commit", "--no-edit", "--no-autostash", "--no-overwrite-ignore", "--no-squash", "--message",
                         $"Merge {remote}/{sourceBranch} into {destinationBranch}", "--", sourceCommit], token).ConfigureAwait(false);
+                progress?.Report("Checking the local merge result…");
                 var merged = await ReadCoreAsync(root, token).ConfigureAwait(false);
                 RequirePendingBranch(pending, merged);
                 var mergeHead = await ReadMergeHeadAsync(root, token).ConfigureAwait(false);
@@ -178,6 +222,7 @@ public static partial class GitRepositoryService
                 {
                     pending = pending with { Stage = GitSyncStage.Conflicts };
                     await WritePendingSyncAsync(root, pending, false, token).ConfigureAwait(false);
+                    progress?.Report("Local merge stopped with conflicts. Resolve them before committing.");
                     return new GitSyncResult
                     {
                         PendingSync = pending, ConflictedPaths = conflicts,
@@ -194,6 +239,7 @@ public static partial class GitRepositoryService
                 if (conflicts.Count != 0) throw new InvalidOperationException("Unresolved Git conflicts remain. Review them before continuing.");
                 pending = pending with { Stage = GitSyncStage.AwaitingConfirmation };
                 await WritePendingSyncAsync(root, pending, false, token).ConfigureAwait(false);
+                progress?.Report("Local merge is ready for review. Nothing was pushed.");
                 return new GitSyncResult
                 {
                     PendingSync = pending, ReadyToFinish = true,
@@ -201,6 +247,12 @@ public static partial class GitRepositoryService
                         + (mergeHead is null ? "The release commit is already included. " : "Merge prepared without a merge commit. ")
                         + "No conflicts found. Changes remain local on " + destinationBranch + ". Use Commit all & push when you are ready to choose the destination branch and publish. Nothing was pushed."
                 };
+            }
+            catch (GitCommandExitUnconfirmedException)
+            {
+                // Keep the last durable recovery phase and the owned process identity.
+                // The workspace must confirm exit before any follow-up Git command.
+                throw;
             }
             catch (Exception exception) when (IsPowerFailure(exception))
             {
@@ -630,6 +682,7 @@ public static partial class GitRepositoryService
         {
             await WritePendingSyncAsync(root, pending with { Stage = pending.Stage == GitSyncStage.PushUncertain ? GitSyncStage.PushUncertain : GitSyncStage.NeedsReview }, false, recovery.Token).ConfigureAwait(false);
         }
+        catch (GitCommandExitUnconfirmedException) { throw; }
         catch (Exception exception) when (IsPowerFailure(exception)) { /* Preserve the last durable phase when a recovery write fails. */ }
     }
 

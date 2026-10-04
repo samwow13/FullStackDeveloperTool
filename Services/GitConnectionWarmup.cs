@@ -14,6 +14,7 @@ public static class GitConnectionWarmup
     private static readonly Dictionary<ConnectionKey, SessionEvidence> ReadyForSession = [];
     private static readonly HashSet<ConnectionKey> SessionRechecks = [];
     private static readonly HashSet<Entry> Workers = [];
+    private static readonly Dictionary<GitCommandExitUnconfirmedException, string> UnconfirmedCommands = [];
     private static readonly SemaphoreSlim BackgroundChecks = new(2, 2);
     private static readonly TimeSpan ReadyLifetime = TimeSpan.FromMinutes(5);
     private static readonly TimeSpan FailedLifetime = TimeSpan.FromSeconds(30);
@@ -24,6 +25,7 @@ public static class GitConnectionWarmup
         if (!TryCreateKey(root, provider, url, out var key, out _)) return false;
         lock (Sync)
         {
+            if (UnconfirmedCommands.Values.Contains(key!.Root)) return false;
             if (!Entries.TryGetValue(key!, out var entry) || entry.Result is null || entry.ExpiresAt <= DateTimeOffset.UtcNow) return false;
             result = entry.Result;
             return true;
@@ -38,6 +40,7 @@ public static class GitConnectionWarmup
         var recheck = false;
         lock (Sync)
         {
+            if (UnconfirmedCommands.Values.Contains(key!.Root)) return false;
             if (!ReadyForSession.TryGetValue(key!, out var evidence)) return false;
             result = evidence.Result with
             {
@@ -136,10 +139,19 @@ public static class GitConnectionWarmup
         var target = GitConnectionService.ParseTarget(provider, url);
         var normalizedRoot = GitConnectionService.NormalizeRoot(root);
         var key = new ConnectionKey(normalizedRoot.ToUpperInvariant(), provider, target.CloneUrl);
+        while (true)
+        {
+            GitCommandExitUnconfirmedException? pending;
+            lock (Sync) pending = UnconfirmedCommands.FirstOrDefault(pair => pair.Value == key.Root).Key;
+            if (pending == null) break;
+            if (!await Task.Run(pending.IsExitConfirmed, token).ConfigureAwait(false)) throw pending;
+            lock (Sync) UnconfirmedCommands.Remove(pending);
+        }
         Entry entry;
         var start = false;
         lock (Sync)
         {
+            if (UnconfirmedCommands.FirstOrDefault(pair => pair.Value == key.Root).Key is { } heldCommand) throw heldCommand;
             // Sign-in can change the helper account shared by multiple repositories/domains.
             if (interactive)
             {
@@ -194,6 +206,7 @@ public static class GitConnectionWarmup
             {
                 // Keep the last owner's operation alive until its bounded Git child cleanup completes.
                 try { await stopped.ConfigureAwait(false); }
+                catch (GitCommandExitUnconfirmedException) { throw; }
                 catch (OperationCanceledException) { }
             }
         }
@@ -203,6 +216,7 @@ public static class GitConnectionWarmup
     {
         var acquired = false;
         GitConnectionCheckResult? result = null;
+        GitCommandExitUnconfirmedException? unconfirmed = null;
         try
         {
             // Explicit user actions have their own bounded command lifetime; startup cannot queue
@@ -216,6 +230,7 @@ public static class GitConnectionWarmup
             deadline.CancelAfter(interactive ? TimeSpan.FromMinutes(3) : explicitCheck ? TimeSpan.FromSeconds(90) : TimeSpan.FromSeconds(30));
             result = await GitConnectionService.CheckUncachedAsync(root, target, interactive, automatic: !explicitCheck, deadline.Token).ConfigureAwait(false);
         }
+        catch (GitCommandExitUnconfirmedException exception) { unconfirmed = exception; }
         catch (OperationCanceledException) when (!entry.Cancellation.IsCancellationRequested)
         {
             result = new() { Message = "The saved Git connection check timed out. Check the network and use Check connection to try again." };
@@ -236,7 +251,14 @@ public static class GitConnectionWarmup
                     foreach (var other in Entries.Keys.Where(other => other != key).ToArray()) RemoveEntry(other);
                     foreach (var other in ReadyForSession.Keys.Where(other => other != key).ToArray()) ReadyForSession.Remove(other);
                 }
-                if (result is not null && current && !entry.Cancellation.IsCancellationRequested)
+                if (unconfirmed != null)
+                {
+                    UnconfirmedCommands[unconfirmed] = key.Root;
+                    if (current) Entries.Remove(key);
+                    ReadyForSession.Remove(key);
+                    entry.Completion.TrySetException(unconfirmed);
+                }
+                else if (result is not null && current && !entry.Cancellation.IsCancellationRequested)
                 {
                     entry.Result = result;
                     entry.ExpiresAt = DateTimeOffset.UtcNow + (result.Ready ? ReadyLifetime : FailedLifetime);

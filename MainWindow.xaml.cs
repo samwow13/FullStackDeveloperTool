@@ -28,6 +28,8 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     private bool _closed;
     private bool _batchBusy;
     private bool _layoutReady;
+    private bool _checkingStartupServices = true;
+    private readonly CancellationTokenSource _flutterDatabaseLifetime = new();
     private ProjectTasks.ProjectTasksWindow? _projectTasksWindow;
     private string _notice = "Ready. Select a service to get started.";
     private string _lastChecked = "Checking status…";
@@ -42,7 +44,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     public string Summary => Services.Count == 0 ? "No apps configured" : Services.Any(service => service.Profile.IsConsole)
         ? $"{Services.Count(service => service.IsRunning)} running · {Services.Count(service => service.Runner.Snapshot.State == ServiceState.Completed)} completed · {Services.Count} apps"
         : $"{Services.Count(x => x.IsRunning)} / {Services.Count} services online";
-    public bool CanBatch => !IsEditing && !_batchBusy && !_forceStopBatchBusy && !_closing && Services.Count > 0 && Services.All(x => !x.IsBusy && !x.IsStopping);
+    public bool CanBatch => !IsEditing && !_addingProjectService && !_savingProjectEdits && !_checkingStartupServices && !_closeRequested && !_batchBusy && !_forceStopBatchBusy && !_closing && Services.Count > 0 && Services.All(x => !x.IsBusy && !x.IsStopping);
     public bool AllServicesRunning => Services.Count > 0 && Services.All(service => service.ShowRunningDot);
     public bool CanStartBatch => CanBatch && !_closeRequested && Services.Any(service => service.CanStart);
     public string StartAllDescription => AllServicesRunning
@@ -50,8 +52,8 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         : CanStartBatch ? "Start only services that are stopped. Running services stay running."
         : Services.Count == 0 ? "No services are configured for this project."
         : "Start is unavailable while services are checking, starting, busy, blocked, or being edited. Review each service's status.";
-    public bool CanStopBatch => !_closing && !_forceStopBatchBusy && Services.Any(x => x.CanForceStop);
-    public bool CanEdit => SelectedProject is not null && !_savingProjectEdits && !_batchBusy && !_forceStopBatchBusy && !_closing && Services.All(x => !x.IsBusy && !x.IsStopping);
+    public bool CanStopBatch => !_addingProjectService && !_checkingStartupServices && !_closeRequested && !_closing && !_forceStopBatchBusy && Services.Any(x => x.CanForceStop);
+    public bool CanEdit => SelectedProject is not null && !_addingProjectService && (!_closeRequested || (_resolvingCloseDrafts && IsEditing)) && !_savingProjectEdits && !_batchBusy && !_forceStopBatchBusy && !_closing && Services.All(x => !x.IsBusy && !x.IsStopping);
     public string Notice { get => _notice; private set { _notice = value; Changed(nameof(Notice)); } }
     public string LastChecked { get => _lastChecked; private set { _lastChecked = value; Changed(nameof(LastChecked)); } }
     public string ProductionNotice => string.Join(Environment.NewLine, Projects.SelectMany(project => project.Services
@@ -105,6 +107,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         Closed += (_, _) => _nextCommitLifetime.Cancel();
         Closed += (_, _) => _sourceLineCountLifetime.Cancel();
         Closed += (_, _) => _frontendBrowserLifetime.Cancel();
+        Closed += (_, _) => _flutterDatabaseLifetime.Cancel();
         InitializeFrontendBrowserAccess();
         SourceInitialized += (_, _) =>
         {
@@ -116,7 +119,17 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     private async void Window_Loaded(object sender, RoutedEventArgs e)
     {
         StartGitConnectionWarmup();
-        await RefreshProjectListAsync(Projects.FirstOrDefault(x => x.Id == _settings.SelectedProjectId));
+        Notice = "Checking for apps already running…";
+        try
+        {
+            await RefreshProjectListAsync(Projects.FirstOrDefault(x => x.Id == _settings.SelectedProjectId));
+            // An empty Active list may still contain running archived projects.
+            if (SelectedProject is null) await RefreshAsync(fresh: true);
+        }
+        finally { _checkingStartupServices = false; UpdateActions(); }
+        var detected = _runners.Values.SelectMany(project => project).Count(service => service.IsRunning);
+        Notice = detected > 0 ? $"Detected {detected} running app(s). Existing apps are ready to manage."
+            : "Ready. Select a service to get started.";
         if (!string.IsNullOrWhiteSpace(_store.LoadWarning))
         {
             Notice = _store.LoadWarning;
@@ -132,24 +145,47 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     private List<ServiceViewModel> GetRunners(ProjectProfile project)
     {
         if (_runners.TryGetValue(project.Id, out var existing)) return existing;
-        var created = project.Services.Select(profile =>
-        {
-            var runner = new ServiceRunner(profile, _store.ResolveWorkingDirectory(project, profile));
-            runner.LogReceived += log => QueueLog(project.Id, runner, profile.Name, log);
-            runner.ConsoleOutputReset += () => QueueConsoleReset(project.Id, runner);
-            var service = new ServiceViewModel(runner);
-            runner.FrontendReady += (url, generation) => QueueFrontendBrowserOpen(project, service, url, generation);
-            return service;
-        }).ToList();
+        var created = project.Services.Select(profile => CreateServiceViewModel(project, profile)).ToList();
         _runners.Add(project.Id, created);
         return created;
+    }
+
+    private ServiceViewModel CreateServiceViewModel(ProjectProfile project, ServiceProfile profile)
+    {
+        var runner = new ServiceRunner(profile, _store.ResolveWorkingDirectory(project, profile));
+        try
+        {
+            runner.LogReceived += log => QueueLog(project.Id, runner, profile.Name, log);
+            runner.ConsoleOutputReset += () => QueueConsoleReset(project.Id, runner);
+            var service = new ServiceViewModel(runner) { AreCommandsBlocked = _addingProjectService || _checkingStartupServices || _closeRequested };
+            service.ConfigureFlutterDatabases(project, _store.ResolveRoot(project), _flutterDatabaseLifetime.Token);
+            runner.SnapshotChanged += () => QueueServiceStatusUpdate(project.Id, runner);
+            runner.FrontendReady += (url, generation) => QueueFrontendBrowserOpen(project, service, url, generation);
+            return service;
+        }
+        catch
+        {
+            runner.Dispose();
+            throw;
+        }
+    }
+
+    private void QueueServiceStatusUpdate(string projectId, ServiceRunner runner)
+    {
+        if (Dispatcher.HasShutdownStarted || Dispatcher.HasShutdownFinished) return;
+        _ = Dispatcher.BeginInvoke(new Action(() =>
+        {
+            if (_closed || _closeRequested || _closing || FindConsoleService(projectId, runner) is not { } service) return;
+            service.Update();
+            UpdateActions();
+        }), DispatcherPriority.Background);
     }
 
     private async void ProjectList_SelectionChanged(object sender, SelectionChangedEventArgs e)
     {
         if (_refreshingProjectList) return;
         // The list is disabled during inline editing; protect programmatic changes as well.
-        if (IsEditing)
+        if (IsEditing || _addingProjectService || _savingProjectEdits || _closeRequested)
         {
             _refreshingProjectList = true;
             try { ProjectList.SelectedValue = SelectedProject; }
@@ -192,7 +228,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         await RefreshAsync();
     }
 
-    private async Task RefreshAsync()
+    private async Task RefreshAsync(bool fresh = false)
     {
         if (_refreshing || _closeRequested || _closing) return;
         _refreshing = true;
@@ -207,11 +243,17 @@ public partial class MainWindow : Window, INotifyPropertyChanged
                 // not hold the global status refresh or a service command on the UI thread.
                 _ = service.RefreshApiProjectAvailabilityAsync();
                 if (service.IsBusy || service.IsStopping) return;
-                try { await service.Runner.RefreshAsync(); }
+                try
+                {
+                    if (fresh || _checkingStartupServices) await service.Runner.RefreshForProfileEditAsync();
+                    else await service.Runner.RefreshAsync();
+                }
                 catch (Exception ex) { if (!_closeRequested && !_closing) Notice = $"Status check: {ex.Message}"; }
                 if (_closeRequested || _closing) return;
                 service.Update();
                 _ = service.RefreshApiDatabaseAsync();
+                _ = service.RefreshFlutterDatabasesAsync();
+                _ = service.RefreshFlutterDatabaseConnectionsAsync();
             }));
             if (_closeRequested || _closing) return;
             LastChecked = $"Checked {DateTime.Now:HH:mm:ss}";
@@ -222,12 +264,16 @@ public partial class MainWindow : Window, INotifyPropertyChanged
 
     private void UpdateActions()
     {
+        foreach (var service in _runners.Values.SelectMany(project => project))
+            service.AreCommandsBlocked = _addingProjectService || _checkingStartupServices || _closeRequested || _closing || _forceStopBatchBusy;
         RefreshLinkedPortAvailability();
         RefreshServiceConsoleWindows();
         RefreshApiEndpointWindows();
         Changed(nameof(Summary)); Changed(nameof(CanBatch)); Changed(nameof(CanStopBatch)); Changed(nameof(CanEdit));
         Changed(nameof(CanChangeProject)); Changed(nameof(CanEditDetails)); Changed(nameof(CanSaveProjectEdits));
         Changed(nameof(CanRemoveProject)); Changed(nameof(CanCancelProjectEdits));
+        Changed(nameof(CanAddConsoleApp));
+        Changed(nameof(CanAddApi));
         Changed(nameof(ProductionNotice)); Changed(nameof(HasProductionNotice));
         NotifyStartAllChanged();
         UpdateArchiveActions();
@@ -260,7 +306,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
                     other.Runner.ConfigurationNeedsRestart = true;
                 other.Update();
             }
-            Notice = "API configuration saved. Use Local or Prod to restart with the selected values.";
+            Notice = "API configuration saved. Restart the API to apply its selected configuration, or choose Use Local & restart in API settings.";
             UpdateActions();
         }
     }
@@ -274,7 +320,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
             // Complete validation while the current API is still running; saving can fail without stopping it.
             var configuration = await Task.Run(() => ApiLaunchConfiguration.Prepare(service.Profile, service.Directory, environment));
             var previous = service.Profile.ApiConfiguration;
-            service.Profile.ApiConfiguration = new() { Environment = environment };
+            service.Profile.ApiConfiguration = new() { Environment = environment, LaunchCommand = previous?.LaunchCommand };
             try { _store.Save(_settings); }
             catch
             {
@@ -289,10 +335,11 @@ public partial class MainWindow : Window, INotifyPropertyChanged
 
     private async Task<bool> RunActionAsync(ServiceViewModel service, Func<ServiceRunner, Task> action, string verb)
     {
-        if (IsEditing || _savingProjectEdits || service.IsBusy || service.IsStopping || _closing || _forceStopBatchBusy || _closeRequested) return false;
+        if (IsEditing || _addingProjectService || _savingProjectEdits || service.IsBusy || service.IsStopping || _closing || _forceStopBatchBusy || _closeRequested) return false;
         var agentAction = verb == "Starting" ? "start" : verb == "Restarting" || verb.StartsWith("Applying ", StringComparison.Ordinal) ? "restart" : null;
         if (agentAction != null) RecordAgentBridgeEvent(service, agentAction, "requested");
         RecordServiceMessage(service, $"{verb}…", ServiceLogKind.Information);
+        service.SetActiveOperation(verb);
         service.IsBusy = true;
         UpdateActions();
         Notice = $"{verb}: {service.Name}…";
@@ -313,7 +360,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
             if (agentAction != null) RecordAgentBridgeEvent(service, agentAction, "failed");
             return false;
         }
-        finally { service.IsBusy = false; UpdateActions(); }
+        finally { service.IsBusy = false; service.SetActiveOperation(null); UpdateActions(); }
     }
 
     private async Task RunBatchAsync(Func<ServiceRunner, Task> action, string verb, Func<ServiceViewModel, bool> filter)
@@ -346,11 +393,6 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     }
     private async void RestartAll_Click(object sender, RoutedEventArgs e) => await RunBatchAsync(r => r.RestartAsync(), "Restarting", s => s.CanRestart);
     private async void StopAll_Click(object sender, RoutedEventArgs e) => await ForceStopAllAsync();
-    private async void Refresh_Click(object sender, RoutedEventArgs e)
-    {
-        await Task.WhenAll(RefreshAsync(), RefreshProjectBranchesAsync(), RefreshDeveloperToolsAsync());
-    }
-
     private void CodexAlertsMenu_Click(object sender, RoutedEventArgs e)
     {
         if (sender is Button { ContextMenu: { } menu } button)
@@ -476,7 +518,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
 
     private async Task StopActionAsync(ServiceViewModel service, bool includeConflicts = false)
     {
-        if (service.IsStopping || _closing || _savingProjectEdits) return;
+        if (service.IsStopping || _addingProjectService || _closeRequested || _closing || _savingProjectEdits) return;
         RecordAgentBridgeEvent(service, "stop", "requested");
         RecordServiceMessage(service, "Force stop requested…", ServiceLogKind.Information);
         service.IsStopping = true;
@@ -502,9 +544,17 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         finally { service.IsStopping = false; UpdateActions(); }
     }
 
-    private void OpenUrl_Click(object sender, RoutedEventArgs e)
+    private void LaunchUi_Click(object sender, RoutedEventArgs e)
     {
-        if (ServiceFrom(sender) is not { HasLiveUrl: true } service) return;
+        e.Handled = true;
+        if (ServiceFrom(sender) is not { } service) return;
+        service.Update();
+        if (!service.HasLiveUrl)
+        {
+            Notice = service.LaunchButtonHelpText;
+            MessageBox.Show(this, service.LaunchButtonHelpText, "Service unavailable", MessageBoxButton.OK, MessageBoxImage.Information);
+            return;
+        }
         try
         {
             if (!Uri.TryCreate(service.LiveUrl, UriKind.Absolute, out var uri) || uri.Scheme is not ("http" or "https") || !uri.IsLoopback)
@@ -514,19 +564,6 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         catch (Exception ex) { Notice = $"Could not open URL: {ex.Message}"; }
     }
 
-    private void CopyServiceUrl_Click(object sender, RoutedEventArgs e)
-    {
-        if (ServiceFrom(sender) is not { HasLiveUrl: true } service) return;
-        try
-        {
-            if (!Uri.TryCreate(service.LiveUrl, UriKind.Absolute, out var uri) || uri.Scheme is not ("http" or "https") || !uri.IsLoopback)
-                throw new InvalidOperationException("Only a local HTTP or HTTPS service address can be copied.");
-            Clipboard.SetText(uri.AbsoluteUri);
-            Notice = $"Copied {service.Name} address.";
-        }
-        catch (Exception ex) { Notice = $"Could not copy URL: {ex.Message}"; }
-    }
-
     private async void AddProject_Click(object sender, RoutedEventArgs e) => await AddProjectAsync();
 
     private async Task AddProjectAsync()
@@ -534,23 +571,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         if (!CanChangeProject) return;
         var setup = new NewProjectWindow(_store.BaseDirectory, _settings.Projects) { Owner = this };
         if (setup.ShowDialog() != true) return;
-        if (setup.ExistingProjectId is { } existingProjectId)
-        {
-            var existing = Projects.FirstOrDefault(project =>
-                project.Id.Equals(existingProjectId, StringComparison.OrdinalIgnoreCase));
-            if (existing is null)
-            {
-                Notice = "The saved project is no longer available. Reopen New project and scan again.";
-                return;
-            }
-            _showArchivedProjects = existing.IsArchived;
-            await RefreshProjectListAsync(existing);
-            return;
-        }
-        var profile = setup.Result;
-        var editor = new ProfileEditorWindow(profile, _store.BaseDirectory, _settings.Projects) { Owner = this };
-        if (editor.ShowDialog() != true) return;
-        var result = editor.Result;
+        var result = setup.Result;
         AngularDevProxyConfiguration proxyChanges;
         try
         {

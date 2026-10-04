@@ -41,7 +41,7 @@ Submit work in the background without activating the Codex window, simulating ty
 
 While auto-queue is working, keep the computer awake so idle sleep does not interrupt execution. Still deliver a user-facing completion message at the end of every task, even when the next queued task starts immediately.
 
-The scope is the launcher. Preserve its service controls, database explorer, project settings, developer tools, single-file distribution, and existing user data. Do not change the CRM API, frontend, or database for this feature.
+The scope is the launcher. Preserve its service controls, API-reported database health, project settings, developer tools, single-file distribution, and existing user data. Do not change the CRM API, frontend, or database for this feature.
 
 ## 2. Read first and reconcile existing conventions
 

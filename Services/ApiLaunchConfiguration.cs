@@ -5,8 +5,6 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using FullStackLauncher.Models;
-using Microsoft.Data.SqlClient;
-using Npgsql;
 
 namespace FullStackLauncher.Services;
 
@@ -14,16 +12,30 @@ namespace FullStackLauncher.Services;
 public sealed class ApiLaunchConfiguration
 {
     private readonly string[] _redactions;
-    private readonly AppliedDatabaseConnection? _singleLocalConnection;
+
+    public static string DefaultLaunchCommand => "dotnet run --no-launch-profile";
+
+    /// <summary>Validate only supported non-secret build options; launcher-owned isolation stays mandatory.</summary>
+    public static void ValidateLaunchCommand(string? command) => ParseLaunchCommand(command);
+
+    /// <summary>Preview the exact direct command without loading either configuration store.</summary>
+    public static string GetLaunchCommandPreview(ServiceProfile profile, string directory, string environment)
+    {
+        if (environment is not ("Local" or "Prod"))
+            throw new InvalidOperationException("Choose Local or Prod API configuration.");
+        var store = new ApiSecretStore(directory);
+        var arguments = BuildLaunchArguments(profile.ApiConfiguration?.LaunchCommand, store.ProjectFilePath,
+            RuntimeArtifactsPath(store.ProjectFilePath), ApiOrigin(profile));
+        return "dotnet " + string.Join(" ", arguments.Select(QuoteDisplayArgument));
+    }
 
     private ApiLaunchConfiguration(ProcessStartInfo startInfo, string environment, string fingerprint,
-        string? databaseIdentifier, AppliedDatabaseConnection? singleLocalConnection, IEnumerable<string> redactions)
+        string? databaseIdentifier, IEnumerable<string> redactions)
     {
         StartInfo = startInfo;
         Environment = environment;
         Fingerprint = fingerprint;
         DatabaseIdentifier = databaseIdentifier;
-        _singleLocalConnection = singleLocalConnection;
         _redactions = redactions.Where(value => value.Length > 0).Distinct(StringComparer.Ordinal)
             .OrderByDescending(value => value.Length).ToArray();
     }
@@ -35,21 +47,13 @@ public sealed class ApiLaunchConfiguration
     // Only used to compare prepared launches in memory; never display or persist this value.
     public string Fingerprint { get; }
 
-    /// <summary>Only an unambiguous Local launch override can identify a discovered connection.</summary>
-    internal bool MatchesAppliedLocalDatabaseConnection(DatabaseConnectionSource source) =>
-        Environment == "Local" && _singleLocalConnection is not null &&
-        source.Provider == _singleLocalConnection.Provider &&
-        source.MatchesNormalizedConnection(_singleLocalConnection.ConnectionString);
-
     /// <summary>Read and validate everything before the caller stops an existing API process.</summary>
     public static ApiLaunchConfiguration Prepare(ServiceProfile profile, string directory, string environment)
     {
         if (environment is not ("Local" or "Prod"))
             throw new InvalidOperationException("Choose Local or Prod API configuration.");
-        if (!Uri.TryCreate(profile.Url, UriKind.Absolute, out var endpoint) ||
-            endpoint.Scheme is not ("http" or "https") || !endpoint.IsLoopback ||
-            !string.IsNullOrEmpty(endpoint.UserInfo))
-            throw new InvalidOperationException("Set a loopback HTTP or HTTPS API URL in project settings.");
+        ValidateLaunchCommand(profile.ApiConfiguration?.LaunchCommand);
+        var origin = ApiOrigin(profile);
 
         var store = new ApiSecretStore(directory);
         var selected = store.Load(environment == "Prod");
@@ -67,11 +71,15 @@ public sealed class ApiLaunchConfiguration
                 throw new InvalidOperationException("Add and save Prod configuration values before switching to Prod.");
             // A saved local database connection must never become a production fallback.
             // Each production connection is an explicit choice, even when its name matches Local.
-            foreach (var key in (local?.Values.Keys ?? []).Where(key =>
-                         key.StartsWith("ConnectionStrings:", StringComparison.OrdinalIgnoreCase)))
+            var connectionKeys = (local?.Values.Keys ?? [])
+                .Concat(store.ReadAppSettings(production: false).Keys)
+                .Concat(store.ReadAppSettings(production: true).Keys)
+                .Where(ApiDatabaseIdentifier.IsConnectionKey)
+                .Distinct(StringComparer.OrdinalIgnoreCase);
+            foreach (var key in connectionKeys)
             {
                 if (!selected.Values.TryGetValue(key, out var value) || string.IsNullOrWhiteSpace(value))
-                    throw new InvalidOperationException("Save a non-empty Prod value for every connection string configured in Local before switching to Prod.");
+                    throw new InvalidOperationException("Save a non-empty Prod value for every connection string declared in API settings or configured in Local before switching to Prod.");
             }
         }
 
@@ -85,7 +93,7 @@ public sealed class ApiLaunchConfiguration
         }
         var npgsqlMajorVersion = DatabaseConnectionSecurity.ReadNpgsqlMajorVersion(store.ProjectFilePath);
         var configurationValues = selected.Values.ToDictionary(pair => pair.Key,
-            pair => pair.Key.StartsWith("ConnectionStrings:", StringComparison.OrdinalIgnoreCase)
+            pair => ApiDatabaseIdentifier.IsConnectionKey(pair.Key)
                 ? DatabaseConnectionSecurity.NormalizeApiConnectionString(pair.Value, npgsqlMajorVersion) : pair.Value,
             StringComparer.OrdinalIgnoreCase);
         var startInfo = new ProcessStartInfo
@@ -99,19 +107,11 @@ public sealed class ApiLaunchConfiguration
             RedirectStandardError = true,
             RedirectStandardInput = true
         };
-        var origin = endpoint.GetLeftPart(UriPartial.Authority);
         // Disable the standard Development user-secrets provider only in this managed build.
         // Isolated artifacts preserve ordinary dotnet/EF builds and their original secrets ID.
         // Otherwise deleting an encrypted override could silently resurrect its plaintext value.
-        var runtimeRoot = System.Environment.GetFolderPath(System.Environment.SpecialFolder.LocalApplicationData);
-        if (string.IsNullOrWhiteSpace(runtimeRoot))
-            throw new InvalidOperationException("The Windows local application data folder is unavailable. The API cannot start with isolated configuration.");
-        var runtimeScope = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(store.ProjectFilePath.ToUpperInvariant())));
-        var artifactsPath = Path.Combine(runtimeRoot, "FullStackLauncher", "api-runtime", runtimeScope);
-        foreach (var argument in new[] { "run", "--project", store.ProjectFilePath,
-                     "--no-launch-profile", "--artifacts-path", artifactsPath,
-                     "--property:GenerateUserSecretsAttribute=false", "--property:UserSecretsId=",
-                     "--", "--urls", origin })
+        foreach (var argument in BuildLaunchArguments(profile.ApiConfiguration?.LaunchCommand,
+                     store.ProjectFilePath, RuntimeArtifactsPath(store.ProjectFilePath), origin))
             startInfo.ArgumentList.Add(argument);
 
         foreach (var key in startInfo.Environment.Keys.ToArray())
@@ -134,6 +134,7 @@ public sealed class ApiLaunchConfiguration
             Project = store.ProjectFilePath,
             Environment = environment,
             Origin = origin,
+            Arguments = startInfo.ArgumentList.ToArray(),
             Values = configurationValues.OrderBy(pair => pair.Key, StringComparer.OrdinalIgnoreCase)
                 .Select(pair => new { Key = pair.Key.ToUpperInvariant(), pair.Value }),
             NullKeys = selected.NullKeys.Order(StringComparer.OrdinalIgnoreCase)
@@ -141,42 +142,88 @@ public sealed class ApiLaunchConfiguration
         var fingerprint = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(fingerprintContent)));
         return new ApiLaunchConfiguration(startInfo, environment, fingerprint,
             ApiDatabaseIdentifier.FromConnectionOverrides(configurationValues),
-            environment == "Local" ? ReadSingleDatabaseConnection(configurationValues,
-                DatabaseConnectionSecurity.ReadProjectProvider(store.ProjectFilePath)) : null,
             FindRedactions(selected.Values).Concat(FindRedactions(configurationValues))
                 .Concat(inactive is null ? [] : FindRedactions(inactive.Values)));
     }
 
-    private static AppliedDatabaseConnection? ReadSingleDatabaseConnection(IReadOnlyDictionary<string, string> values,
-        DatabaseProvider? projectProvider)
+    private static string ApiOrigin(ServiceProfile profile)
     {
-        DbConnectionStringBuilder? unique = null;
-        DatabaseProvider? uniqueProvider = null;
-        foreach (var pair in values.Where(pair =>
-                     pair.Key.StartsWith("ConnectionStrings:", StringComparison.OrdinalIgnoreCase)))
-        {
-            try
-            {
-                var provider = DatabaseConnectionSecurity.DetectProvider(pair.Value, projectProvider);
-                if (provider is null) return null;
-                var normalized = DatabaseConnectionSecurity.NormalizeConnectionString(pair.Value, provider.Value);
-                DbConnectionStringBuilder candidate = provider == DatabaseProvider.SqlServer
-                    ? new SqlConnectionStringBuilder(normalized) : new NpgsqlConnectionStringBuilder(normalized);
-                if (unique is not null && (uniqueProvider != provider || !unique.EquivalentTo(candidate))) return null;
-                unique ??= candidate;
-                uniqueProvider ??= provider;
-            }
-            catch (ArgumentException) { return null; }
-        }
-        return unique is null || uniqueProvider is null ? null : new(uniqueProvider.Value, unique.ConnectionString);
+        if (!Uri.TryCreate(profile.Url, UriKind.Absolute, out var endpoint) ||
+            endpoint.Scheme is not ("http" or "https") || !endpoint.IsLoopback ||
+            !string.IsNullOrEmpty(endpoint.UserInfo))
+            throw new InvalidOperationException("Set a loopback HTTP or HTTPS API URL in project settings.");
+        return endpoint.GetLeftPart(UriPartial.Authority);
     }
 
-    // Provider and credentials belong to the immutable in-memory launch identity, never settings or logs.
-    private sealed class AppliedDatabaseConnection(DatabaseProvider provider, string connectionString)
+    private static string RuntimeArtifactsPath(string projectFile)
     {
-        public DatabaseProvider Provider { get; } = provider;
-        public string ConnectionString { get; } = connectionString;
+        var runtimeRoot = System.Environment.GetFolderPath(System.Environment.SpecialFolder.LocalApplicationData);
+        if (string.IsNullOrWhiteSpace(runtimeRoot))
+            throw new InvalidOperationException("The Windows local application data folder is unavailable. The API cannot start with isolated configuration.");
+        var runtimeScope = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(projectFile.ToUpperInvariant())));
+        return Path.Combine(runtimeRoot, "FullStackLauncher", "api-runtime", runtimeScope);
     }
+
+    private static string[] BuildLaunchArguments(string? command, string projectFile, string artifactsPath, string origin) =>
+        ["run", .. ParseLaunchCommand(command), "--project", projectFile, "--no-launch-profile",
+            "--artifacts-path", artifactsPath, "--property:GenerateUserSecretsAttribute=false",
+            "--property:UserSecretsId=", "--", "--urls", origin];
+
+    private static string[] ParseLaunchCommand(string? command)
+    {
+        if (command is null) return [];
+        if (command.IndexOfAny(['\r', '\n', '\0']) >= 0)
+            throw new InvalidOperationException("Use a single-line launch command without null characters.");
+        if (command.Length > 4096 || SensitiveDataProtection.ContainsLiteralCredential(command))
+            throw new InvalidOperationException("The launch command is too long or appears to contain credentials. Keep secrets in encrypted API configuration.");
+        var tokens = command.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries);
+        if (tokens.Length < 2 || !tokens[0].Equals("dotnet", StringComparison.OrdinalIgnoreCase) ||
+            !tokens[1].Equals("run", StringComparison.OrdinalIgnoreCase))
+            throw new InvalidOperationException("Use dotnet run followed by supported build options.");
+        var arguments = new List<string>();
+        var seen = new HashSet<string>(StringComparer.Ordinal);
+        for (var index = 2; index < tokens.Length; index++)
+        {
+            var token = tokens[index];
+            var equals = token.IndexOf('=');
+            var flag = equals < 0 ? token : token[..equals];
+            var value = equals < 0 ? null : token[(equals + 1)..];
+            var canonical = flag switch
+            {
+                "-c" or "--configuration" => "--configuration",
+                "-f" or "--framework" => "--framework",
+                "-r" or "--runtime" => "--runtime",
+                "-v" or "--verbosity" => "--verbosity",
+                "-a" or "--arch" => "--arch",
+                "--os" => "--os",
+                "--no-restore" => "--no-restore",
+                "--no-launch-profile" => "--no-launch-profile",
+                _ => throw new InvalidOperationException("Unsupported launch option. Use configuration, framework, runtime, verbosity, arch, os, no-restore, or no-launch-profile. Project, URL, launch settings and secret isolation are managed by the launcher.")
+            };
+            if (!seen.Add(canonical))
+                throw new InvalidOperationException("Remove duplicate launch options before saving.");
+            if (canonical is "--no-restore" or "--no-launch-profile")
+            {
+                if (value is not null)
+                    throw new InvalidOperationException("The no-restore and no-launch-profile options do not accept values.");
+                if (canonical == "--no-restore") arguments.Add(canonical);
+                continue;
+            }
+            if (value is null && ++index < tokens.Length) value = tokens[index];
+            if (string.IsNullOrWhiteSpace(value) || value.Length > 128 || value.StartsWith('-') ||
+                value.Any(character => !char.IsAsciiLetterOrDigit(character) && character is not ('_' or '.' or '-')))
+                throw new InvalidOperationException("Each build option needs one plain value using letters, numbers, periods, underscores or hyphens.");
+            if (canonical == "--verbosity" && value is not ("q" or "quiet" or "m" or "minimal" or "n" or "normal" or "d" or "detailed" or "diag" or "diagnostic"))
+                throw new InvalidOperationException("Use quiet, minimal, normal, detailed or diagnostic for verbosity.");
+            arguments.Add(canonical);
+            arguments.Add(value);
+        }
+        return arguments.ToArray();
+    }
+
+    private static string QuoteDisplayArgument(string argument) =>
+        argument.Any(char.IsWhiteSpace) || argument.Contains('"')
+            ? "\"" + argument.Replace("\"", "\\\"", StringComparison.Ordinal) + "\"" : argument;
 
     public string Redact(string text)
     {
@@ -209,7 +256,7 @@ public sealed class ApiLaunchConfiguration
     private static string NormalizeKey(string key) => key.Replace("__", ":", StringComparison.Ordinal);
 
     private static bool IsInheritedConfiguration(string key) =>
-        key.Contains(':') || key.Contains("__", StringComparison.Ordinal) ||
+        key.Contains(':') || key.Contains("__", StringComparison.Ordinal) || ApiDatabaseIdentifier.IsConnectionKey(NormalizeKey(key)) ||
         key.StartsWith("ASPNETCORE_", StringComparison.OrdinalIgnoreCase) ||
         new[] { "CUSTOMCONNSTR_", "SQLCONNSTR_", "SQLAZURECONNSTR_", "MYSQLCONNSTR_" }
             .Any(prefix => key.StartsWith(prefix, StringComparison.OrdinalIgnoreCase)) ||
@@ -226,7 +273,7 @@ public sealed class ApiLaunchConfiguration
         {
             if (string.IsNullOrEmpty(pair.Value)) continue;
             AddRedactionVariants(redactions, pair.Value);
-            if (!pair.Key.StartsWith("ConnectionStrings:", StringComparison.OrdinalIgnoreCase)) continue;
+            if (!ApiDatabaseIdentifier.IsConnectionKey(pair.Key)) continue;
             try
             {
                 var connection = new DbConnectionStringBuilder { ConnectionString = pair.Value };

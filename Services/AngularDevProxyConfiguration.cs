@@ -19,7 +19,7 @@ public sealed class AngularDevProxyConfiguration
     {
         var result = new AngularDevProxyConfiguration();
         var apis = original.Services.Where(service =>
-                (service.ApiConfiguration is not null || service.Kind.Equals(".NET", StringComparison.OrdinalIgnoreCase))
+                (service.IsCommandApi || service.ApiConfiguration is not null || service.Kind.Equals(".NET", StringComparison.OrdinalIgnoreCase))
                 && candidate.Services.Any(next => next.Id.Equals(service.Id, StringComparison.OrdinalIgnoreCase)))
             .Select(service => new ApiChange(service,
                 new Uri(service.Url), new Uri(candidate.Services.Single(next =>

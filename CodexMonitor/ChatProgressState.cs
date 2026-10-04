@@ -22,6 +22,7 @@ public sealed record ChatProgressRow(
     {
         AgentRunState.Running => "Running",
         AgentRunState.Waiting => "Waiting for",
+        AgentRunState.NeedsInput => "Needs answer",
         AgentRunState.Completed => "Recently completed",
         AgentRunState.Failed => "Needs attention",
         _ => "Status unavailable"
@@ -161,6 +162,8 @@ public sealed class ChatProgressState
             chat.AgentCount = chat.MemberIds.Count;
             chat.ResetConfirmation();
             destination._chats[chat.Id] = chat;
+            if (chat.State == AgentRunState.NeedsInput)
+                sourceCompletions.Remove(chat.Id);
             if (chat.State != AgentRunState.Completed && !sourceCompletions.ContainsKey(chat.Id))
                 destinationCompletions.Remove(chat.Id);
         }
@@ -230,7 +233,8 @@ public sealed class ChatProgressState
             _chats.TryGetValue(rootId, out var chat);
             var running = members.Count(member => member.State == AgentRunState.Running);
             var waiting = members.Count(member => member.State == AgentRunState.Waiting);
-            if (running + waiting > 0)
+            var needsInput = members.Count(member => member.State == AgentRunState.NeedsInput);
+            if (running + waiting + needsInput > 0)
             {
                 chat ??= new TrackedChat(rootId);
                 _chats[rootId] = chat;
@@ -243,8 +247,11 @@ public sealed class ChatProgressState
                 TrackMembers(chat, members, previous, starting);
                 chat.Title = root?.Title ?? chat.Title;
                 chat.AgentCount = chat.MemberIds.Count;
-                chat.State = running > 0 ? AgentRunState.Running : AgentRunState.Waiting;
-                chat.Status = running > 0
+                chat.State = needsInput > 0 ? AgentRunState.NeedsInput
+                    : running > 0 ? AgentRunState.Running : AgentRunState.Waiting;
+                chat.Status = needsInput > 0
+                    ? (root?.State == AgentRunState.NeedsInput ? "Needs answer" : "Team needs answer")
+                    : running > 0
                     ? (waiting > 0 ? $"{running} running · {waiting} waiting" : "In progress")
                     : "Queued or waiting";
                 chat.ResetConfirmation();
@@ -367,7 +374,7 @@ public sealed class ChatProgressState
                 EstimateDetail = estimate.Detail
             };
         }
-        Rows = rows.Values.OrderBy(row => row.State is AgentRunState.Running or AgentRunState.Waiting ? 0 : row.IsCompleted ? 2 : 1)
+        Rows = rows.Values.OrderBy(row => row.State is AgentRunState.Running or AgentRunState.Waiting or AgentRunState.NeedsInput ? 0 : row.IsCompleted ? 2 : 1)
             .ThenByDescending(row => row.CompletedAt).ThenBy(row => row.Title, StringComparer.OrdinalIgnoreCase).ToArray();
     }
 
@@ -405,7 +412,7 @@ public sealed class ChatProgressState
             var changedTurn = wasPresent && member.LatestTurnId is not null && member.LatestTurnId != prior!.LatestTurnId;
             // Old, inactive descendants belong to earlier turns. Retain children
             // that we see working, arriving, or advancing during this observed run.
-            if (member.State is AgentRunState.Running or AgentRunState.Waiting || changedTurn || (!starting && !wasPresent))
+            if (member.State is AgentRunState.Running or AgentRunState.Waiting or AgentRunState.NeedsInput || changedTurn || (!starting && !wasPresent))
                 chat.MemberIds.Add(member.Id);
         }
     }
@@ -429,7 +436,7 @@ public sealed class ChatProgressState
 
     private static string Color(AgentRunState state) => state switch
     {
-        AgentRunState.Running or AgentRunState.Waiting => "#F4BE4F",
+        AgentRunState.Running or AgentRunState.Waiting or AgentRunState.NeedsInput => "#F4BE4F",
         AgentRunState.Completed => "#53D7A0",
         AgentRunState.Failed => "#F07D86",
         _ => "#8E9AAE"

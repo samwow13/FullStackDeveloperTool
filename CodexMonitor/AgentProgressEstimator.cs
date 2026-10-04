@@ -43,13 +43,13 @@ public sealed class AgentProgressEstimator
             var changedTurn = previous is not null &&
                 !string.Equals(previous.TurnId, agent.LatestTurnId, StringComparison.Ordinal);
             var starting = previous is null || changedTurn ||
-                (agent.State is AgentRunState.Running or AgentRunState.Waiting &&
-                 previous.State is not (AgentRunState.Running or AgentRunState.Waiting));
+                (agent.State is AgentRunState.Running or AgentRunState.Waiting or AgentRunState.NeedsInput &&
+                 previous.State is not (AgentRunState.Running or AgentRunState.Waiting or AgentRunState.NeedsInput));
             var observed = starting
                 ? new ObservedAgent(agent.LatestTurnId)
                 : previous!;
 
-            // Waiting intervals are excluded. After a gap we start a fresh
+            // Waiting and pending-input intervals are excluded. After a gap we start a fresh
             // observation, so disconnected time cannot advance an estimate.
             if (!starting && previous!.State == AgentRunState.Running && _lastObservation.HasValue)
                 observed.RunningDuration += now - _lastObservation.Value;
@@ -99,6 +99,8 @@ public sealed class AgentProgressEstimator
 
         if (agent.State == AgentRunState.Completed)
             return Completed();
+        if (agent.State == AgentRunState.NeedsInput)
+            return Unavailable("Needs an answer; remaining time cannot be estimated while input is pending.");
         if (agent.State == AgentRunState.Waiting)
             return Unavailable("Queued or waiting; remaining time cannot be estimated yet.");
         if (agent.State == AgentRunState.Failed)
@@ -116,7 +118,7 @@ public sealed class AgentProgressEstimator
             ? " The 95% ceiling has been reached; remaining time is unknown."
             : " Running estimates are capped at 95%.";
         return new ProgressEstimate($"~{percent}% est.",
-            $"Low-confidence elapsed-time estimate, not measured work completed. {FormatDuration(agent.RunningDuration)} of running time since first observed; waiting time excluded. Based on {basis}. Actual completion may be much earlier or later.{limit}")
+            $"Low-confidence elapsed-time estimate, not measured work completed. {FormatDuration(agent.RunningDuration)} of running time since first observed; waiting and pending-input time excluded. Based on {basis}. Actual completion may be much earlier or later.{limit}")
         {
             Percent = percent
         };
@@ -126,6 +128,8 @@ public sealed class AgentProgressEstimator
     {
         if (state == AgentRunState.Completed)
             return Completed();
+        if (state == AgentRunState.NeedsInput)
+            return Unavailable("At least one watched agent needs an answer; no remaining-time estimate is available.");
         if (state == AgentRunState.Waiting)
             return Unavailable("Waiting or confirming completion; no remaining-time estimate is available.");
         if (state != AgentRunState.Running)
@@ -133,7 +137,7 @@ public sealed class AgentProgressEstimator
 
         var estimates = memberIds.Select(GetEstimate).ToArray();
         if (estimates.Length == 0 || estimates.Any(estimate => !estimate.Percent.HasValue))
-            return Unavailable("At least one watched agent is waiting, unavailable or failed; a chat estimate is not available.");
+            return Unavailable("At least one watched agent needs an answer, is waiting, unavailable or failed; a chat estimate is not available.");
         var slowest = estimates.MinBy(estimate => estimate.Percent!.Value)!;
         if (slowest.Percent == 100)
             return Unavailable("Waiting for the chat's completion to be confirmed.");

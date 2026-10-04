@@ -1,0 +1,94 @@
+<Window x:Class="FullStackLauncher.ConsoleServiceWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="Add console app" Icon="pack://application:,,,/Assets/launcher.ico"
+        Width="640" Height="560" MinWidth="480" MinHeight="430"
+        WindowStartupLocation="CenterOwner" Background="{DynamicResource BackgroundBrush}"
+        Foreground="{DynamicResource TextBrush}" FontFamily="Segoe UI" Loaded="Window_Loaded">
+    <Window.Resources>
+        <ResourceDictionary>
+            <ResourceDictionary.MergedDictionaries>
+                <ResourceDictionary Source="Controls/SetupStyles.xaml" />
+            </ResourceDictionary.MergedDictionaries>
+            <Style x:Key="FieldLabel" TargetType="Label">
+                <Setter Property="Foreground" Value="{DynamicResource MutedBrush}" />
+                <Setter Property="FontSize" Value="12" />
+                <Setter Property="Padding" Value="0,10,0,5" />
+            </Style>
+        </ResourceDictionary>
+    </Window.Resources>
+    <Grid Margin="22">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="*" />
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="Auto" />
+        </Grid.RowDefinitions>
+        <TextBlock x:Name="ProjectNameText" FontSize="16" FontWeight="SemiBold" TextWrapping="Wrap" Margin="0,0,0,8" />
+        <ScrollViewer Grid.Row="1" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
+            <StackPanel Margin="0,0,6,0">
+                <Label Content="Working _folder" Target="{Binding ElementName=FolderBox}" Style="{StaticResource FieldLabel}" />
+                <DockPanel>
+                    <Button x:Name="ChangeFolderButton" DockPanel.Dock="Right" Content="Change…" Click="ChangeFolder_Click" Margin="8,0,0,0" Padding="12,6" />
+                    <TextBox x:Name="FolderBox" IsReadOnly="True" MinHeight="34" VerticalContentAlignment="Center"
+                             AutomationProperties.Name="Console working folder" />
+                </DockPanel>
+                <TextBlock x:Name="DetectionStatusText" Foreground="{DynamicResource MutedBrush}" FontSize="11"
+                           TextWrapping="Wrap" Margin="0,6,0,2" AutomationProperties.LiveSetting="Polite" />
+                <StackPanel x:Name="SuggestionPanel" Visibility="Collapsed">
+                    <Label Content="Launch _option" Target="{Binding ElementName=SuggestionBox}" Style="{StaticResource FieldLabel}" />
+                    <ComboBox x:Name="SuggestionBox" SelectionChanged="Suggestion_SelectionChanged" AutomationProperties.Name="Detected console launch option">
+                        <ComboBox.ItemTemplate>
+                            <DataTemplate>
+                                <StackPanel>
+                                    <TextBlock Text="{Binding Type}" />
+                                    <TextBlock Text="{Binding Evidence}" FontSize="11" Foreground="{DynamicResource MutedBrush}"
+                                               TextTrimming="CharacterEllipsis" ToolTip="{Binding Command}" />
+                                </StackPanel>
+                            </DataTemplate>
+                        </ComboBox.ItemTemplate>
+                    </ComboBox>
+                </StackPanel>
+                <Grid>
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*" />
+                        <ColumnDefinition Width="16" />
+                        <ColumnDefinition Width="180" />
+                    </Grid.ColumnDefinitions>
+                    <StackPanel>
+                        <Label Content="_Name" Target="{Binding ElementName=NameBox}" Style="{StaticResource FieldLabel}" />
+                        <TextBox x:Name="NameBox" MinHeight="34" AutomationProperties.Name="Console app name" />
+                    </StackPanel>
+                    <StackPanel Grid.Column="2">
+                        <Label Content="_Type" Target="{Binding ElementName=ConsoleTypeBox}" Style="{StaticResource FieldLabel}" />
+                        <ComboBox x:Name="ConsoleTypeBox" IsEditable="True" IsTextSearchEnabled="False" Text="Console" AutomationProperties.Name="Console type"
+                                  ToolTip="Optional label shown on the service card. All console types run your configured shell command.">
+                            <ComboBoxItem Content="Console" />
+                            <ComboBoxItem Content="Docker" />
+                            <ComboBoxItem Content="Docker Compose" />
+                            <ComboBoxItem Content="Python" />
+                            <ComboBoxItem Content="Node.js" />
+                            <ComboBoxItem Content=".NET Worker" />
+                            <ComboBoxItem Content=".NET Console" />
+                            <ComboBoxItem Content="Dart" />
+                            <ComboBoxItem Content="Flutter" />
+                        </ComboBox>
+                    </StackPanel>
+                </Grid>
+                <Label Content="_Command" Target="{Binding ElementName=CommandBox}" Style="{StaticResource FieldLabel}" />
+                <TextBox x:Name="CommandBox" MinHeight="80" TextWrapping="Wrap" VerticalScrollBarVisibility="Auto" FontFamily="Consolas"
+                         AutomationProperties.Name="Console command"
+                         ToolTip="Enter a trusted Windows shell command with arguments. For Docker use a foreground command such as docker compose up. Detached containers run independently; stopping this service does not stop daemon-managed containers." />
+                <TextBlock Text="Tracks the command process. For Docker, use foreground docker compose up; detached -d commands complete after launch."
+                           Foreground="{DynamicResource MutedBrush}" FontSize="11" TextWrapping="Wrap" Margin="0,6,0,0" />
+            </StackPanel>
+        </ScrollViewer>
+        <TextBlock x:Name="ValidationText" Grid.Row="2" Visibility="Collapsed" Foreground="#FFAEA7" TextWrapping="Wrap"
+                   Margin="0,12,0,0" AutomationProperties.LiveSetting="Polite" />
+        <StackPanel Grid.Row="3" Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,18,0,0">
+            <Button Content="_Cancel" IsCancel="True" MinWidth="90" Margin="0,0,8,0" />
+            <Button x:Name="SaveButton" Content="_Save" Click="Save_Click" IsDefault="True" MinWidth="90"
+                    Background="{DynamicResource AccentBrush}" Foreground="#0C2925" />
+        </StackPanel>
+    </Grid>
+</Window>

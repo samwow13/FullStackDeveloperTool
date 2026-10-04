@@ -30,7 +30,17 @@ public partial class App : Application
             finally { _reportingUnexpectedError = false; }
         };
         base.OnStartup(e);
-        if (e.Args.Contains("--agent-mcp", StringComparer.OrdinalIgnoreCase))
+        if (e.Args.Contains("--service-output-drain", StringComparer.OrdinalIgnoreCase))
+        {
+            // A staged background helper keeps inherited service output pipes open
+            // after dashboard exit. It never opens windows or reads settings.
+            ShutdownMode = ShutdownMode.OnExplicitShutdown;
+            var exitCode = 1;
+            try { exitCode = Task.Run(() => Services.ServiceOutputDrain.RunAsync(e.Args)).GetAwaiter().GetResult(); }
+            catch (Exception) { /* Background pipe cleanup must never open an error dialog. */ }
+            finally { Shutdown(exitCode); }
+        }
+        else if (e.Args.Contains("--agent-mcp", StringComparer.OrdinalIgnoreCase))
         {
             // This is a separate stdio bridge process. It connects to an already-running
             // dashboard and never creates a service runner or reads the settings library.

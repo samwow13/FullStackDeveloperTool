@@ -15,7 +15,8 @@ public partial class MainWindow
 {
     private async void OpenServiceTool_Click(object sender, RoutedEventArgs e)
     {
-        if (sender is not Button button || ServiceFrom(sender) is not { } service || _closing) return;
+        e.Handled = true;
+        if (sender is not FrameworkElement button || ServiceFrom(sender) is not { } service || _closing) return;
         if (button.ContextMenu is { IsOpen: true }) return;
 
         // Keep the folder tied to this card even if selection changes during discovery.

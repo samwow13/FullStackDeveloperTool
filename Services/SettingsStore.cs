@@ -206,7 +206,7 @@ public sealed class SettingsStore
                     RequireJsonProperty(service, field, JsonValueKind.String, serviceLabel);
                 var kind = RequireJsonProperty(service, "kind", JsonValueKind.String, serviceLabel).GetString();
                 foreach (var field in new[] { "url", "uiPath" })
-                    if (!string.Equals(kind, "Console", StringComparison.OrdinalIgnoreCase) ||
+                    if (!ServiceProfile.IsProcessBasedKind(kind) ||
                         service.EnumerateObject().Any(property => property.Name.Equals(field, StringComparison.OrdinalIgnoreCase)))
                         RequireJsonProperty(service, field, JsonValueKind.String, serviceLabel);
             }
@@ -242,6 +242,8 @@ public sealed class SettingsStore
             settings.Layout.ConsoleShare = 0.47;
         if (!double.IsFinite(settings.Layout.ServicesHeightShare) || settings.Layout.ServicesHeightShare <= 0 || settings.Layout.ServicesHeightShare >= 1)
             settings.Layout.ServicesHeightShare = 0.35;
+        if (settings.Layout.CodexCrewVisibleAgents is not (0 or 1 or 2 or 3 or 4 or 6))
+            settings.Layout.CodexCrewVisibleAgents = 0;
         var toolIds = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         foreach (var tool in settings.DeveloperTools)
         {
@@ -256,7 +258,7 @@ public sealed class SettingsStore
         }
         var projectIds = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         var serviceIds = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        var serviceFolders = new List<(string Path, string Label)>();
+        var serviceFolders = new List<(string Path, string Label, string ProjectId, ServiceProfile Service)>();
         foreach (var project in settings.Projects)
         {
             if (project == null) throw new ArgumentException("A project entry cannot be null.");
@@ -265,11 +267,7 @@ public sealed class SettingsStore
             if (!projectIds.Add(project.Id)) throw new ArgumentException($"Duplicate project ID: {project.Id}.");
             Require(project.RootPath, $"Root folder for '{project.Name}'");
             ValidatePath(project.RootPath, $"Root folder for '{project.Name}'");
-            if (project.Database is { } database)
-            {
-                Require(database.SourceId, $"Database connection source for '{project.Name}'");
-                Require(database.DatabaseName, $"Database name for '{project.Name}'");
-            }
+            var projectRoot = Path.GetFullPath(project.RootPath, settingsDirectory);
             if (project.Services == null) throw new ArgumentException($"Services for '{project.Name}' must be an array.");
             foreach (var service in project.Services)
             {
@@ -279,38 +277,45 @@ public sealed class SettingsStore
                 if (!serviceIds.Add(service.Id)) throw new ArgumentException($"Duplicate service ID: {service.Id}.");
                 var label = $"'{project.Name}' / '{service.Name}'";
                 Require(service.Kind, $"Service kind for {label}");
-                if (service.ProductionDatabase is { } productionDatabase)
-                {
-                    Require(productionDatabase.SourceId, $"Production database connection source for {label}");
-                    Require(productionDatabase.DatabaseName, $"Production database name for {label}");
-                }
-                if (service.ComparisonLocalSourceId is not null)
-                {
-                    Require(service.ComparisonLocalSourceId, $"Comparison Local connection source for {label}");
-                    if (service.ProductionDatabase is null)
-                        throw new ArgumentException($"Comparison set for {label} needs a production database.");
-                }
                 Require(service.WorkingDirectory, $"Working folder for {label}");
                 ValidatePath(service.WorkingDirectory, $"Working folder for {label}");
-                var projectRoot = Path.GetFullPath(project.RootPath, settingsDirectory);
                 var serviceFolder = Path.TrimEndingDirectorySeparator(
                     Path.GetFullPath(service.WorkingDirectory, projectRoot));
                 foreach (var existing in serviceFolders)
                 {
+                    // A command service uses its own process identities and job rather than
+                    // adopting every process in its folder. Other services sharing that folder
+                    // also require managed identities, so same-project overlap is unambiguous.
+                    if (existing.ProjectId.Equals(project.Id, StringComparison.OrdinalIgnoreCase) &&
+                        (service.IsGenericConsole || service.IsCommandApi ||
+                         existing.Service.IsGenericConsole || existing.Service.IsCommandApi)) continue;
                     if (WorkingFoldersOverlap(serviceFolder, existing.Path))
                         throw new ArgumentException($"The working folders for {label} and {existing.Label} overlap. " +
                             "Choose separate service folders, with neither inside the other, across all saved projects. " +
                             "This is required to identify and stop each service's processes reliably.");
                 }
-                serviceFolders.Add((serviceFolder, label));
+                serviceFolders.Add((serviceFolder, label, project.Id, service));
                 Require(service.StartCommand, $"Start command for {label}");
+                service.ConsoleType = service.IsGenericConsole && !string.IsNullOrWhiteSpace(service.ConsoleType)
+                    ? service.ConsoleType.Trim() : null;
+                service.ApiType = service.Kind.Equals("API", StringComparison.OrdinalIgnoreCase) &&
+                    !string.IsNullOrWhiteSpace(service.ApiType) ? service.ApiType.Trim() : null;
+                if (service.IsCommandApi)
+                {
+                    service.Kind = "API";
+                    if (service.ApiConfiguration is not null)
+                        throw new ArgumentException($"API {label} cannot use managed .NET configuration. Use its start command and arguments instead.");
+                }
                 if (service.IsConsole)
                 {
-                    service.Kind = "Console";
+                    service.Kind = service.Kind.ToLowerInvariant() switch
+                    {
+                        "dart" => "Dart", "flutter" => "Flutter", _ => "Console"
+                    };
                     service.Url = "";
                     service.UiPath = "";
                     if (service.ApiConfiguration is not null)
-                        throw new ArgumentException($"Console app {label} cannot use API configuration. Use its start command and arguments instead.");
+                        throw new ArgumentException($"{service.Kind} app {label} cannot use API configuration. Use its start command and arguments instead.");
                 }
                 else if (!IsLocalUrl(service.Url))
                     throw new ArgumentException($"URL for {label} must be an http:// or https:// loopback URL (localhost, 127.0.0.1, or [::1]).");
@@ -326,6 +331,11 @@ public sealed class SettingsStore
                     throw new ArgumentException("A service address appears to contain a credential. Use a sign-in flow or an external credential provider instead of storing secrets in URLs.");
                 if (service.ApiConfiguration is { } configuration && configuration.Environment is not ("Local" or "Prod"))
                     throw new ArgumentException($"API configuration for {label} must be Local or Prod.");
+                if (service.ApiConfiguration is { } launchConfiguration)
+                {
+                    try { ApiLaunchConfiguration.ValidateLaunchCommand(launchConfiguration.LaunchCommand); }
+                    catch (InvalidOperationException ex) { throw new ArgumentException(ex.Message); }
+                }
             }
             foreach (var frontend in project.Services)
             {
@@ -376,7 +386,7 @@ public sealed class SettingsStore
 
     internal static bool IsLinkableApiService(ServiceProfile service) =>
         !service.IsConsole && IsLocalUrl(service.Url) &&
-        (service.Kind.Equals(".NET", StringComparison.OrdinalIgnoreCase) || service.ApiConfiguration is not null);
+        (service.IsCommandApi || service.Kind.Equals(".NET", StringComparison.OrdinalIgnoreCase) || service.ApiConfiguration is not null);
 
     internal static bool IsLocalUrl(string? value) =>
         Uri.TryCreate(value, UriKind.Absolute, out var uri) &&

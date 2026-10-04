@@ -22,6 +22,7 @@
 **/*.json.*.bak
 **/*.json.*.tmp
 **/codex-monitor.settings.json*
+**/*.codex-crew-reset.json*
 **/project-tasks.json*
 **/*.project-tasks.json*
 **/window-snip-targets.json*

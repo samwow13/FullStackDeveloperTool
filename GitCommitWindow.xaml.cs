@@ -134,15 +134,15 @@ public partial class GitCommitWindow : Window
             case GitCommitMode.PrepareSync:
                 Title = "Merge locally";
                 Headline.Text = "Merge into your current branch";
-                Introduction.Text = $"Fetch and merge {_sourceLabel} into {_snapshot.Branch}. This action stays local and does not push.";
+                Introduction.Text = $"Recheck and merge the compared {_sourceLabel} into {_snapshot.Branch}. This action stays local and does not push.";
                 Submit.Content = "_Merge locally";
                 CreationHistory.Visibility = Visibility.Collapsed;
                 DestinationEditor.Visibility = Visibility.Collapsed;
                 BranchPreview.Visibility = Visibility.Collapsed;
                 Destination.Visibility = Visibility.Collapsed;
                 Scope.Text = changedFiles > 0
-                    ? $"Fetches the source first. If fetching fails, your local files and commits stay unchanged. After fetching succeeds, stages all {changedFiles:N0} changed files, including additions, modifications, and deletions, and makes a protective LOCAL checkpoint on the current branch before merging. The merge commit waits for your review. Use Commit all & push separately when you want to name a destination branch and publish your work." + exclusions
-                    : "Fetches the source first. If fetching fails, your local files and commits stay unchanged. After fetching succeeds, merges the source into the current branch. Your working tree is clean, so no protective checkpoint is needed. The merge commit waits for your review. Use Commit all & push separately when you want to name a destination branch and publish your work." + exclusions;
+                    ? $"Rechecks and fetches the exact source from the comparison first. If the branch or source changed, or fetching fails, stops before a checkpoint or merge. If incoming commits remain, stages all {changedFiles:N0} changed files, including additions, modifications, and deletions, and makes a protective LOCAL checkpoint on the current branch before merging. The merge commit waits for your review. Use Commit all & push separately when you want to name a destination branch and publish your work." + exclusions
+                    : "Rechecks and fetches the exact source from the comparison first. If the branch or source changed, or fetching fails, stops before a merge. If incoming commits remain, merges that source into the current branch. Your working tree is clean, so no protective checkpoint is needed. The merge commit waits for your review. Use Commit all & push separately when you want to name a destination branch and publish your work." + exclusions;
                 MessageBox.IsReadOnly = true;
                 MessagePreview.Header = "Review prepared checkpoint _message";
                 MessageHint.Text = "The protective checkpoint uses this prepared message automatically. A clean working tree needs no checkpoint.";

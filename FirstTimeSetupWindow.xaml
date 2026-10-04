@@ -1,0 +1,84 @@
+<Window x:Class="FullStackLauncher.FirstTimeSetupWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="First Time Setup" Icon="/Assets/launcher.ico"
+        Width="760" Height="620" MinWidth="520" MinHeight="430"
+        WindowStartupLocation="CenterOwner" Background="{StaticResource BackgroundBrush}"
+        Foreground="{StaticResource TextBrush}" Closing="OnClosing" PreviewKeyDown="OnPreviewKeyDown">
+    <Window.Resources>
+        <Style x:Key="SetupHeading" TargetType="TextBlock">
+            <Setter Property="FontWeight" Value="SemiBold"/>
+            <Setter Property="Margin" Value="0,0,0,6"/>
+            <Setter Property="TextWrapping" Value="Wrap"/>
+        </Style>
+        <Style x:Key="SetupCaption" TargetType="TextBlock">
+            <Setter Property="Foreground" Value="{StaticResource MutedBrush}"/>
+            <Setter Property="TextWrapping" Value="Wrap"/>
+            <Setter Property="Margin" Value="0,0,0,10"/>
+        </Style>
+        <Style x:Key="SetupPreview" TargetType="TextBox" BasedOn="{StaticResource {x:Type TextBox}}">
+            <Setter Property="IsReadOnly" Value="True"/>
+            <Setter Property="TextWrapping" Value="Wrap"/>
+            <Setter Property="VerticalScrollBarVisibility" Value="Auto"/>
+            <Setter Property="MinHeight" Value="100"/>
+            <Setter Property="MaxHeight" Value="190"/>
+            <Setter Property="FontFamily" Value="Consolas"/>
+            <Setter Property="FontSize" Value="11"/>
+            <Setter Property="Margin" Value="0,8,0,0"/>
+        </Style>
+    </Window.Resources>
+    <Grid Margin="20">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/><RowDefinition Height="*"/>
+            <RowDefinition Height="Auto"/><RowDefinition Height="Auto"/>
+        </Grid.RowDefinitions>
+        <TextBlock Text="Connect your agent to Full Stack Dev Tool. Add the instructions, then paste the setup prompt into your agent chat."
+                   Style="{StaticResource SetupCaption}" Margin="0,0,0,16"/>
+        <ScrollViewer Grid.Row="1" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
+            <StackPanel>
+                <TextBlock Text="1. Add instructions to AGENTS.md" Style="{StaticResource SetupHeading}"/>
+                <TextBlock Text="Copy this section into your existing AGENTS.md file. Keep your current instructions. If no file exists, create one in your project folder."
+                           Style="{StaticResource SetupCaption}"/>
+                <Button x:Name="CopyAgentsButton" Content="Copy _AGENTS.md content" Click="CopyAgents_Click"
+                        HorizontalAlignment="Left" Padding="12,7" AutomationProperties.Name="Copy AGENTS.md content"/>
+                <Expander Header="Preview instructions" Foreground="{StaticResource TextBrush}" Margin="0,8,0,18">
+                    <TextBox x:Name="AgentsBox" Style="{StaticResource SetupPreview}" AutomationProperties.Name="AGENTS.md instructions"/>
+                </Expander>
+
+                <TextBlock Text="2. Run first time setup" Style="{StaticResource SetupHeading}"/>
+                <TextBlock Text="Paste the prompt into your agent chat after adding the instructions. The agent can connect using local tools or enabled computer use; otherwise it gives you the exact setup steps."
+                           Style="{StaticResource SetupCaption}"/>
+                <Button Content="Copy setup _prompt" Click="CopyPrompt_Click" HorizontalAlignment="Left" Padding="12,7"
+                        Style="{StaticResource PrimaryButton}" AutomationProperties.Name="Copy first time setup prompt"/>
+                <Expander Header="Preview setup prompt" Foreground="{StaticResource TextBrush}" Margin="0,8,0,18">
+                    <TextBox x:Name="PromptBox" Style="{StaticResource SetupPreview}" AutomationProperties.Name="First time setup prompt"/>
+                </Expander>
+
+                <Border Background="{StaticResource CardBrush}" BorderBrush="{StaticResource BorderBrush}"
+                        BorderThickness="1" CornerRadius="7" Padding="12">
+                    <StackPanel>
+                        <TextBlock Text="Using Codex? Connect directly" Style="{StaticResource SetupHeading}"/>
+                        <TextBlock Text="Adds fullStackLauncher after checking existing Codex MCP entries. Conflicts need manual review. Avoid editing MCP settings elsewhere while connecting. Reconnect your agent chat afterward."
+                                   Style="{StaticResource SetupCaption}"/>
+                        <Button x:Name="ConnectButton" Content="_Connect Codex" Click="Connect_Click" HorizontalAlignment="Left"
+                                Padding="12,7" AutomationProperties.Name="Connect Codex MCP"/>
+                    </StackPanel>
+                </Border>
+                <Expander Header="Manual connection details" Foreground="{StaticResource TextBrush}" Margin="0,12,0,0">
+                    <StackPanel>
+                        <TextBox x:Name="ManualBox" Style="{StaticResource SetupPreview}" AutomationProperties.Name="Manual MCP connection details"/>
+                        <Button Content="Copy _connection details" Click="CopyManual_Click" HorizontalAlignment="Left" Padding="12,7" Margin="0,8,0,0"/>
+                        <TextBox x:Name="CommandBox" Style="{StaticResource SetupPreview}" MinHeight="65" MaxHeight="110"
+                                 AutomationProperties.Name="Codex PowerShell registration command"/>
+                        <Button Content="Copy PowerShell co_mmand" Click="CopyCommand_Click" HorizontalAlignment="Left" Padding="12,7" Margin="0,8,0,0"/>
+                    </StackPanel>
+                </Expander>
+            </StackPanel>
+        </ScrollViewer>
+        <TextBlock x:Name="StatusText" Grid.Row="2" Text="Keep this dashboard open. Verify the connection with launcher_projects in your agent chat."
+                   Foreground="{StaticResource MutedBrush}" TextWrapping="Wrap" Margin="0,14,0,12"
+                   AutomationProperties.LiveSetting="Polite"/>
+        <Button x:Name="CloseButton" Grid.Row="3" Content="_Close" Click="Close_Click" IsCancel="True"
+                HorizontalAlignment="Right" MinWidth="82" Padding="12,7"/>
+    </Grid>
+</Window>

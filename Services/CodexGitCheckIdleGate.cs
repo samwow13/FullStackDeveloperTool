@@ -141,8 +141,9 @@ public sealed class CodexGitCheckIdleState
 
         var running = agents.Count(agent => agent.State == AgentRunState.Running);
         var waiting = agents.Count(agent => agent.State == AgentRunState.Waiting);
-        if (running + waiting > 0)
-            return Block($"Waiting for all local Codex agents: {running} running · {waiting} queued or waiting.");
+        var needsInput = agents.Count(agent => agent.State == AgentRunState.NeedsInput);
+        if (running + waiting + needsInput > 0)
+            return Block($"Waiting for all local Codex agents: {running} running · {waiting} queued or waiting · {needsInput} need an answer.");
         if (agents.Any(agent => agent.State == AgentRunState.Unknown))
             return Block("Local Codex status is unknown; Git check queued.");
         if (_unresolvedAgentIds.Any(id => !current.TryGetValue(id, out var agent) ||
@@ -190,7 +191,7 @@ public sealed class CodexGitCheckIdleState
     }
 
     private static bool BlocksIdle(AgentRunState state) =>
-        state is AgentRunState.Running or AgentRunState.Waiting or AgentRunState.Unknown;
+        state is AgentRunState.Running or AgentRunState.Waiting or AgentRunState.NeedsInput or AgentRunState.Unknown;
 
     private static bool IsTerminal(AgentRunState state) =>
         state is AgentRunState.Completed or AgentRunState.Failed or AgentRunState.Idle;

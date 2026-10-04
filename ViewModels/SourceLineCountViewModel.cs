@@ -11,6 +11,25 @@ public sealed class SourceLineCountViewModel : ObservableObject
 
     public bool HasLoaded { get; private set; }
     public bool CanCount => !_loading && !_counting;
+    public bool IsBusy => _loading || _counting;
+    public bool HasError => _error is not null;
+    public string Error => _error ?? "";
+    public string CountButtonLabel => _loading ? "Loading…" : _counting ? "Counting…"
+        : _snapshot is null ? "Count" : "Recount";
+    public string Value
+    {
+        get
+        {
+            if (IsBusy || _snapshot is null) return "—";
+            var value = $"{_snapshot.Current.Lines:N0}";
+            if (!_snapshot.HasCurrentScope) return value + " · recount";
+            if (_snapshot.PreviousLines is { } previous)
+                value += $" · {_snapshot.Current.Lines - previous:+#,0;-#,0;0}";
+            return value;
+        }
+    }
+    public string AverageValue => !HasAverage || IsBusy || _snapshot!.Current.Files == 0
+        ? "—" : $"{(decimal)_snapshot.Current.Lines / _snapshot.Current.Files:N1}";
     public bool IsVisible => _snapshot is not null || _loading || _counting || _error is not null;
     public bool HasAverage => _snapshot?.HasCurrentScope == true;
     public string AverageSummary => !HasAverage ? "" : _snapshot!.Current.Files == 0
@@ -57,7 +76,7 @@ public sealed class SourceLineCountViewModel : ObservableObject
                         : "\nBaseline for current exclusions; no previous value to compare.";
                 }
             }
-            if (_counting) detail += "\n\nCounting this service's configured folder. The previous count stays visible until the new count is saved.";
+            if (_counting) detail += "\n\nCounting this service's configured folder. The new values appear after the count is saved.";
             if (_error is not null) detail += "\n\n" + _error;
             return detail;
         }
@@ -108,6 +127,12 @@ public sealed class SourceLineCountViewModel : ObservableObject
     private void Notify()
     {
         Changed(nameof(CanCount));
+        Changed(nameof(IsBusy));
+        Changed(nameof(HasError));
+        Changed(nameof(Error));
+        Changed(nameof(CountButtonLabel));
+        Changed(nameof(Value));
+        Changed(nameof(AverageValue));
         Changed(nameof(IsVisible));
         Changed(nameof(HasAverage));
         Changed(nameof(AverageSummary));

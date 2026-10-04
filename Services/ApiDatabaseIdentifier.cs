@@ -8,9 +8,21 @@ namespace FullStackLauncher.Services;
 /// </summary>
 internal static class ApiDatabaseIdentifier
 {
+    public const string ConnectionPrefix = "ConnectionStrings:";
+    public const string DefaultConnectionStringKey = "DefaultConnectionString";
+
+    /// <summary>Includes the conventional root setting used by work APIs and standard .NET sections.</summary>
+    public static bool IsConnectionKey(string key) =>
+        key.Equals(DefaultConnectionStringKey, StringComparison.OrdinalIgnoreCase) ||
+        key.StartsWith(ConnectionPrefix, StringComparison.OrdinalIgnoreCase);
+
+    public static int ConnectionKeyPriority(string key) => key.Equals(DefaultConnectionStringKey, StringComparison.OrdinalIgnoreCase) ? 0
+        : key.Equals(ConnectionPrefix + DefaultConnectionStringKey, StringComparison.OrdinalIgnoreCase) ? 1
+        : key.Equals(ConnectionPrefix + "DefaultConnection", StringComparison.OrdinalIgnoreCase) ? 2 : 3;
+
     public static string? FromConnectionOverrides(IReadOnlyDictionary<string, string> values)
     {
-        var connections = values.Where(pair => pair.Key.StartsWith("ConnectionStrings:", StringComparison.OrdinalIgnoreCase))
+        var connections = values.Where(pair => IsConnectionKey(pair.Key))
             .Select(pair => pair.Value).ToArray();
         if (connections.Length == 0) return null;
 

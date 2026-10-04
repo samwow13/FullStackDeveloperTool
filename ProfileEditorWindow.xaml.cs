@@ -18,9 +18,20 @@ public partial class ProfileEditorWindow : Window
     private readonly ObservableCollection<ServiceProfile> _services;
     private bool _updatingApiTargetOptions;
     public ProjectProfile Result { get; private set; }
+    public ProjectProfile Draft
+    {
+        get
+        {
+            var draft = Clone(Result);
+            draft.Name = ProjectNameBox.Text.Trim();
+            draft.RootPath = RootPathBox.Text.Trim();
+            draft.Services = _services.Select(CloneService).ToList();
+            return draft;
+        }
+    }
 
     public ProfileEditorWindow(ProjectProfile profile, string settingsDirectory,
-        IReadOnlyList<ProjectProfile>? savedProjects = null)
+        IReadOnlyList<ProjectProfile>? savedProjects = null, bool isSetupReview = false)
     {
         InitializeComponent();
         _settingsDirectory = Path.GetFullPath(settingsDirectory);
@@ -29,6 +40,17 @@ public partial class ProfileEditorWindow : Window
         _services = new ObservableCollection<ServiceProfile>(Result.Services);
         ProjectNameBox.Text = Result.Name;
         RootPathBox.Text = Result.RootPath;
+        if (isSetupReview)
+        {
+            Title = "Review commands";
+            SetupStepText.Visibility = Visibility.Visible;
+            ProfileHeadingText.Text = "Review commands";
+            ProfileHelpText.Text = "Check each service, then save your project.";
+            CancelButton.Content = "Back";
+            ProjectNameBox.IsReadOnly = true;
+            RootPathBox.IsReadOnly = true;
+            BrowseRootButton.IsEnabled = false;
+        }
         SettingsLocationText.Text = $"Relative paths start at: {_settingsDirectory}";
         ServicesList.ItemsSource = _services;
         ServicesList.SelectedItem = _services.FirstOrDefault();
@@ -52,11 +74,26 @@ public partial class ProfileEditorWindow : Window
 
     private void UpdateServiceKindFields()
     {
-        if (WebSettingsPanel == null || ConsoleCommandHelp == null || OptionalCommandsExpander == null || ApiTargetPanel == null) return;
+        if (WebSettingsPanel == null || ConsoleCommandHelp == null || ConsoleTypePanel == null || ProcessCommandHelp == null || ApiTypePanel == null || ApiCommandHelp == null || OptionalCommandsExpander == null || ApiTargetPanel == null) return;
         var isConsole = ServiceForm.DataContext is ServiceProfile { IsConsole: true };
+        var isConsoleKind = ServiceForm.DataContext is ServiceProfile service && service.Kind.Equals("Console", StringComparison.OrdinalIgnoreCase);
+        var isApiKind = ServiceForm.DataContext is ServiceProfile api && api.Kind.Equals("API", StringComparison.OrdinalIgnoreCase);
+        var isCommandApi = ServiceForm.DataContext is ServiceProfile { IsCommandApi: true };
+        var managedApi = ServiceForm.DataContext is ServiceProfile { ApiConfiguration: not null, IsConsole: false, IsCommandApi: false };
+        StartCommandLabel.Text = managedApi ? "API launch command" : "Start command";
+        System.Windows.Automation.AutomationProperties.SetName(StartCommandBox, StartCommandLabel.Text);
+        StartCommandBox.SetBinding(TextBox.TextProperty, new Binding(managedApi ? "ApiConfiguration.LaunchCommand" : "StartCommand")
+        {
+            Mode = BindingMode.TwoWay, UpdateSourceTrigger = UpdateSourceTrigger.PropertyChanged,
+            TargetNullValue = managedApi ? ApiLaunchConfiguration.DefaultLaunchCommand : ""
+        });
+        ManagedCommandHelpText.Visibility = managedApi ? Visibility.Visible : Visibility.Collapsed;
         WebSettingsPanel.Visibility = isConsole ? Visibility.Collapsed : Visibility.Visible;
-        ConsoleCommandHelp.Visibility = isConsole ? Visibility.Visible : Visibility.Collapsed;
-        OptionalCommandsExpander.IsExpanded = !isConsole;
+        ConsoleCommandHelp.Visibility = isConsoleKind ? Visibility.Visible : Visibility.Collapsed;
+        ConsoleTypePanel.Visibility = isConsoleKind ? Visibility.Visible : Visibility.Collapsed;
+        ApiTypePanel.Visibility = isApiKind ? Visibility.Visible : Visibility.Collapsed;
+        ApiCommandHelp.Visibility = isCommandApi ? Visibility.Visible : Visibility.Collapsed;
+        ProcessCommandHelp.Visibility = isConsole && !isConsoleKind ? Visibility.Visible : Visibility.Collapsed;
         UpdateApiTargetOptions();
     }
 
@@ -125,7 +162,19 @@ public partial class ProfileEditorWindow : Window
         var service = new ServiceProfile
         {
             Name = "Console app", Kind = "Console", WorkingDirectory = ".",
-            StartCommand = "dotnet run", Url = "", UiPath = ""
+            StartCommand = "", Url = "", UiPath = ""
+        };
+        _services.Add(service);
+        ServicesList.SelectedItem = service;
+        ServicesList.ScrollIntoView(service);
+    }
+
+    private void AddApi_Click(object sender, RoutedEventArgs e)
+    {
+        var service = new ServiceProfile
+        {
+            Name = "API", Kind = "API", ApiType = "Custom API", WorkingDirectory = ".",
+            StartCommand = "", Url = "http://127.0.0.1:8000", UiPath = "/"
         };
         _services.Add(service);
         ServicesList.SelectedItem = service;
@@ -248,21 +297,18 @@ public partial class ProfileEditorWindow : Window
     {
         // Commit the editable type even when Enter invokes the default Save button.
         ServiceKindBox.GetBindingExpression(ComboBox.TextProperty)?.UpdateSource();
-        var candidate = new ProjectProfile
-        {
-            Id = Result.Id,
-            Name = ProjectNameBox.Text.Trim(),
-            RootPath = RootPathBox.Text.Trim(),
-            IsArchived = Result.IsArchived,
-            AutoRestartAfterAgentsEnabled = Result.AutoRestartAfterAgentsEnabled,
-            AutoRestartWatchPath = Result.AutoRestartWatchPath,
-            Database = Result.Database,
-            Services = _services.Select(CloneService).ToList()
-        };
+        ConsoleTypeBox.GetBindingExpression(ComboBox.TextProperty)?.UpdateSource();
+        ApiTypeBox.GetBindingExpression(ComboBox.TextProperty)?.UpdateSource();
+        var candidate = Draft;
         foreach (var service in candidate.Services)
         {
             service.Name = service.Name.Trim();
             service.Kind = service.Kind.Trim();
+            service.ConsoleType = service.Kind.Equals("Console", StringComparison.OrdinalIgnoreCase) &&
+                !string.IsNullOrWhiteSpace(service.ConsoleType) && !service.ConsoleType.Trim().Equals("Console", StringComparison.OrdinalIgnoreCase)
+                ? service.ConsoleType.Trim() : null;
+            service.ApiType = service.Kind.Equals("API", StringComparison.OrdinalIgnoreCase) &&
+                !string.IsNullOrWhiteSpace(service.ApiType) ? service.ApiType.Trim() : null;
             service.WorkingDirectory = service.WorkingDirectory.Trim();
             service.StartCommand = service.StartCommand.Trim();
             service.CleanCommand = service.CleanCommand.Trim();
@@ -273,7 +319,7 @@ public partial class ProfileEditorWindow : Window
                 ? service.ApiTargetServiceId?.Trim() : null;
             if (!service.Kind.Equals("Angular", StringComparison.OrdinalIgnoreCase))
                 service.DisableLegacyApiPortSync = false;
-            if (service.IsConsole) service.ApiConfiguration = null;
+            if (service.IsConsole || service.IsCommandApi) service.ApiConfiguration = null;
         }
         try
         {
@@ -312,6 +358,7 @@ public partial class ProfileEditorWindow : Window
         Id = profile.Id, Name = profile.Name, RootPath = profile.RootPath, IsArchived = profile.IsArchived,
         AutoRestartAfterAgentsEnabled = profile.AutoRestartAfterAgentsEnabled,
         AutoRestartWatchPath = profile.AutoRestartWatchPath,
+        SQLiteDatabasePath = profile.SQLiteDatabasePath,
         Database = profile.Database is { } database
             ? new() { SourceId = database.SourceId, DatabaseName = database.DatabaseName } : null,
         Services = profile.Services.Select(CloneService).ToList()
@@ -319,7 +366,7 @@ public partial class ProfileEditorWindow : Window
 
     private static ServiceProfile CloneService(ServiceProfile service) => new()
     {
-        Id = service.Id, Name = service.Name, Kind = service.Kind,
+        Id = service.Id, Name = service.Name, Kind = service.Kind, ConsoleType = service.ConsoleType, ApiType = service.ApiType,
         WorkingDirectory = service.WorkingDirectory, StartCommand = service.StartCommand,
         CleanCommand = service.CleanCommand, SetupCommand = service.SetupCommand,
         Url = service.Url, UiPath = service.UiPath, ApiTargetServiceId = service.ApiTargetServiceId,
@@ -329,6 +376,6 @@ public partial class ProfileEditorWindow : Window
             ? new() { SourceId = productionDatabase.SourceId, DatabaseName = productionDatabase.DatabaseName } : null,
         ComparisonLocalSourceId = service.ComparisonLocalSourceId,
         ApiConfiguration = service.ApiConfiguration is { } configuration
-            ? new() { Environment = configuration.Environment } : null
+            ? new() { Environment = configuration.Environment, LaunchCommand = configuration.LaunchCommand } : null
     };
 }

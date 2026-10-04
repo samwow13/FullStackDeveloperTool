@@ -303,7 +303,7 @@ public partial class CodexMonitorWindow : Window
             // New observed work supersedes retained markers even if their former
             // watched folder was removed. Do not resurrect those markers later.
             var activeIds = snapshots.Values.SelectMany(value => value)
-                .Where(agent => agent.State is AgentRunState.Running or AgentRunState.Waiting)
+                .Where(agent => agent.State is AgentRunState.Running or AgentRunState.Waiting or AgentRunState.NeedsInput)
                 .Select(agent => agent.Id).ToHashSet(StringComparer.Ordinal);
             foreach (var (path, watch) in _watches)
             {
@@ -332,12 +332,12 @@ public partial class CodexMonitorWindow : Window
             UpdateProgressDisplay();
             UpdateWatchedProjects();
             SaveCompletedIfChanged();
-            AgentList.ItemsSource = agentRows.OrderBy(a => a.State == AgentRunState.Running ? 0 : a.State == AgentRunState.Waiting ? 1 : a.State == AgentRunState.Unknown ? 2 : 3)
+            AgentList.ItemsSource = agentRows.OrderBy(a => a.RunState == AgentRunState.NeedsInput ? 0 : a.RunState == AgentRunState.Running ? 1 : a.RunState == AgentRunState.Waiting ? 2 : a.RunState == AgentRunState.Unknown ? 3 : 4)
                 .ThenBy(a => a.ProjectPath, StringComparer.OrdinalIgnoreCase).ThenBy(a => a.Title).ToArray();
             var ready = updates.Count(update => update.IsReminding);
             StatusText.Text = $"Watching {_watches.Count} project(s)" + (ready > 0 ? $" · {ready} ready" : "") +
                 (_preferences.ReminderSoundEnabled ? " · reminder sound on" : " · reminder sound off");
-            DetailText.Text = $"{updates.Sum(update => update.RunningCount)} running · {updates.Sum(update => update.WaitingCount)} queued / waiting · {agents.Length} local tasks and agents. Each project completes independently.";
+            DetailText.Text = $"{updates.Sum(update => update.RunningCount)} running · {updates.Sum(update => update.WaitingCount)} queued / waiting · {agents.Count(agent => agent.State == AgentRunState.NeedsInput)} needs answer · {agents.Length} local tasks and agents. Each project completes independently.";
             CheckedText.Text = $"Checked {DateTime.Now:HH:mm:ss} · polls every 5 seconds" +
                 (_preferences.ReminderSoundEnabled ? " · sound repeats every 60 seconds" : " · progress stays live while sound is off") +
                 (_settingsWarning ? " · preferences could not be saved" : "");
@@ -504,8 +504,11 @@ public partial class CodexMonitorWindow : Window
 
     }
 
-    private sealed record MonitoredAgentRow(string Title, AgentRunState State, string ProjectPath,
-        string ProjectName, string WorkingFolder, string EstimateText, string EstimateDetail);
+    private sealed record MonitoredAgentRow(string Title, AgentRunState RunState, string ProjectPath,
+        string ProjectName, string WorkingFolder, string EstimateText, string EstimateDetail)
+    {
+        public string State => RunState == AgentRunState.NeedsInput ? "Needs answer" : RunState.ToString();
+    }
 
     private void PlaySound()
     {
@@ -579,7 +582,7 @@ public partial class CodexMonitorWindow : Window
         _progressRows = _queueActivity.Rows.Concat(_watches.Values.SelectMany(watch => watch.Progress.Rows)
                 .Where(row => !_queueActivity.OwnedThreadIds.Contains(row.Id)))
             .DistinctBy(row => row.Id)
-            .OrderBy(row => row.State is AgentRunState.Running or AgentRunState.Waiting ? 0 : row.IsCompleted ? 1 : 2)
+            .OrderBy(row => row.State is AgentRunState.Running or AgentRunState.Waiting or AgentRunState.NeedsInput ? 0 : row.IsCompleted ? 1 : 2)
             .ThenByDescending(row => row.CompletedAt)
             .ThenBy(row => row.ProjectName, StringComparer.OrdinalIgnoreCase)
             .ThenBy(row => row.Title, StringComparer.OrdinalIgnoreCase).ToArray();

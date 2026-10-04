@@ -372,7 +372,7 @@ public partial class ApiSecretsWindow : Window
             ? "These values configure the local API when Prod is activated. They may connect it to production data and services."
             : "Edit encrypted overrides for the API's managed Development launches.";
         StoreReferenceText.Text = _snapshot is null ? "Windows-user encrypted configuration"
-            : $"Profile ID: {_snapshot.StoreId} · {(_snapshot.HasProtectedStore ? "encrypted store exists" : "not saved yet")}";
+            : $"{(_store.HasUserSecretsReference ? $"Profile ID: {_snapshot.StoreId}" : "Project-scoped encrypted configuration")} · {(_snapshot.HasProtectedStore ? "encrypted store exists" : "not saved yet")}";
         Title = _production ? "PROD — API configuration secrets" : "Local — API configuration secrets";
     }
 
@@ -393,7 +393,7 @@ public partial class ApiSecretsWindow : Window
         LocalButton.IsEnabled = !_busy && _production;
         ProdButton.IsEnabled = !_busy && !_production;
         ReloadButton.IsEnabled = !_busy;
-        ImportLegacyButton.IsEnabled = editable;
+        ImportLegacyButton.IsEnabled = editable && _store.HasUserSecretsReference;
         NewButton.IsEnabled = editable;
         CloseButton.IsEnabled = !_busy;
         ApplyButton.IsEnabled = editable && !string.IsNullOrWhiteSpace(KeyBox.Text)

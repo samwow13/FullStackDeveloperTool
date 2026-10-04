@@ -10,7 +10,8 @@ public sealed record CodexMonitorSnapshot(
 
 /// <summary>
 /// Reads internal local Codex metadata; this is not a supported public Codex API.
-/// No prompts, messages, credentials, or tool-result bodies are queried or exposed.
+/// Queries lifecycle, explicit question metadata, and reply identities read-only.
+/// Prompts, message text, answers, credentials, and tool-result bodies are never returned or exposed.
 /// Call from one background worker at a time, and treat any exception as lost status.
 /// </summary>
 public sealed class LocalCodexReader
@@ -51,14 +52,16 @@ public sealed class LocalCodexReader
     /// workspace paths. Retained identities keep archived terminal observations
     /// available to callers that previously saw those agents working.
     /// </summary>
-    public IReadOnlyList<AgentSnapshot> ReadAllSnapshot(IReadOnlyCollection<string>? retainedAgentIds = null) =>
-        ReadStatusCore([], readAll: true, retainedAgentIds: retainedAgentIds).Projects[string.Empty];
+    public IReadOnlyList<AgentSnapshot> ReadAllSnapshot(IReadOnlyCollection<string>? retainedAgentIds = null,
+        bool includeGuardians = true) =>
+        ReadStatusCore([], readAll: true, retainedAgentIds: retainedAgentIds,
+            includeGuardians: includeGuardians).Projects[string.Empty];
 
     public CodexMonitorSnapshot ReadStatus(IReadOnlyList<string> projectPaths) =>
         ReadStatusCore(projectPaths, readAll: false, null);
 
     private CodexMonitorSnapshot ReadStatusCore(IReadOnlyList<string> projectPaths,
-        bool readAll, IReadOnlyCollection<string>? retainedAgentIds)
+        bool readAll, IReadOnlyCollection<string>? retainedAgentIds, bool includeGuardians = true)
     {
         try
         {
@@ -179,8 +182,11 @@ public sealed class LocalCodexReader
             }
 
             using var history = new NativeSqlite(Path.Combine(_codexHome, "thread_history_1.sqlite"));
+            // Keep latest turns, questions, and their exact replies in one WAL
+            // read snapshot. Disposing this read-only connection ends it on failure.
+            history.Query("BEGIN");
             var latest = history.Query("""
-                SELECT t.thread_id, t.status, t.turn_id, t.completed_at
+                SELECT t.thread_id, t.status, t.turn_id, t.completed_at, t.started_at
                 FROM thread_turns t
                 INNER JOIN (
                     SELECT thread_id, MAX(rollout_ordinal) AS ordinal
@@ -201,43 +207,90 @@ public sealed class LocalCodexReader
 
                 // Duplicate latest ordinals are unexpected; never infer completion
                 // from only one of conflicting records.
-                var turn = new TurnMetadata(state, Required(row[2]), ReadCompletedAt(row[3]));
+                var turn = new TurnMetadata(state, Required(row[2]), ReadTimestamp(row[3]), ReadTimestamp(row[4]));
                 if (states.TryGetValue(id, out var prior) && prior != turn)
-                    turn = new TurnMetadata(AgentRunState.Unknown, null, null);
+                    turn = new TurnMetadata(AgentRunState.Unknown, null, null, null);
                 states[id] = turn;
             }
+            var pendingAsyncQuestions = ReadPendingAsyncQuestions(history);
+            history.Query("COMMIT");
 
             using var queue = new NativeSqlite(Path.Combine(_codexHome, "queue_1.sqlite"));
             var queued = queue.Query("SELECT DISTINCT thread_id FROM queued_items")
                 .Select(row => Required(row[0])).ToHashSet(StringComparer.Ordinal);
 
             if (readAll && (queued.Any(id => !threadsById.ContainsKey(id)) ||
+                pendingAsyncQuestions.Any(question => !threadsById.ContainsKey(question.ThreadId)) ||
                 states.Any(pair => !threadsById.ContainsKey(pair.Key) &&
-                    (pair.Value.State is AgentRunState.Running or AgentRunState.Waiting or AgentRunState.Unknown))))
+                    (pair.Value.State is AgentRunState.Running or AgentRunState.Waiting or AgentRunState.NeedsInput or AgentRunState.Unknown))))
                 throw Unavailable();
             var retained = retainedAgentIds?.ToHashSet(StringComparer.Ordinal);
+            var activeAncestors = new HashSet<string>(StringComparer.Ordinal);
+            if (readAll)
+            {
+                // Active spawned work still belongs to its user-started chat
+                // when Codex has archived a terminal ancestor. Return only those
+                // ancestor identities, with their own native lifecycle metadata.
+                foreach (var thread in threads)
+                {
+                    if (!includeGuardians && thread.Guardian) continue;
+                    var observedState = states.TryGetValue(thread.Id, out var observedTurn) ? observedTurn.State : AgentRunState.Unknown;
+                    var hasQuestion = observedTurn?.TurnId is { } questionTurn &&
+                        pendingAsyncQuestions.Contains((thread.Id, questionTurn));
+                    if (observedState is AgentRunState.Completed or AgentRunState.Failed or AgentRunState.Idle &&
+                        !queued.Contains(thread.Id) && !hasQuestion) continue;
+                    var parentId = thread.ParentId;
+                    var visited = new HashSet<string>(StringComparer.Ordinal) { thread.Id };
+                    while (!string.IsNullOrWhiteSpace(parentId) && visited.Add(parentId))
+                    {
+                        activeAncestors.Add(parentId);
+                        parentId = threadsById.TryGetValue(parentId, out var parent) ? parent.ParentId : null;
+                    }
+                }
+            }
 
             foreach (var thread in threads)
             {
+                if (readAll && !includeGuardians && thread.Guardian)
+                    continue;
                 if (!readAll && (thread.Archived || thread.Guardian || !owners.ContainsKey(thread.Id)))
                     continue;
+                RolloutObservation? lifecycle = null;
                 var state = states.TryGetValue(thread.Id, out var projected)
                     ? projected.State
-                    : ReadRolloutLifecycle(thread.RolloutPath, thread.HasUserEvent);
+                    : (lifecycle = ReadRolloutLifecycle(thread.RolloutPath, thread.HasUserEvent)).State;
                 if (queued.Contains(thread.Id) && state != AgentRunState.Running)
                     state = AgentRunState.Waiting;
+                // Async questions permit continued work. Raise the hand only once
+                // that turn stops working with an explicit question still unanswered.
+                if (projected?.State == AgentRunState.Completed && projected.TurnId is { } completedTurn &&
+                    pendingAsyncQuestions.Contains((thread.Id, completedTurn)))
+                    state = AgentRunState.NeedsInput;
+                if (state == AgentRunState.Running)
+                {
+                    lifecycle ??= ReadRolloutLifecycle(thread.RolloutPath, thread.HasUserEvent);
+                    var questionTurnId = projected?.TurnId ?? (lifecycle.ActivityIdentity is { } identity &&
+                        identity.StartsWith("turn:", StringComparison.Ordinal) ? identity[5..] : null);
+                    if (questionTurnId is not null && lifecycle.PendingQuestionTurns.Contains(questionTurnId))
+                        state = AgentRunState.NeedsInput;
+                }
 
                 // Archived work is not automatically idle. Keep every archived
                 // nonterminal/unknown row, and terminal rows explicitly retained
                 // by a caller; ordinary historical terminal rows add no activity.
                 if (readAll && thread.Archived &&
                     (state is AgentRunState.Completed or AgentRunState.Failed or AgentRunState.Idle) &&
-                    retained?.Contains(thread.Id) != true)
+                    retained?.Contains(thread.Id) != true && !activeAncestors.Contains(thread.Id))
                     continue;
 
                 var key = readAll ? string.Empty : owners[thread.Id].Key;
                 snapshots[key].Add(new AgentSnapshot(thread.Id, thread.Title, thread.ProjectPath, state,
-                    thread.ParentId, projected?.TurnId, projected?.CompletedAt));
+                    thread.ParentId, projected?.TurnId, projected?.CompletedAt)
+                {
+                    ActivityIdentity = projected?.TurnId is { Length: > 0 } turnId
+                        ? "turn:" + turnId : lifecycle?.ActivityIdentity,
+                    ActivityStartedAt = projected?.StartedAt ?? lifecycle?.StartedAt
+                });
             }
 
             if (!IsCodexRunning())
@@ -250,6 +303,81 @@ public sealed class LocalCodexReader
         {
             throw Unavailable();
         }
+    }
+
+    private static HashSet<(string ThreadId, string TurnId)> ReadPendingAsyncQuestions(NativeSqlite history)
+    {
+        // The native async tool becomes an agentMessage with questions. Its
+        // accepted tool result does not mean the human answered the question.
+        var questions = history.Query("""
+            WITH latest AS (
+                SELECT thread_id, MAX(rollout_ordinal) AS ordinal FROM thread_turns GROUP BY thread_id
+            )
+            SELECT i.thread_id, i.turn_id, i.item_id, i.rollout_ordinal,
+                   json_array_length(i.item_json, '$.questions')
+            FROM latest l
+            JOIN thread_turns t ON t.thread_id = l.thread_id AND t.rollout_ordinal = l.ordinal
+            JOIN thread_items i ON i.thread_id = t.thread_id AND i.turn_id = t.turn_id
+            WHERE t.status = 'completed' AND i.item_type = 'agentMessage'
+              AND json_extract(i.item_json, '$.delivery') = 'async'
+              AND json_array_length(i.item_json, '$.questions') > 0
+            """);
+        if (questions.Count == 0) return [];
+
+        var pending = new Dictionary<(string ThreadId, string TurnId, string CallId), PendingQuestion>();
+        foreach (var row in questions)
+        {
+            if (!long.TryParse(row[3], out var ordinal) || !int.TryParse(row[4], out var count) || count <= 0 || count > 100)
+                throw Unavailable();
+            pending.Add((Required(row[0]), Required(row[1]), Required(row[2])), new PendingQuestion(ordinal, count));
+        }
+
+        // Project only the encoded questionItemId from the exact native reply
+        // envelope. Neither question text nor answer text leaves SQLite.
+        var replies = history.Query("""
+            WITH latest AS (
+                SELECT thread_id, MAX(rollout_ordinal) AS ordinal FROM thread_turns GROUP BY thread_id
+            ), reply_parts AS (
+                SELECT i.thread_id, i.turn_id, i.rollout_ordinal,
+                       json_extract(c.value, '$.text') AS reply
+                FROM latest l
+                JOIN thread_turns t ON t.thread_id = l.thread_id AND t.rollout_ordinal = l.ordinal
+                JOIN thread_items i ON i.thread_id = t.thread_id AND i.turn_id = t.turn_id
+                JOIN json_each(i.item_json, '$.content') c
+                WHERE t.status = 'completed' AND i.item_type = 'userMessage'
+                  AND json_extract(c.value, '$.type') = 'text'
+            ), reply_json AS (
+                SELECT thread_id, turn_id, rollout_ordinal,
+                       substr(reply, length('<send_user_message_question_reply>') + 1,
+                           length(reply) - length('<send_user_message_question_reply>') -
+                           length('</send_user_message_question_reply>')) AS answer_json
+                FROM reply_parts
+                WHERE substr(reply, 1, length('<send_user_message_question_reply>')) = '<send_user_message_question_reply>'
+                  AND substr(reply, -length('</send_user_message_question_reply>')) = '</send_user_message_question_reply>'
+            )
+            SELECT q.thread_id, q.turn_id, q.rollout_ordinal, json_extract(r.value, '$.questionItemId')
+            FROM reply_json q
+            JOIN json_each(CASE WHEN json_valid(q.answer_json) THEN q.answer_json ELSE '[]' END) r
+            """);
+        foreach (var row in replies)
+        {
+            if (row[3] is null || !long.TryParse(row[2], out var ordinal)) continue;
+            try
+            {
+                using var encoded = JsonDocument.Parse(row[3]!);
+                var identity = encoded.RootElement;
+                if (identity.ValueKind != JsonValueKind.Array || identity.GetArrayLength() != 3 ||
+                    identity[0].ValueKind != JsonValueKind.String || identity[0].GetString() != "request_user_input_async" ||
+                    identity[1].ValueKind != JsonValueKind.String || identity[2].ValueKind != JsonValueKind.Number ||
+                    !identity[2].TryGetInt32(out var index)) continue;
+                if (pending.TryGetValue((Required(row[0]), Required(row[1]), Required(identity[1].GetString())), out var request) &&
+                    ordinal > request.Ordinal && index >= 0 && index < request.Count)
+                    request.AnsweredIndexes.Add(index);
+            }
+            catch (JsonException) { /* Unrecognized reply metadata cannot resolve a question. */ }
+        }
+        return pending.Where(pair => pair.Value.AnsweredIndexes.Count < pair.Value.Count)
+            .Select(pair => (pair.Key.ThreadId, pair.Key.TurnId)).ToHashSet();
     }
 
     private static string FindFamilyRoot(ThreadMetadata thread,
@@ -310,19 +438,19 @@ public sealed class LocalCodexReader
         return result;
     }
 
-    private AgentRunState ReadRolloutLifecycle(string rolloutPath, bool hasUserEvent)
+    private RolloutObservation ReadRolloutLifecycle(string rolloutPath, bool hasUserEvent)
     {
         // Older/migrated tasks may have no thread_turns projection. Inspect only
         // lifecycle discriminator fields in a bounded tail; never materialize
         // prompt, message, reasoning, or tool payload strings.
         var path = NormalizePath(rolloutPath);
         if (!IsWithin(path, _codexHome) || !File.Exists(path))
-            return AgentRunState.Unknown;
+            return new(AgentRunState.Unknown, null, null);
 
         var file = new FileInfo(path);
         if (_rolloutCache.TryGetValue(path, out var cached) && cached.Length == file.Length && cached.Modified == file.LastWriteTimeUtc &&
-            !(cached.State == AgentRunState.Idle && hasUserEvent))
-            return cached.State;
+            !(cached.Observation.State == AgentRunState.Idle && hasUserEvent))
+            return cached.Observation;
 
         using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
         var offset = Math.Max(0, stream.Length - MaximumRolloutTail);
@@ -338,8 +466,11 @@ public sealed class LocalCodexReader
         }
 
         var state = AgentRunState.Unknown;
+        string? activityIdentity = null;
+        DateTimeOffset? startedAt = null;
         var idleCandidate = !hasUserEvent && offset == 0 && count == bytes.Length && count > 0;
         var malformed = false;
+        var pendingQuestions = new Dictionary<string, string>(StringComparer.Ordinal);
         var lineStart = 0;
         if (offset > 0)
         {
@@ -363,7 +494,33 @@ public sealed class LocalCodexReader
             }
 
             idleCandidate &= record.RecordType is "session_meta" or "realtime_item";
-            state = (record.RecordType == "event_msg" ? record.PayloadType : null) switch
+            var lifecycleType = record.RecordType == "event_msg" ? record.PayloadType : null;
+            if (record.RecordType == "turn_context" || lifecycleType is "task_started" or "task_complete" or "turn_aborted")
+                pendingQuestions.Clear();
+            if (record.RecordType == "response_item" && record.PayloadType == "function_call" &&
+                record.ToolName is "request_user_input" or "functions.request_user_input" &&
+                record.CallId is { Length: > 0 } callId &&
+                (record.ToolTurnId ?? (activityIdentity is { } currentIdentity && currentIdentity.StartsWith("turn:", StringComparison.Ordinal)
+                    ? currentIdentity[5..] : null)) is { Length: > 0 } toolTurnId)
+                pendingQuestions[callId] = toolTurnId;
+            else if (record.RecordType == "response_item" && record.PayloadType == "function_call_output" &&
+                     record.CallId is { } completedCall)
+                pendingQuestions.Remove(completedCall);
+            if (lifecycleType == "task_started")
+            {
+                activityIdentity = !string.IsNullOrWhiteSpace(record.TurnId)
+                    ? "turn:" + record.TurnId
+                    : "start:" + (offset + lineStart).ToString(System.Globalization.CultureInfo.InvariantCulture);
+                startedAt = record.Timestamp;
+            }
+            else if (lifecycleType is "task_complete" or "turn_aborted" &&
+                     !string.IsNullOrWhiteSpace(record.TurnId))
+            {
+                var terminalIdentity = "turn:" + record.TurnId;
+                if (activityIdentity != terminalIdentity) startedAt = null;
+                activityIdentity = terminalIdentity;
+            }
+            state = lifecycleType switch
             {
                 "task_started" => AgentRunState.Running,
                 "task_complete" => AgentRunState.Completed,
@@ -375,7 +532,11 @@ public sealed class LocalCodexReader
 
         Array.Clear(bytes);
         if (malformed || lineStart != count || count != bytes.Length)
+        {
             state = AgentRunState.Unknown;
+            activityIdentity = null;
+            startedAt = null;
+        }
         else if (idleCandidate && DateTime.UtcNow - file.LastWriteTimeUtc >= TimeSpan.FromMinutes(1))
             state = AgentRunState.Idle;
 
@@ -383,13 +544,26 @@ public sealed class LocalCodexReader
         var modifiedBefore = file.LastWriteTimeUtc;
         file.Refresh();
         if (file.Length != lengthBefore || file.LastWriteTimeUtc != modifiedBefore)
-            return AgentRunState.Unknown;
+            return new(AgentRunState.Unknown, null, null);
+
+        // A bounded tail can lose the start marker. Null is deliberately not new
+        // activity evidence; never substitute file length or modification time.
+        if (state == AgentRunState.Unknown)
+        {
+            activityIdentity = null;
+            startedAt = null;
+        }
+        else if (activityIdentity is not null && cached is not null && cached.Observation.ActivityIdentity == activityIdentity)
+            startedAt ??= cached.Observation.StartedAt;
+        var observation = new RolloutObservation(state, activityIdentity, startedAt);
+        if (!malformed && lineStart == count && count == bytes.Length)
+            observation = observation with { PendingQuestionTurns = pendingQuestions.Values.ToHashSet(StringComparer.Ordinal) };
 
         // Revisit Unknown even without a file change: a brand-new empty voice
         // session must pass the quiet period before it can be classified as idle.
-        if (state != AgentRunState.Unknown)
-            _rolloutCache[path] = new RolloutCache(file.Length, file.LastWriteTimeUtc, state);
-        return state;
+        if (state != AgentRunState.Unknown || observation.PendingQuestionTurns.Count > 0)
+            _rolloutCache[path] = new RolloutCache(file.Length, file.LastWriteTimeUtc, observation);
+        return observation;
     }
 
     private static LifecycleRecord ReadLifecycleLine(ReadOnlySpan<byte> line)
@@ -397,16 +571,28 @@ public sealed class LocalCodexReader
         var reader = new Utf8JsonReader(line);
         string? recordType = null;
         string? payloadType = null;
+        string? turnId = null;
+        string? toolName = null;
+        string? callId = null;
+        string? toolTurnId = null;
+        DateTimeOffset? timestamp = null;
         while (reader.Read())
         {
             if (reader.TokenType != JsonTokenType.PropertyName || reader.CurrentDepth != 1)
                 continue;
             var isType = reader.ValueTextEquals("type"u8);
             var isPayload = reader.ValueTextEquals("payload"u8);
+            var isTimestamp = reader.ValueTextEquals("timestamp"u8);
             if (!reader.Read())
                 throw new JsonException();
             if (isType && reader.TokenType == JsonTokenType.String)
                 recordType = reader.GetString();
+            else if (isTimestamp && reader.TokenType == JsonTokenType.String)
+            {
+                if (DateTimeOffset.TryParse(reader.GetString(), System.Globalization.CultureInfo.InvariantCulture,
+                        System.Globalization.DateTimeStyles.AssumeUniversal, out var parsed))
+                    timestamp = parsed;
+            }
             else if (isPayload && reader.TokenType == JsonTokenType.StartObject)
             {
                 while (reader.Read() && reader.TokenType != JsonTokenType.EndObject)
@@ -414,10 +600,32 @@ public sealed class LocalCodexReader
                     if (reader.TokenType != JsonTokenType.PropertyName)
                         continue;
                     var isPayloadType = reader.ValueTextEquals("type"u8);
+                    var isTurnId = reader.ValueTextEquals("turn_id"u8);
+                    var isName = reader.ValueTextEquals("name"u8);
+                    var isCallId = reader.ValueTextEquals("call_id"u8);
+                    var isMetadata = reader.ValueTextEquals("internal_chat_message_metadata_passthrough"u8);
                     if (!reader.Read())
                         throw new JsonException();
                     if (isPayloadType && reader.TokenType == JsonTokenType.String)
                         payloadType = reader.GetString();
+                    else if (isName && reader.TokenType == JsonTokenType.String && recordType == "response_item")
+                        toolName = reader.GetString();
+                    else if (isCallId && reader.TokenType == JsonTokenType.String && recordType == "response_item")
+                        callId = reader.GetString();
+                    else if (isMetadata && reader.TokenType == JsonTokenType.StartObject && recordType == "response_item")
+                    {
+                        while (reader.Read() && reader.TokenType != JsonTokenType.EndObject)
+                        {
+                            if (reader.TokenType != JsonTokenType.PropertyName) continue;
+                            var isMetadataTurn = reader.ValueTextEquals("turn_id"u8);
+                            if (!reader.Read()) throw new JsonException();
+                            if (isMetadataTurn && reader.TokenType == JsonTokenType.String) toolTurnId = reader.GetString();
+                            else reader.Skip();
+                        }
+                    }
+                    else if (isTurnId && reader.TokenType == JsonTokenType.String && recordType == "event_msg" &&
+                             payloadType is "task_started" or "task_complete" or "turn_aborted")
+                        turnId = reader.GetString();
                     else
                         reader.Skip();
                 }
@@ -428,7 +636,10 @@ public sealed class LocalCodexReader
 
         if (recordType is null || reader.CurrentDepth != 0)
             throw new JsonException();
-        return new LifecycleRecord(recordType, payloadType);
+        var isLifecycle = recordType == "event_msg" &&
+            payloadType is "task_started" or "task_complete" or "turn_aborted";
+        return new LifecycleRecord(recordType, payloadType,
+            isLifecycle ? turnId : null, isLifecycle ? timestamp : null, toolName, callId, toolTurnId);
     }
 
     private static string? FindParent(JsonElement element)
@@ -517,7 +728,7 @@ public sealed class LocalCodexReader
 
     private static string Required(string? value) => string.IsNullOrWhiteSpace(value) ? throw Unavailable() : value;
 
-    private static DateTimeOffset? ReadCompletedAt(string? value)
+    private static DateTimeOffset? ReadTimestamp(string? value)
     {
         if (value is null)
             return null;
@@ -537,7 +748,16 @@ public sealed class LocalCodexReader
     private sealed record ThreadMetadata(string Id, string ProjectPath, string Title, string? ParentId, string RolloutPath, bool Archived, bool Guardian, bool HasUserEvent);
     private sealed record WatchedProject(string Key, string Path, int Order, HashSet<string> Repositories);
     private sealed record ProjectMatch(WatchedProject Project, int Kind, int Specificity);
-    private sealed record TurnMetadata(AgentRunState State, string? TurnId, DateTimeOffset? CompletedAt);
-    private sealed record LifecycleRecord(string RecordType, string? PayloadType);
-    private sealed record RolloutCache(long Length, DateTime Modified, AgentRunState State);
+    private sealed record TurnMetadata(AgentRunState State, string? TurnId, DateTimeOffset? CompletedAt, DateTimeOffset? StartedAt);
+    private sealed record LifecycleRecord(string RecordType, string? PayloadType, string? TurnId, DateTimeOffset? Timestamp,
+        string? ToolName, string? CallId, string? ToolTurnId);
+    private sealed record RolloutObservation(AgentRunState State, string? ActivityIdentity, DateTimeOffset? StartedAt)
+    {
+        public IReadOnlySet<string> PendingQuestionTurns { get; init; } = new HashSet<string>(StringComparer.Ordinal);
+    }
+    private sealed record PendingQuestion(long Ordinal, int Count)
+    {
+        public HashSet<int> AnsweredIndexes { get; } = [];
+    }
+    private sealed record RolloutCache(long Length, DateTime Modified, RolloutObservation Observation);
 }

@@ -1,0 +1,40 @@
+<Window x:Class="FullStackLauncher.ApiLaunchProfileWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="API launch profile" Icon="/Assets/launcher.ico"
+        Width="680" Height="490" MinWidth="520" MinHeight="430"
+        WindowStartupLocation="CenterOwner" Background="{StaticResource BackgroundBrush}"
+        Foreground="{StaticResource TextBrush}" Loaded="OnLoaded" Closing="OnClosing" PreviewKeyDown="OnPreviewKeyDown">
+    <Grid Margin="20">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/><RowDefinition Height="*"/>
+            <RowDefinition Height="Auto"/><RowDefinition Height="Auto"/>
+        </Grid.RowDefinitions>
+        <TextBlock x:Name="ServiceHeading" FontWeight="SemiBold" FontSize="16" Margin="0,0,0,14" TextWrapping="Wrap"/>
+        <ScrollViewer Grid.Row="1" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
+            <StackPanel>
+                <TextBlock x:Name="LegacyNotice" Visibility="Collapsed" Foreground="{StaticResource MutedBrush}" TextWrapping="Wrap" Margin="0,0,0,12"/>
+                <Label Content="Launch _command" Target="{Binding ElementName=CommandBox}" Foreground="{StaticResource TextBrush}" Padding="0,0,0,6"/>
+                <TextBox x:Name="CommandBox" FontFamily="Consolas" MinHeight="68" MaxLength="4096"
+                         TextWrapping="Wrap" VerticalScrollBarVisibility="Auto" TextChanged="CommandChanged"
+                         AutomationProperties.Name="API launch command"
+                         ToolTip="dotnet run supports --configuration, --framework, --runtime, --verbosity, --arch, --os and --no-restore. Named .NET launch profiles, shell commands, application arguments and property overrides are unavailable with encrypted configuration."/>
+                <TextBlock Text="Encrypted configuration keeps the project, local URL and secret isolation under launcher control."
+                           Foreground="{StaticResource MutedBrush}" TextWrapping="Wrap" FontSize="11" Margin="0,7,0,10"/>
+                <Expander Header="Effective command" Foreground="{StaticResource TextBrush}" Expanded="PreviewExpanded" Collapsed="PreviewCollapsed">
+                    <StackPanel Margin="0,8,0,0">
+                        <TextBox x:Name="PreviewBox" IsReadOnly="True" TextWrapping="Wrap" FontFamily="Consolas" MinHeight="90" MaxHeight="150"
+                                 VerticalScrollBarVisibility="Auto" AutomationProperties.Name="Effective API launch command"/>
+                        <TextBlock x:Name="EnvironmentText" Foreground="{StaticResource MutedBrush}" FontSize="11" TextWrapping="Wrap" Margin="0,6,0,0"/>
+                    </StackPanel>
+                </Expander>
+            </StackPanel>
+        </ScrollViewer>
+        <TextBlock x:Name="StatusText" Grid.Row="2" Text="Changes apply on the next explicit start or restart. Stop the API before saving."
+                   Foreground="{StaticResource MutedBrush}" TextWrapping="Wrap" Margin="0,12,0,12" AutomationProperties.LiveSetting="Polite"/>
+        <StackPanel Grid.Row="3" Orientation="Horizontal" HorizontalAlignment="Right">
+            <Button x:Name="CancelButton" Content="_Cancel" Click="CancelClick" MinWidth="82" Margin="0,0,8,0"/>
+            <Button x:Name="SaveButton" Content="_Save" Click="SaveClick" IsDefault="True" MinWidth="82" Style="{StaticResource PrimaryButton}"/>
+        </StackPanel>
+    </Grid>
+</Window>

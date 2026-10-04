@@ -1,0 +1,24 @@
+<Window x:Class="FullStackLauncher.GitFetchPromptWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="Fetch remote branches" Width="530" SizeToContent="Height" ResizeMode="NoResize"
+        Background="{StaticResource BackgroundBrush}" Foreground="{StaticResource TextBrush}"
+        FontFamily="Segoe UI" FontSize="13" UseLayoutRounding="True" Icon="/Assets/launcher.ico"
+        WindowStartupLocation="CenterOwner" ShowInTaskbar="False">
+    <Grid Margin="24">
+        <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
+        <TextBlock Text="Would you like to Fetch the remote branch" FontSize="21" FontWeight="SemiBold" TextWrapping="Wrap"/>
+        <Border Grid.Row="1" Background="{StaticResource CardBrush}" BorderBrush="{StaticResource BorderBrush}" BorderThickness="1" CornerRadius="8" Padding="12" Margin="0,16,0,12">
+            <StackPanel>
+                <TextBlock x:Name="RemoteName" Foreground="{StaticResource AccentBrush}" FontWeight="SemiBold" TextWrapping="Wrap"/>
+                <TextBlock x:Name="RemoteTarget" Foreground="{StaticResource MutedBrush}" TextTrimming="CharacterEllipsis" Margin="0,4,0,0"/>
+            </StackPanel>
+        </Border>
+        <TextBlock Grid.Row="2" Text="Yes refreshes branches from this remote. No uses last fetched branches. Fetch leaves local files and commits unchanged."
+                   Foreground="{StaticResource MutedBrush}" TextWrapping="Wrap"/>
+        <StackPanel Grid.Row="3" Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,20,0,0">
+            <Button x:Name="NoButton" Content="_No" IsCancel="True" IsDefault="True" MinWidth="88" Margin="0,0,8,0" AutomationProperties.Name="No, use last fetched branches"/>
+            <Button Content="_Yes" Click="Yes_Click" Style="{StaticResource PrimaryButton}" MinWidth="88" AutomationProperties.Name="Yes, fetch remote branches"/>
+        </StackPanel>
+    </Grid>
+</Window>

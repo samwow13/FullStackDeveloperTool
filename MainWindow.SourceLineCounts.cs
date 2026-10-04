@@ -47,6 +47,7 @@ public partial class MainWindow
         cancellation.CancelAfter(TimeSpan.FromMinutes(5));
         try
         {
+            await System.Windows.Threading.Dispatcher.Yield(System.Windows.Threading.DispatcherPriority.Render);
             var count = await Task.Run(() => SourceLineCounter.Count(directory, cancellation.Token), cancellation.Token);
             // A project edit/removal can replace the card while its old folder is being read.
             if (!IsCurrentLineCountService(project, service)) return;

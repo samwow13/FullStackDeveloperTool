@@ -89,15 +89,21 @@ public static partial class GitRepositoryService
             if (!string.Equals(fetchUrl, pushUrl, StringComparison.Ordinal))
                 return comparison with { UnavailableReason = "This remote has different fetch and push targets; their line totals cannot be compared here." };
             var remoteBranch = snapshot.Branches.FirstOrDefault(item => item.IsRemote && item.Name == remote + "/" + branch);
+            var ahead = 0;
+            var behind = 0;
             if (remoteBranch is null)
-                return comparison with { UnavailableReason = "No cached remote branch. Fetch to check for it, or push to publish this branch." };
-            var counts = await GitAsync(root, ["rev-list", "--left-right", "--count", snapshot.HeadCommit + "..." + remoteBranch.CommitId, "--"], token).ConfigureAwait(false);
-            EnsureSuccess(counts);
-            var numbers = counts.Output.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries);
-            if (numbers.Length != 2 || !int.TryParse(numbers[0], out var ahead) || ahead < 0 || !int.TryParse(numbers[1], out var behind) || behind < 0)
-                throw new InvalidOperationException("Git returned invalid ahead/behind counts.");
+                comparison = comparison with { UnavailableReason = "No cached remote branch. Fetch to check for it, or push to publish this branch." };
+            else
+            {
+                var counts = await GitAsync(root, ["rev-list", "--left-right", "--count", snapshot.HeadCommit + "..." + remoteBranch.CommitId, "--"], token).ConfigureAwait(false);
+                EnsureSuccess(counts);
+                var numbers = counts.Output.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries);
+                if (numbers.Length != 2 || !int.TryParse(numbers[0], out ahead) || ahead < 0 || !int.TryParse(numbers[1], out behind) || behind < 0)
+                    throw new InvalidOperationException("Git returned invalid ahead/behind counts.");
+            }
+            var baseline = remoteBranch?.CommitId ?? snapshot.HeadCommit;
             var diff = await GitAsync(root,
-                ["diff", "--numstat", "-z", "--no-ext-diff", "--no-textconv", "--no-color", "--find-renames", "--ignore-submodules=none", remoteBranch.CommitId, "--"], token).ConfigureAwait(false);
+                ["diff", "--numstat", "-z", "--no-ext-diff", "--no-textconv", "--no-color", "--find-renames", "--ignore-submodules=none", baseline, "--"], token).ConfigureAwait(false);
             EnsureSuccess(diff);
             var totals = ParseNumStat(diff.Output);
             var final = await ReadCoreAsync(root, token).ConfigureAwait(false);
@@ -105,7 +111,8 @@ public static partial class GitRepositoryService
                 throw new InvalidOperationException("The repository changed while reading its comparison. Refresh to obtain current totals.");
             return comparison with
             {
-                Available = true, Ahead = ahead, Behind = behind, ChangedFiles = totals.Files,
+                Available = remoteBranch is not null, IsLocalComparison = remoteBranch is null,
+                Ahead = ahead, Behind = behind, ChangedFiles = totals.Files,
                 AddedLines = totals.Added, DeletedLines = totals.Deleted, BinaryFiles = totals.Binary
             };
         });
@@ -127,6 +134,7 @@ public static partial class GitRepositoryService
             await gate.WaitAsync(token).ConfigureAwait(false);
             try
             {
+                using var setupLease = await AcquireGitSetupOperationLeaseAsync(fullFolder, token).ConfigureAwait(false);
                 await ValidateBranchAsync(fullFolder, branch, token).ConfigureAwait(false);
                 var existing = await GitAsync(fullFolder, ["rev-parse", "--git-dir"], token).ConfigureAwait(false);
                 var metadata = await GitBranchReader.ReadAsync(fullFolder, token).ConfigureAwait(false);
@@ -179,12 +187,12 @@ public static partial class GitRepositoryService
             return saved;
         });
 
-    public static Task<string> FetchAsync(string root, string remote, CancellationToken token = default) =>
+    public static Task<string> FetchAsync(string root, string remote, CancellationToken token = default, bool strictSsh = false) =>
         InRepositoryAsync(root, token, async _ =>
         {
             await RequireSingleRemoteAsync(root, remote, false, token).ConfigureAwait(false);
             return Result(await GitAsync(root,
-                ["-c", "fetch.pruneTags=false", "-c", $"remote.{remote}.pruneTags=false", "fetch", "--prune", "--no-prune-tags", "--no-tags", "--no-recurse-submodules", "--", remote, $"+refs/heads/*:refs/remotes/{remote}/*"], token, network: true).ConfigureAwait(false),
+                ["-c", "fetch.pruneTags=false", "-c", $"remote.{remote}.pruneTags=false", "fetch", "--prune", "--no-prune-tags", "--no-tags", "--no-recurse-submodules", "--", remote, $"+refs/heads/*:refs/remotes/{remote}/*"], token, network: true, strictSsh: strictSsh).ConfigureAwait(false),
                 "Fetch completed. Remote branch information is now refreshed.");
         });
 
@@ -277,9 +285,10 @@ public static partial class GitRepositoryService
             }
             var remote = snapshot.Branches.FirstOrDefault(branch => branch.IsRemote && branch.Name == name);
             if (remote is null) throw new InvalidOperationException("That branch is no longer available. Refresh the branch list.");
-            var slash = name.IndexOf('/');
-            if (slash < 1) throw new InvalidOperationException("The remote branch cannot be mapped to a local branch.");
-            var localName = name[(slash + 1)..];
+            var sourceRemote = snapshot.Remotes.OrderByDescending(candidate => candidate.Name.Length)
+                .FirstOrDefault(candidate => name.StartsWith(candidate.Name + "/", StringComparison.Ordinal));
+            if (sourceRemote == null) throw new InvalidOperationException("The remote branch cannot be mapped to a local branch.");
+            var localName = name[(sourceRemote.Name.Length + 1)..];
             await ValidateBranchAsync(root, localName, token).ConfigureAwait(false);
             if (snapshot.Branches.Any(branch => !branch.IsRemote && branch.Name == localName))
                 throw new InvalidOperationException("A local branch with that name already exists. Select the local branch explicitly.");

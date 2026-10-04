@@ -63,6 +63,23 @@ public static class ServicePortConfiguration
         var start = tokens.Count > 0 && Is(tokens[0], "call") ? 1 : 0;
         if (tokens.Count <= start) throw UnsupportedCommand();
 
+        var pythonApiArguments = PythonApiArgumentStart(tokens, start);
+        if (pythonApiArguments is { } argumentStart)
+        {
+            var arguments = tokens.Skip(argumentStart).ToList();
+            // An inherited socket or a Unix-domain socket ignores the HTTP port. A
+            // separator also changes argument parsing, so neither can be rewritten.
+            if (arguments.Any(token => Is(token, "--") || Is(token, "--help") || Is(token, "--version")
+                || Is(token, "--uds") || HasInlineValue(token, "--uds")
+                || Is(token, "--fd") || HasInlineValue(token, "--fd")))
+                throw UnsupportedCommand();
+            arguments = RemoveOption(arguments, "--port");
+            arguments.Add(new("--port", "--port"));
+            var portValue = port.ToString(CultureInfo.InvariantCulture);
+            arguments.Add(new(portValue, portValue));
+            return Join(tokens.Take(argumentStart).Concat(arguments));
+        }
+
         if (Executable(tokens[start]) == "dotnet" && tokens.Count > start + 1 && Is(tokens[start + 1], "run"))
         {
             var arguments = RemoveOption(tokens.Skip(start + 2).ToList(), "--urls");
@@ -70,6 +87,18 @@ public static class ServicePortConfiguration
             arguments.Add(new("--urls", "--urls"));
             var origin = endpoint.GetLeftPart(UriPartial.Authority);
             arguments.Add(new(origin, '"' + origin + '"'));
+            return Join(tokens.Take(start + 2).Concat(arguments));
+        }
+
+        if (profile.Kind.Equals("Flutter Web", StringComparison.OrdinalIgnoreCase)
+            && Executable(tokens[start]) == "flutter"
+            && tokens.Count > start + 1 && Is(tokens[start + 1], "run"))
+        {
+            var arguments = RemoveOption(tokens.Skip(start + 2).ToList(), "--web-port");
+            if (arguments.Any(token => Is(token, "--"))) throw UnsupportedCommand();
+            arguments.Add(new("--web-port", "--web-port"));
+            var portValue = port.ToString(CultureInfo.InvariantCulture);
+            arguments.Add(new(portValue, portValue));
             return Join(tokens.Take(start + 2).Concat(arguments));
         }
 
@@ -87,6 +116,19 @@ public static class ServicePortConfiguration
         args.Add(new("--port", "--port"));
         args.Add(new(port.ToString(CultureInfo.InvariantCulture), port.ToString(CultureInfo.InvariantCulture)));
         return Join(tokens.Take(commandStart + 1).Concat(args));
+    }
+
+    private static int? PythonApiArgumentStart(IReadOnlyList<CommandToken> tokens, int start)
+    {
+        var executable = Executable(tokens[start]);
+        if (executable == "uvicorn") return start + 1;
+        if ((executable is "python" or "python3" or "py") && tokens.Count > start + 2
+            && Is(tokens[start + 1], "-m") && Is(tokens[start + 2], "uvicorn"))
+            return start + 3;
+        if (executable == "fastapi" && tokens.Count > start + 1
+            && (Is(tokens[start + 1], "dev") || Is(tokens[start + 1], "run")))
+            return start + 2;
+        return null;
     }
 
     private static string RewriteNpmScript(List<CommandToken> tokens, int start, string directory, int port)
@@ -211,6 +253,6 @@ public static class ServicePortConfiguration
     private static string Executable(CommandToken token) => Path.GetFileNameWithoutExtension(token.Value).ToLowerInvariant();
     private static string Join(IEnumerable<CommandToken> tokens) => string.Join(" ", tokens.Select(token => token.Raw));
     private static InvalidOperationException UnsupportedCommand() => new(
-        "Inline port editing supports dotnet run and Angular, Vite, Next.js or webpack dev-server commands, including verified npm scripts. Use project settings to edit this service's command and URL together.");
+        "Inline port editing supports dotnet run, Uvicorn (including python, python3 or py -m uvicorn), fastapi dev/run, Flutter Web's flutter run, and Angular, Vite, Next.js or webpack dev-server commands, including verified npm scripts. Use project settings to edit this service's command and URL together.");
     private sealed record CommandToken(string Value, string Raw);
 }
