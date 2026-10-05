@@ -101,6 +101,7 @@ public partial class MainWindow
     {
         NextCommitSettingsToggle.IsChecked = false;
         _nextCommitProjectGeneration++;
+        _dashboardGitScopePending = SelectedProject is { IsArchived: false };
         _nextCommitBatches.Clear();
         _nextCommitAcknowledgedIds.Clear();
         NextCommitRepositories.Clear();
@@ -143,6 +144,7 @@ public partial class MainWindow
             }));
             if (_closeRequested || _closing || _closed || generation != _nextCommitProjectGeneration || !ReferenceEquals(project, SelectedProject)) return;
             EnsureAgentGitProjectCurrent(discovery);
+            _dashboardGitScopePending = false;
             var repositoryNames = GitRepositoryDisplayNames.Create(_store.ResolveRoot(project),
                 results.Select(result => result.Repository.RepositoryRoot));
             var choices = results.Select(result => new NextCommitRepository(result.Repository.RepositoryId,
@@ -182,6 +184,7 @@ public partial class MainWindow
         catch (Exception)
         {
             if (generation != _nextCommitProjectGeneration || !ReferenceEquals(project, SelectedProject) || _closeRequested || _closing || _closed) return;
+            _dashboardGitScopePending = false;
             _nextCommitBatches.Clear();
             _nextCommitUnviewedCount = 0;
             _nextCommitStatus = "Preview unavailable. Refresh or open Git to review the configured folders.";

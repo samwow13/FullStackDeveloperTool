@@ -1,3 +1,4 @@
+using System.ComponentModel;
 using System.IO;
 using System.Windows;
 using System.Windows.Controls;
@@ -22,6 +23,8 @@ public partial class MainWindow
     private Task? _dashboardGitRunTask;
     private bool _dashboardGitInitialized;
     private bool _dashboardGitPolling;
+    private bool _dashboardGitPollRequested;
+    private bool _dashboardGitScopePending;
     private GitCommandExitUnconfirmedException? _dashboardGitUnconfirmedCommand;
 
     private sealed class DashboardGitWatch(ProjectProfile project, DashboardGitComparisonScope scope,
@@ -31,6 +34,8 @@ public partial class MainWindow
         internal DashboardGitComparisonScope Scope { get; } = scope;
         internal string ConfiguredFolders { get; } = configuredFolders;
         internal DashboardGitComparison? Comparison { get; set; }
+        internal bool ComparisonPending { get; set; } = true;
+        internal int ComparisonGeneration { get; set; }
         internal GitMergeCheckResult? Result { get; set; }
         internal DateTimeOffset RequestedAt { get; set; }
         internal DateTimeOffset NextLocalRead { get; set; } = now;
@@ -39,6 +44,23 @@ public partial class MainWindow
         internal string? RunningReleaseBranch { get; set; }
         internal string Status { get; set; } = "No conflict test yet.";
     }
+
+    public bool IsDashboardGitComparisonLoading => _dashboardGitUnconfirmedCommand is null
+        && SelectedProject is { IsArchived: false }
+        && (_dashboardGitScopePending || _dashboardGitSelectedWatch?.ComparisonPending == true);
+    public bool IsDashboardGitComparisonLoaded => !IsDashboardGitComparisonLoading;
+    public bool AnimateDashboardGitComparisonLoading => IsDashboardGitComparisonLoading
+        && !_closed && DashboardGitComparisonLoadingPanel?.IsVisible == true && SystemParameters.ClientAreaAnimation;
+    private string? DashboardGitReleaseTarget => _dashboardGitSelectedWatch?.Comparison is { } read
+        ? read.ReleaseBranch ?? read.SuggestedReleaseBranch : null;
+    public string DashboardGitReleaseTargetLabel => IsDashboardGitComparisonLoading ? ""
+        : DashboardGitReleaseTarget is { Length: > 0 } branch ? branch : "no target release yet";
+    public string DashboardGitReleaseTargetColor => DashboardGitReleaseTarget is { Length: > 0 } ? "#77DFC3" : "#A9B9CF";
+    public string DashboardGitReleaseTargetTooltip => _dashboardGitSelectedWatch?.Comparison is { } read
+        ? read.ReleaseBranch is { Length: > 0 } branch
+            ? $"Saved release source: {read.Scope.RemoteName}/{branch}."
+            : read.ReleaseBranchDetectionDetail ?? "No release source found. Choose one in Git Config."
+        : "Load a repository and active connection to find its release source.";
 
     public string DashboardGitComparisonLabel => _dashboardGitSelectedWatch?.Comparison?.Comparison is { IsLocalComparison: true }
         ? "Local changes · since last local commit"
@@ -59,6 +81,8 @@ public partial class MainWindow
     {
         get
         {
+            if (_dashboardGitUnconfirmedCommand is not null)
+                return "Git process exit is unconfirmed. Checks paused until that process is confirmed stopped.";
             if (_dashboardGitSelectedWatch is not { } watch) return "Choose a repository and active connection in Git.";
             if (watch.Comparison is not { } read) return "Reading local Git comparison…";
             if (read.Comparison is not { LineTotalsAvailable: true } comparison)
@@ -104,6 +128,7 @@ public partial class MainWindow
     private void InitializeDashboardGitComparison()
     {
         _dashboardGitInitialized = true;
+        SystemParameters.StaticPropertyChanged += DashboardGitMotionPreference_Changed;
         _dashboardGitTimer.Tick += async (_, _) => await PollDashboardGitAsync();
         Loaded += async (_, _) =>
         {
@@ -116,12 +141,23 @@ public partial class MainWindow
             _dashboardGitRunCancellation?.Cancel();
             _dashboardGitPollCancellation?.Cancel();
             _dashboardGitLifetime.Cancel();
+            SystemParameters.StaticPropertyChanged -= DashboardGitMotionPreference_Changed;
+            Changed(nameof(AnimateDashboardGitComparisonLoading));
         };
+    }
+
+    private void DashboardGitComparisonLoading_IsVisibleChanged(object sender, DependencyPropertyChangedEventArgs e) =>
+        Changed(nameof(AnimateDashboardGitComparisonLoading));
+
+    private void DashboardGitMotionPreference_Changed(object? sender, PropertyChangedEventArgs e)
+    {
+        if (e.PropertyName == nameof(SystemParameters.ClientAreaAnimation) && !_closed)
+            Changed(nameof(AnimateDashboardGitComparisonLoading));
     }
 
     private void SynchronizeDashboardGitScope()
     {
-        if (!_dashboardGitInitialized) return;
+        if (!_dashboardGitInitialized || _updatingNextCommitRepositories) return;
         DashboardGitWatch? selected = null;
         if (SelectedProject is { IsArchived: false } project
             && SelectedNextCommitRepository is { Branch: { Length: > 0 } branch, RemoteName: { Length: > 0 } remote, ConnectionId: { Length: > 0 } connection } repository)
@@ -130,8 +166,21 @@ public partial class MainWindow
             try { selected = GetDashboardGitWatch(project, scope); }
             catch (Exception) { /* Invalid configured folders remain available for correction in Git. */ }
         }
-        if (_dashboardGitSelectedWatch == selected) return;
+        if (_dashboardGitSelectedWatch == selected)
+        {
+            NotifyDashboardGitChanged();
+            return;
+        }
         _dashboardGitSelectedWatch = selected;
+        if (selected is not null)
+        {
+            // Even a previously visited branch needs fresh evidence after switching.
+            // Reject any read started before this selection, including A -> B -> A.
+            selected.ComparisonGeneration++;
+            selected.Comparison = null;
+            selected.ComparisonPending = true;
+            selected.NextLocalRead = DateTimeOffset.MinValue;
+        }
         NotifyDashboardGitChanged();
         _ = PollDashboardGitAsync();
     }
@@ -215,7 +264,12 @@ public partial class MainWindow
 
     private async Task PollDashboardGitAsync()
     {
-        if (_dashboardGitPolling || _closeRequested || _closing || _closed || !IsLoaded) return;
+        if (_closeRequested || _closing || _closed || !IsLoaded) return;
+        if (_dashboardGitPolling)
+        {
+            _dashboardGitPollRequested = true;
+            return;
+        }
         _dashboardGitPolling = true;
         using var pollCancellation = CancellationTokenSource.CreateLinkedTokenSource(_dashboardGitLifetime.Token);
         _dashboardGitPollCancellation = pollCancellation;
@@ -228,6 +282,9 @@ public partial class MainWindow
             {
                 if (!await Task.Run(previousCommand.IsExitConfirmed, pollToken)) return;
                 _dashboardGitUnconfirmedCommand = null;
+                if (_dashboardGitSelectedWatch is { Comparison: null } recovering)
+                    recovering.ComparisonPending = true;
+                NotifyDashboardGitChanged();
             }
             if (_closeRequested || _closing || _closed) return;
             foreach (var pair in _dashboardGitWatches.ToArray())
@@ -280,23 +337,48 @@ public partial class MainWindow
             if (ReferenceEquals(_dashboardGitPollCancellation, pollCancellation)) _dashboardGitPollCancellation = null;
             pollCompletion.TrySetResult();
             NotifyDashboardGitChanged();
+            if (_dashboardGitPollRequested)
+            {
+                _dashboardGitPollRequested = false;
+                _ = PollDashboardGitAsync();
+            }
         }
     }
 
     private async Task ReadDashboardGitComparisonAsync(DashboardGitWatch watch, CancellationToken token)
     {
         watch.NextLocalRead = DateTimeOffset.UtcNow + DashboardGitLocalRefreshInterval;
+        var generation = watch.ComparisonGeneration;
         var resultBeforeRead = watch.Result;
-        var read = await DashboardGitComparisonService.ReadAsync(watch.Scope, token);
+        DashboardGitComparison read;
+        try { read = await DashboardGitComparisonService.ReadAsync(watch.Scope, token); }
+        catch (GitCommandExitUnconfirmedException) { throw; }
+        catch (OperationCanceledException) when (token.IsCancellationRequested)
+        {
+            watch.NextLocalRead = DateTimeOffset.MinValue;
+            throw;
+        }
+        catch (Exception)
+        {
+            read = new DashboardGitComparison
+            {
+                Scope = watch.Scope,
+                UnavailableReason = "Git comparison could not be loaded. Open Git to review repository access.",
+                ConflictCheckUnavailableReason = "Git comparison could not be loaded. Open Git to review repository access.",
+                ReadAt = DateTimeOffset.UtcNow
+            };
+        }
         if (!IsCurrentDashboardGitWatch(watch)) return;
-        if (!ReferenceEquals(watch.Result, resultBeforeRead))
+        if (generation != watch.ComparisonGeneration || !ReferenceEquals(watch.Result, resultBeforeRead))
         {
             // A workspace comparison can finish while this older local read is waiting.
             // Read again before attaching status or invalidating the newer result.
             watch.NextLocalRead = DateTimeOffset.MinValue;
+            if (_dashboardGitSelectedWatch == watch) _dashboardGitPollRequested = true;
             return;
         }
         watch.Comparison = read;
+        watch.ComparisonPending = false;
         if (watch.Result is { } result && (read.Snapshot?.HeadCommit != result.CurrentCommit
             || read.ReleaseBranch != result.SourceBranch))
         {
@@ -391,6 +473,7 @@ public partial class MainWindow
             watch.RunningReleaseBranch = null;
             _dashboardGitRunningWatch = null;
             NotifyDashboardGitChanged();
+            if (_dashboardGitSelectedWatch?.ComparisonPending == true) _ = PollDashboardGitAsync();
         }
     }
 
@@ -419,13 +502,17 @@ public partial class MainWindow
         foreach (var watch in _dashboardGitWatches.Values)
         {
             watch.Result = null;
+            watch.ComparisonPending = false;
+            watch.NextLocalRead = DateTimeOffset.MinValue;
             watch.Status = "Git process exit is unconfirmed. Checks paused until that process is confirmed stopped.";
         }
     }
 
     private void NotifyDashboardGitChanged()
     {
-        foreach (var name in new[] { nameof(DashboardGitComparisonLabel), nameof(DashboardGitChangedFiles), nameof(DashboardGitAddedLines),
+        foreach (var name in new[] { nameof(IsDashboardGitComparisonLoading), nameof(IsDashboardGitComparisonLoaded),
+            nameof(AnimateDashboardGitComparisonLoading), nameof(DashboardGitReleaseTargetLabel), nameof(DashboardGitReleaseTargetColor),
+            nameof(DashboardGitReleaseTargetTooltip), nameof(DashboardGitComparisonLabel), nameof(DashboardGitChangedFiles), nameof(DashboardGitAddedLines),
             nameof(DashboardGitRemovedLines), nameof(DashboardGitLineTotalsTooltip), nameof(DashboardGitComparisonDetail), nameof(CanRequestDashboardGitCheck),
             nameof(HasDashboardGitConflictResult), nameof(HasDashboardGitConflictStatus), nameof(DashboardGitConflictStatus), nameof(DashboardGitConflictStatusColor), nameof(DashboardGitConflictSchedule) })
             Changed(name);

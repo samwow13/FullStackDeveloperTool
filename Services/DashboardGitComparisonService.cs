@@ -50,6 +50,8 @@ public static class DashboardGitComparisonService
                 Scope = scope, Snapshot = snapshot, Comparison = comparison,
                 UncommittedFiles = snapshot.Changes.Count,
                 ReleaseBranch = power?.ReleaseBranch,
+                SuggestedReleaseBranch = power?.SuggestedReleaseBranch,
+                ReleaseBranchDetectionDetail = powerError ?? power?.ReleaseBranchDetectionDetail,
                 UnavailableReason = comparisonError ?? comparison?.UnavailableReason,
                 ConflictCheckUnavailableReason = powerError ?? ConflictCheckAvailability(snapshot, power),
                 ReadAt = DateTimeOffset.UtcNow

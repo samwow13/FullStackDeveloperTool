@@ -911,9 +911,12 @@
                     <Border Grid.Row="1" Background="{StaticResource CardBrush}" BorderBrush="{StaticResource BorderBrush}" BorderThickness="1" CornerRadius="7" Padding="10" Margin="0,0,0,12">
                         <StackPanel>
                             <Grid>
-                                <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
-                                <TextBlock Text="Git comparison" Foreground="{StaticResource TextBrush}" FontWeight="SemiBold" VerticalAlignment="Center"/>
-                                <Button Grid.Column="1" Click="DashboardGitOptions_Click" Padding="6,4" Background="Transparent"
+                                <Grid.ColumnDefinitions><ColumnDefinition Width="Auto"/><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+                                <TextBlock Text="Git Comparison" Foreground="{StaticResource TextBrush}" FontWeight="SemiBold" VerticalAlignment="Center"/>
+                                <TextBlock Grid.Column="1" Text="{Binding DashboardGitReleaseTargetLabel}" Foreground="{Binding DashboardGitReleaseTargetColor}"
+                                           FontSize="11" VerticalAlignment="Center" Margin="8,0,8,0" TextTrimming="CharacterEllipsis"
+                                           ToolTip="{Binding DashboardGitReleaseTargetTooltip}" AutomationProperties.Name="{Binding DashboardGitReleaseTargetLabel}"/>
+                                <Button Grid.Column="2" Click="DashboardGitOptions_Click" Padding="6,4" Background="Transparent"
                                         ToolTip="Git comparison options" AutomationProperties.Name="Git comparison options">
                                     <TextBlock Text="&#xE713;" FontFamily="Segoe MDL2 Assets" FontSize="14"/>
                                     <Button.ContextMenu>
@@ -929,15 +932,38 @@
                                     </Button.ContextMenu>
                                 </Button>
                             </Grid>
-                            <TextBlock Text="{Binding DashboardGitComparisonLabel}" Foreground="{StaticResource MutedBrush}" FontSize="11" TextWrapping="Wrap" Margin="0,5,0,10"/>
-                            <Grid>
-                                <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="*"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
-                                <StackPanel><TextBlock Text="Changed files" Foreground="{StaticResource MutedBrush}" FontSize="10"/><TextBlock Text="{Binding DashboardGitChangedFiles}" Foreground="{StaticResource TextBrush}" FontWeight="SemiBold" FontSize="17" Margin="0,3,0,0"/></StackPanel>
-                                <StackPanel Grid.Column="1" Margin="8,0,0,0" ToolTip="{Binding DashboardGitLineTotalsTooltip}"><TextBlock Text="Lines added" Foreground="{StaticResource MutedBrush}" FontSize="10"/><TextBlock Text="{Binding DashboardGitAddedLines}" Foreground="{StaticResource AccentBrush}" FontWeight="SemiBold" FontSize="17" Margin="0,3,0,0"/></StackPanel>
-                                <StackPanel Grid.Column="2" Margin="8,0,0,0" ToolTip="{Binding DashboardGitLineTotalsTooltip}"><TextBlock Text="Lines removed" Foreground="{StaticResource MutedBrush}" FontSize="10"/><TextBlock Text="{Binding DashboardGitRemovedLines}" Foreground="#FFACA9" FontWeight="SemiBold" FontSize="17" Margin="0,3,0,0"/></StackPanel>
+                            <Grid MinHeight="90">
+                                <StackPanel Visibility="{Binding IsDashboardGitComparisonLoaded, Converter={StaticResource BoolToVisibility}}">
+                                    <TextBlock Text="{Binding DashboardGitComparisonLabel}" Foreground="{StaticResource MutedBrush}" FontSize="11" TextWrapping="Wrap" Margin="0,5,0,10"/>
+                                    <Grid>
+                                        <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="*"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+                                        <StackPanel><TextBlock Text="Changed files" Foreground="{StaticResource MutedBrush}" FontSize="10"/><TextBlock Text="{Binding DashboardGitChangedFiles}" Foreground="{StaticResource TextBrush}" FontWeight="SemiBold" FontSize="17" Margin="0,3,0,0"/></StackPanel>
+                                        <StackPanel Grid.Column="1" Margin="8,0,0,0" ToolTip="{Binding DashboardGitLineTotalsTooltip}"><TextBlock Text="Lines added" Foreground="{StaticResource MutedBrush}" FontSize="10"/><TextBlock Text="{Binding DashboardGitAddedLines}" Foreground="{StaticResource AccentBrush}" FontWeight="SemiBold" FontSize="17" Margin="0,3,0,0"/></StackPanel>
+                                        <StackPanel Grid.Column="2" Margin="8,0,0,0" ToolTip="{Binding DashboardGitLineTotalsTooltip}"><TextBlock Text="Lines removed" Foreground="{StaticResource MutedBrush}" FontSize="10"/><TextBlock Text="{Binding DashboardGitRemovedLines}" Foreground="#FFACA9" FontWeight="SemiBold" FontSize="17" Margin="0,3,0,0"/></StackPanel>
+                                    </Grid>
+                                    <TextBlock Text="{Binding DashboardGitComparisonDetail}" Foreground="{StaticResource MutedBrush}" FontSize="11" TextWrapping="Wrap" Margin="0,8,0,0"
+                                               ToolTip="Untracked and binary contents are excluded from line totals. Ahead/behind counts appear when nonzero."/>
+                                </StackPanel>
+                                <StackPanel x:Name="DashboardGitComparisonLoadingPanel" HorizontalAlignment="Center" VerticalAlignment="Center"
+                                            Visibility="{Binding IsDashboardGitComparisonLoading, Converter={StaticResource BoolToVisibility}}"
+                                            IsVisibleChanged="DashboardGitComparisonLoading_IsVisibleChanged"
+                                            AutomationProperties.Name="Loading Git comparison" AutomationProperties.LiveSetting="Polite">
+                                    <Grid Width="28" Height="28" HorizontalAlignment="Center" Margin="0,0,0,7">
+                                        <Ellipse Stroke="#293B50" StrokeThickness="2.5"/>
+                                        <Path Stroke="{StaticResource AccentBrush}" StrokeThickness="2.5" StrokeStartLineCap="Round" StrokeEndLineCap="Round"
+                                              Data="M 14,1.25 A 12.75,12.75 0 0 1 26.75,14" RenderTransformOrigin="0.5,0.5">
+                                            <Path.RenderTransform><RotateTransform/></Path.RenderTransform>
+                                            <Path.Style><Style TargetType="Path"><Style.Triggers>
+                                                <DataTrigger Binding="{Binding AnimateDashboardGitComparisonLoading}" Value="True">
+                                                    <DataTrigger.EnterActions><BeginStoryboard x:Name="DashboardGitComparisonSpinAnimation"><Storyboard><DoubleAnimation Storyboard.TargetProperty="(UIElement.RenderTransform).(RotateTransform.Angle)" From="0" To="360" Duration="0:0:0.9" RepeatBehavior="Forever"/></Storyboard></BeginStoryboard></DataTrigger.EnterActions>
+                                                    <DataTrigger.ExitActions><RemoveStoryboard BeginStoryboardName="DashboardGitComparisonSpinAnimation"/></DataTrigger.ExitActions>
+                                                </DataTrigger>
+                                            </Style.Triggers></Style></Path.Style>
+                                        </Path>
+                                    </Grid>
+                                    <TextBlock Text="Loading Git comparison…" Foreground="{StaticResource MutedBrush}" FontSize="11" HorizontalAlignment="Center"/>
+                                </StackPanel>
                             </Grid>
-                            <TextBlock Text="{Binding DashboardGitComparisonDetail}" Foreground="{StaticResource MutedBrush}" FontSize="11" TextWrapping="Wrap" Margin="0,8,0,0"
-                                       ToolTip="Untracked and binary contents are excluded from line totals. Ahead/behind counts appear when nonzero."/>
                             <TextBlock Text="{Binding DashboardGitConflictStatus}" Foreground="{Binding DashboardGitConflictStatusColor}" FontSize="11" TextWrapping="Wrap" Margin="0,6,0,0"
                                        Visibility="{Binding HasDashboardGitConflictStatus, Converter={StaticResource BoolToVisibility}}"
                                        ToolTip="{Binding DashboardGitConflictSchedule}" AutomationProperties.LiveSetting="Polite"/>

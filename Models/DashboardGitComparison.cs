@@ -10,6 +10,8 @@ public sealed record DashboardGitComparison
     public GitRemoteComparison? Comparison { get; init; }
     public int UncommittedFiles { get; init; }
     public string? ReleaseBranch { get; init; }
+    public string? SuggestedReleaseBranch { get; init; }
+    public string? ReleaseBranchDetectionDetail { get; init; }
     public GitRepositorySnapshot? Snapshot { get; init; }
     public string? UnavailableReason { get; init; }
     public string? ConflictCheckUnavailableReason { get; init; }
