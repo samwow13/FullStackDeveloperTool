@@ -36,6 +36,9 @@ public sealed record GitPowerDetails
     public DateTimeOffset? LastCreatedAt { get; init; }
     public string LastCreatedEvidence { get; init; } = "No retained branch-creation record is available.";
     public string? ReleaseBranch { get; init; }
+    public string? SuggestedReleaseBranch { get; init; }
+    public string? CachedRemoteDefaultBranch { get; init; }
+    public string? ReleaseBranchDetectionDetail { get; init; }
     public GitPendingSync? PendingSync { get; init; }
     public IReadOnlyList<string> ConflictedPaths { get; init; } = [];
     public string? RecoveryMessage { get; init; }

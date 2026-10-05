@@ -268,7 +268,7 @@
                                 <Button Content="After-push _link…" Click="PostPushLinkConfig_Click" Style="{StaticResource Action}" ToolTip="Customize the link opened in Chrome after a successful push on the selected connection."/>
                             </WrapPanel>
                             <WrapPanel Margin="0,12,0,0">
-                                <TextBlock Text="{Binding ReleaseSourceLabel}" TextWrapping="Wrap" Foreground="{StaticResource AccentBrush}" VerticalAlignment="Center" Margin="0,0,12,8"/>
+                                <TextBlock Text="{Binding ReleaseSourceLabel}" ToolTip="{Binding ReleaseSourceTooltip}" TextWrapping="Wrap" Foreground="{StaticResource AccentBrush}" VerticalAlignment="Center" Margin="0,0,12,8"/>
                                 <Button Content="Change release _branch…" Click="ChangeReleaseBranch_Click" IsEnabled="{Binding CanChangeReleaseBranch}" Style="{StaticResource Action}" ToolTip="Choose the release source for the active remote. Saving this choice does not merge or push." ToolTipService.ShowOnDisabled="True" AutomationProperties.Name="Change release branch in Config"/>
                             </WrapPanel>
                         </StackPanel>

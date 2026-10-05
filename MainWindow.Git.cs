@@ -41,7 +41,7 @@ public partial class MainWindow
         catch (Exception exception) when (exception is OperationCanceledException or TimeoutException) { }
     }
 
-    private async void GitWorkspace_Click(object sender, RoutedEventArgs e)
+    private async Task OpenGitWorkspaceAsync(string? preferredRepositoryRoot)
     {
         if (SelectedProjectItem is not { } project || IsEditing || _closeRequested || _closing) return;
         try
@@ -51,7 +51,7 @@ public partial class MainWindow
                 .Select(group => new GitWorkspaceFolder(string.Join(" / ", group.Select(folder => folder.Label)), group.Key))
                 .ToArray();
             var workspace = new GitWorkspaceWindow(project.Name, folders,
-                preferredRepositoryRoot: SelectedNextCommitRepository?.RepositoryRoot) { Owner = this };
+                preferredRepositoryRoot: preferredRepositoryRoot) { Owner = this };
             workspace.ShowDialog();
             await RefreshProjectBranchesAsync();
             await RefreshNextCommitAsync();

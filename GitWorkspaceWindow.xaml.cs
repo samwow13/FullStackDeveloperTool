@@ -43,6 +43,7 @@ public partial class GitWorkspaceWindow : Window, INotifyPropertyChanged
         MinHeight = Math.Min(MinHeight, SystemParameters.WorkArea.Height);
         MinWidth = Math.Min(MinWidth, SystemParameters.WorkArea.Width);
         DataContext = this;
+        Activated += (_, _) => ScheduleMissingReleaseBranchPrompt();
     }
 
     public string ProjectTitle { get; }

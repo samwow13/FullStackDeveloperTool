@@ -29,8 +29,8 @@ public partial class MainWindow
         Loaded += NextCommitReminder_Loaded;
         Unloaded += NextCommitReminder_Unloaded;
         IsVisibleChanged += NextCommitReminder_IsVisibleChanged;
-        StateChanged += NextCommitReminder_StateChanged;
         NextCommitPanel.IsVisibleChanged += NextCommitReminder_IsVisibleChanged;
+        StateChanged += NextCommitReminder_StateChanged;
         Closed += NextCommitReminder_Closed;
     }
 
@@ -42,8 +42,8 @@ public partial class MainWindow
             && selected is { Branch: not null, ConnectionId: not null }
             ? new(project.Id, selected.RepositoryRoot.ToUpperInvariant(), selected.Branch,
                 selected.ConnectionId, selected.RemoteName) : null;
-        var active = IsLoaded && IsVisible && WindowState != WindowState.Minimized
-            && NextCommitPanel.IsVisible && !_closeRequested && !_closing && !_closed;
+        var active = IsLoaded && IsVisible && WindowState != WindowState.Minimized && NextCommitPanel.IsVisible
+            && !_closeRequested && !_closing && !_closed;
         if (_nextCommitReminder.IsArmed && (scope != _nextCommitReminderScope || !active
             || !NextCommitPrReminderEnabled || NextCommitMessage.Length <= CommitMessageReminder.CharacterThreshold))
             _nextCommitReminderSound.Stop();
@@ -75,8 +75,8 @@ public partial class MainWindow
         Loaded -= NextCommitReminder_Loaded;
         Unloaded -= NextCommitReminder_Unloaded;
         IsVisibleChanged -= NextCommitReminder_IsVisibleChanged;
-        StateChanged -= NextCommitReminder_StateChanged;
         NextCommitPanel.IsVisibleChanged -= NextCommitReminder_IsVisibleChanged;
+        StateChanged -= NextCommitReminder_StateChanged;
         Closed -= NextCommitReminder_Closed;
         _nextCommitReminder?.Dispose();
         _nextCommitReminderSound.Dispose();

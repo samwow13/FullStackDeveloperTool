@@ -444,12 +444,6 @@
                                 <ToggleButton x:Name="ProjectsToggle" Content="Projects" Style="{StaticResource SectionMenuSwitch}" IsChecked="{Binding ProjectsVisible, Mode=TwoWay}" AutomationProperties.Name="Show projects" ToolTip="Show or hide the saved projects section"/>
                                 <ToggleButton x:Name="ToolsToggle" Content="Tools" Style="{StaticResource SectionMenuSwitch}" IsChecked="{Binding ToolsVisible, Mode=TwoWay}" AutomationProperties.Name="Show developer tools" ToolTip="Show or hide developer tools"/>
                                 <ToggleButton x:Name="ServicesToggle" Content="Services" Style="{StaticResource SectionMenuSwitch}" IsChecked="{Binding ServicesVisible, Mode=TwoWay}" AutomationProperties.Name="Show services" ToolTip="Show or hide services and batch controls"/>
-                                <ToggleButton x:Name="NextCommitToggle" Content="{Binding NextCommitToggleLabel}" IsChecked="{Binding NextCommitVisible, Mode=TwoWay}"
-                                              AutomationProperties.Name="Show next commit" ToolTip="Show the live next commit message, viewed AI updates, and the 4,000-character limit beside Services">
-                                    <ToggleButton.Style><Style TargetType="ToggleButton" BasedOn="{StaticResource SectionMenuSwitch}"><Style.Triggers>
-                                        <DataTrigger Binding="{Binding NextCommitOverLimit}" Value="True"><Setter Property="Foreground" Value="#FFACA9"/><Setter Property="BorderBrush" Value="#E96B78"/></DataTrigger>
-                                    </Style.Triggers></Style></ToggleButton.Style>
-                                </ToggleButton>
                                 <Border Height="1" Background="{StaticResource BorderBrush}" Margin="10,6,10,8"/>
                                 <CheckBox Content="Long Running Task" IsChecked="{Binding LongRunningTaskEnabled, Mode=OneWay}" Click="LongRunningTask_Click"
                                           Style="{StaticResource SectionMenuSwitch}" ToolTipService.ShowDuration="30000"
@@ -460,7 +454,7 @@
                         </Border>
                     </Popup>
                 </Grid>
-                <Button Content="Git…" Click="GitWorkspace_Click" Padding="10,7" FontSize="11" Margin="0,0,6,5" ToolTip="Open repository setup, remotes, branches and the working tree">
+                <Button x:Name="GitCommitButton" Content="{Binding GitCommitButtonLabel}" Click="GitCommit_Click" AutomationProperties.Name="Git Commit" Padding="10,7" FontSize="11" Margin="0,0,6,5" ToolTip="Open the docked commit message, Git comparison, and repository selection">
                     <Button.Style><Style TargetType="Button" BasedOn="{StaticResource {x:Type Button}}"><Style.Triggers>
                         <DataTrigger Binding="{Binding SelectedProject}" Value="{x:Null}"><Setter Property="IsEnabled" Value="False"/></DataTrigger>
                         <DataTrigger Binding="{Binding IsEditing}" Value="True"><Setter Property="IsEnabled" Value="False"/></DataTrigger>
@@ -864,41 +858,41 @@
                                          WatcherRequested="CodexAlerts_Click"/>
             <Grid Grid.Row="5" Margin="0,14,12,0"><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions><TextBlock Text="{Binding Notice}" Foreground="{StaticResource MutedBrush}" FontSize="11" TextTrimming="CharacterEllipsis" ToolTip="{Binding Notice}"/><TextBlock Grid.Column="1" Text="{Binding LastChecked}" Foreground="{StaticResource MutedBrush}" FontSize="10" Margin="15,0,0,0"/></Grid>
         </Grid>
-        <GridSplitter x:Name="NextCommitSplitter" Grid.Column="2" Width="6" HorizontalAlignment="Center" VerticalAlignment="Stretch" Margin="0,24,0,16"
-                      Background="{StaticResource BorderBrush}" ResizeDirection="Columns" ResizeBehavior="PreviousAndNext" ShowsPreview="True"
-                      Visibility="Collapsed" Focusable="True" AutomationProperties.Name="Resize next commit panel"/>
+        <GridSplitter x:Name="NextCommitSplitter" Grid.Column="2" Width="6" HorizontalAlignment="Center" VerticalAlignment="Stretch"
+                      Margin="0,24,0,16" Background="{StaticResource BorderBrush}" ResizeDirection="Columns" ResizeBehavior="PreviousAndNext"
+                      ShowsPreview="True" Visibility="Collapsed" Focusable="True" AutomationProperties.Name="Resize Git Commit panel"/>
         <Border x:Name="NextCommitPanel" Grid.Column="3" Visibility="Collapsed" Background="{StaticResource SurfaceBrush}" BorderBrush="{StaticResource BorderBrush}"
                 BorderThickness="1" CornerRadius="9" Padding="14" Margin="0,24,22,16">
             <Grid>
                 <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="*"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
                 <Grid Margin="0,0,0,12">
                     <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
-                    <TextBlock Text="Next commit" Foreground="{StaticResource TextBrush}" FontSize="15" FontWeight="SemiBold" VerticalAlignment="Center"/>
+                    <TextBlock Text="Git Commit" Foreground="{StaticResource TextBrush}" FontSize="15" FontWeight="SemiBold" VerticalAlignment="Center"/>
                     <Grid Grid.Column="1">
                         <ToggleButton x:Name="NextCommitSettingsToggle" Style="{StaticResource NextCommitSettingsButton}"
-                                      PreviewKeyDown="NextCommitSettingsToggle_PreviewKeyDown" ToolTip="Next commit settings"
-                                      AutomationProperties.Name="Next commit settings" AutomationProperties.HelpText="Set PR sound reminder. Click outside or press Escape to close."/>
+                                      PreviewKeyDown="NextCommitSettingsToggle_PreviewKeyDown" ToolTip="Git commit settings"
+                                      AutomationProperties.Name="Git commit settings" AutomationProperties.HelpText="Set PR sound reminder. Click outside or press Escape to close."/>
                         <Popup x:Name="NextCommitSettingsMenu" PlacementTarget="{Binding ElementName=NextCommitSettingsToggle}" Placement="Bottom" VerticalOffset="6"
                                IsOpen="{Binding IsChecked, ElementName=NextCommitSettingsToggle, Mode=TwoWay}" StaysOpen="False" AllowsTransparency="True"
                                DataContext="{Binding PlacementTarget.DataContext, RelativeSource={RelativeSource Self}}" Opened="NextCommitSettingsMenu_Opened">
                             <Border Background="{StaticResource SurfaceBrush}" BorderBrush="{StaticResource BorderBrush}" BorderThickness="1" CornerRadius="8" Padding="14" Width="320"
                                     PreviewKeyDown="NextCommitSettingsMenu_PreviewKeyDown" KeyboardNavigation.TabNavigation="Cycle">
                                 <StackPanel>
-                                    <TextBlock Text="Next commit settings" Foreground="{StaticResource TextBrush}" FontWeight="SemiBold" Margin="0,0,0,12"/>
+                                    <TextBlock Text="Git commit settings" Foreground="{StaticResource TextBrush}" FontWeight="SemiBold" Margin="0,0,0,12"/>
                                     <TextBlock Text="{Binding NextCommitStatus}" Foreground="{StaticResource MutedBrush}" FontSize="11" TextWrapping="Wrap" Margin="0,8,0,0"/>
                                     <Border Height="1" Background="{StaticResource BorderBrush}" Margin="0,12,0,12"/>
                                     <TextBlock Text="{Binding NextCommitCharacterCount}" TextWrapping="Wrap" FontSize="11" Foreground="{StaticResource MutedBrush}"/>
                                     <CheckBox Content="_PR sound reminder" Style="{StaticResource LongRunningTaskCheckBox}"
                                               IsChecked="{Binding NextCommitPrReminderEnabled, Mode=TwoWay}" Margin="0,8,0,0"
                                               AutomationProperties.Name="Enable PR sound reminder for commit message length"
-                                              ToolTip="Off by default for each launcher session. First sound after 5 minutes, then every 5 minutes while this panel is visible and the selected commit message exceeds 3,000 characters."/>
+                                              ToolTip="Off by default for each launcher session. First sound after 5 minutes, then every 5 minutes while the docked panel is visible and the selected commit message exceeds 3,000 characters."/>
                                     <TextBlock Text="Sound every 5 minutes above 3,000 message characters to remind you to make a PR. Counts message text, not code diff size."
                                                Foreground="{StaticResource MutedBrush}" FontSize="11" TextWrapping="Wrap" Margin="0,4,0,0"/>
                                 </StackPanel>
                             </Border>
                         </Popup>
                     </Grid>
-                    <Button Grid.Column="2" Style="{StaticResource HideSectionButton}" Tag="NextCommit" Click="HideSection_Click" HorizontalAlignment="Right" AutomationProperties.Name="Hide next commit"/>
+                    <Button Grid.Column="2" Style="{StaticResource HideSectionButton}" Click="CloseGitCommit_Click" Margin="6,0,0,0" AutomationProperties.Name="Hide Git Commit" ToolTip="Hide this panel. Reopen it with Git Commit."/>
                 </Grid>
                 <Grid Grid.Row="1">
                     <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="*"/></Grid.RowDefinitions>
@@ -908,7 +902,7 @@
                                Foreground="{StaticResource MutedBrush}" FontSize="11" VerticalAlignment="Center"/>
                         <ComboBox x:Name="NextCommitRepositoryPicker" Grid.Column="1" ItemsSource="{Binding NextCommitRepositories}"
                                   SelectedItem="{Binding SelectedNextCommitRepository, Mode=TwoWay}" DisplayMemberPath="DisplayName"
-                                  ToolTip="{Binding SelectedNextCommitRepository.RepositoryRoot}" AutomationProperties.Name="Next commit repository">
+                                  ToolTip="{Binding SelectedNextCommitRepository.RepositoryRoot}" AutomationProperties.Name="Git commit repository">
                             <ComboBox.ItemContainerStyle><Style TargetType="ComboBoxItem">
                                 <Setter Property="ToolTip" Value="{Binding RepositoryRoot}"/>
                             </Style></ComboBox.ItemContainerStyle>
@@ -963,11 +957,11 @@
                         </TextBlock>
                     </StackPanel>
                     <controls:CommitMessagePreview Grid.Row="3" Presentation="{Binding NextCommitPresentation}" ReadRequested="NextCommitMessage_ReadRequested"
-                                                   MinHeight="80" AutomationProperties.Name="Next commit message"
+                                                   MinHeight="80" AutomationProperties.Name="Git commit message"
                                                    ToolTip="Unread text is mint and underlined. Click the message or press Enter to mark displayed updates read."/>
                 </Grid>
                 <WrapPanel Grid.Row="2" Margin="0,12,0,0">
-                    <Button Content="Open _Git…" Click="GitWorkspace_Click" Padding="9,6" FontSize="11" Margin="0,0,6,4">
+                    <Button Content="Open _Git" Click="OpenGit_Click" Padding="9,6" FontSize="11" Margin="0,0,6,4">
                         <Button.Style><Style TargetType="Button" BasedOn="{StaticResource {x:Type Button}}"><Style.Triggers>
                             <DataTrigger Binding="{Binding SelectedProject}" Value="{x:Null}"><Setter Property="IsEnabled" Value="False"/></DataTrigger>
                             <DataTrigger Binding="{Binding IsEditing}" Value="True"><Setter Property="IsEnabled" Value="False"/></DataTrigger>

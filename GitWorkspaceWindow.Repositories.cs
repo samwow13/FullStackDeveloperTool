@@ -39,8 +39,12 @@ public partial class GitWorkspaceWindow
                 new GitRepositoryDiscoveryFolder(folder.Label, folder.Directory, _scanProjectRootChildren && index == 0)).ToArray(),
                 _operation.Token);
             _repositoryDiscoveryWarning = discovery.Warning;
-            Folders = discovery.Folders.Select(folder => new GitWorkspaceFolder(folder.Label, folder.Directory)).ToArray();
-            RepositoryChoices = discovery.Repositories;
+            var repositoryNames = GitRepositoryDisplayNames.Create(_configuredFolders.FirstOrDefault()?.Directory ?? "",
+                discovery.Repositories.Select(repository => repository.Directory));
+            Folders = discovery.Folders.Select(folder => new GitWorkspaceFolder(
+                repositoryNames.TryGetValue(folder.Directory, out var name) ? name : folder.Label, folder.Directory)).ToArray();
+            RepositoryChoices = discovery.Repositories.Select(repository => repository with
+                { Label = repositoryNames[repository.Directory] }).ToArray();
             _selectingRepository = RepositoryChoices.Count > 1;
             _applyingRepositorySelection = true;
             try

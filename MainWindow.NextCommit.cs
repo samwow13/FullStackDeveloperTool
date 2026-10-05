@@ -28,7 +28,6 @@ public partial class MainWindow
 
     public ObservableCollection<NextCommitRepository> NextCommitRepositories { get; } = [];
     public bool HasNextCommitRepositoryChoices => NextCommitRepositories.Count > 1;
-    public bool NextCommitVisible { get => _settings.Layout.NextCommitVisible; set => SetSectionVisibility(nameof(NextCommitVisible), value); }
     public NextCommitRepository? SelectedNextCommitRepository
     {
         get => _selectedNextCommitRepository;
@@ -52,7 +51,7 @@ public partial class MainWindow
     public string NextCommitLimitStatus => NextCommitOverLimit
         ? $"{_nextCommitMessage.Length - GitCommitMessage.MaximumLength:N0} characters over limit. Shorten the message in Git before committing."
         : $"{GitCommitMessage.MaximumLength - _nextCommitMessage.Length:N0} characters remaining.";
-    public string NextCommitToggleLabel => _nextCommitUnviewedCount > 0 ? $"Next commit · {_nextCommitUnviewedCount:N0} new" : "Next commit";
+    public string GitCommitButtonLabel => _nextCommitUnviewedCount > 0 ? $"Git Commit · {_nextCommitUnviewedCount:N0} new" : "Git Commit";
 
     private void InitializeNextCommitSettings()
     {
@@ -80,6 +79,22 @@ public partial class MainWindow
         NextCommitSettingsToggle.IsChecked = false;
         NextCommitSettingsToggle.Focus();
         e.Handled = true;
+    }
+
+    private async void GitCommit_Click(object sender, RoutedEventArgs e)
+    {
+        if (SelectedProject is null || IsEditing || _closeRequested || _closing || _closed) return;
+        NextCommitVisible = true;
+        await RefreshNextCommitAsync(force: true);
+    }
+
+    private async void OpenGit_Click(object sender, RoutedEventArgs e) =>
+        await OpenGitWorkspaceAsync(SelectedNextCommitRepository?.RepositoryRoot);
+
+    private void CloseGitCommit_Click(object sender, RoutedEventArgs e)
+    {
+        NextCommitVisible = false;
+        if (!GitCommitButton.Focus()) SectionsMenuToggle.Focus();
     }
 
     private void ResetNextCommitProject()
@@ -128,15 +143,12 @@ public partial class MainWindow
             }));
             if (_closeRequested || _closing || _closed || generation != _nextCommitProjectGeneration || !ReferenceEquals(project, SelectedProject)) return;
             EnsureAgentGitProjectCurrent(discovery);
-            var duplicateNames = results.GroupBy(result => System.IO.Path.GetFileName(result.Repository.RepositoryRoot),
-                StringComparer.OrdinalIgnoreCase).Where(group => group.Count() > 1)
-                .Select(group => group.Key).ToHashSet(StringComparer.OrdinalIgnoreCase);
-            var projectRoot = _store.ResolveRoot(project);
+            var repositoryNames = GitRepositoryDisplayNames.Create(_store.ResolveRoot(project),
+                results.Select(result => result.Repository.RepositoryRoot));
             var choices = results.Select(result => new NextCommitRepository(result.Repository.RepositoryId,
                 result.Repository.RepositoryRoot, result.Repository.Branch, result.Repository.ActiveConnectionId,
                 result.Batch?.RemoteName ?? result.Repository.Connections.FirstOrDefault(connection => connection.IsActive)?.RemoteName,
-                duplicateNames.Contains(System.IO.Path.GetFileName(result.Repository.RepositoryRoot))
-                    ? NextCommitRepositoryRelativeName(projectRoot, result.Repository.RepositoryRoot) : null)).ToArray();
+                repositoryNames[result.Repository.RepositoryRoot])).ToArray();
             var oldId = SelectedNextCommitRepository?.RepositoryId;
             _nextCommitBatches.Clear();
             foreach (var result in results)
@@ -226,7 +238,7 @@ public partial class MainWindow
         UpdateNextCommitReminder();
         foreach (var name in new[] { nameof(NextCommitMessage), nameof(NextCommitPresentation), nameof(NextCommitStatus), nameof(HasNextCommitStatusNotice), nameof(NextCommitDraftHint), nameof(HasNextCommitDraftHint),
             nameof(HasNextCommitMessage), nameof(NextCommitOverLimit), nameof(NextCommitCharacterCount),
-            nameof(NextCommitLimitStatus), nameof(NextCommitToggleLabel) }) Changed(name);
+            nameof(NextCommitLimitStatus), nameof(GitCommitButtonLabel) }) Changed(name);
     }
 
     private async void RefreshNextCommit_Click(object sender, RoutedEventArgs e) => await RefreshNextCommitAsync(force: true);
@@ -300,12 +312,6 @@ public partial class MainWindow
         var ranges = displayed.SelectMany(entry => entry.Bullets).Distinct(StringComparer.OrdinalIgnoreCase)
             .SelectMany(bullet => lines[bullet]).Distinct().OrderBy(range => range.Start).ToArray();
         return new(message, ranges, displayed.Length == 0 ? null : batch with { Entries = displayed });
-    }
-
-    private static string NextCommitRepositoryRelativeName(string projectRoot, string repositoryRoot)
-    {
-        var relative = System.IO.Path.GetRelativePath(projectRoot, repositoryRoot);
-        return relative == "." ? System.IO.Path.GetFileName(repositoryRoot) + " (root)" : relative;
     }
 
     public sealed record NextCommitRepository(string RepositoryId, string RepositoryRoot, string? Branch, string? ConnectionId, string? RemoteName,

@@ -37,7 +37,7 @@ public partial class MainWindow
         _ = Dispatcher.BeginInvoke(DispatcherPriority.Loaded, new Action(() =>
         {
             if (!SectionsMenu.IsOpen || _closed) return;
-            // Reevaluate popup placement after the sidebar or next-commit columns move.
+            // Reevaluate popup placement after the sidebar or commit panel moves.
             var offset = SectionsMenu.HorizontalOffset;
             SectionsMenu.HorizontalOffset = offset + 1;
             SectionsMenu.HorizontalOffset = offset;

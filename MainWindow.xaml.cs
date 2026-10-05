@@ -80,6 +80,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     public bool ProjectsVisible { get => _settings.Layout.ProjectsVisible; set => SetSectionVisibility(nameof(ProjectsVisible), value); }
     public bool ToolsVisible { get => _settings.Layout.ToolsVisible; set => SetSectionVisibility(nameof(ToolsVisible), value); }
     public bool ServicesVisible { get => _settings.Layout.ServicesVisible; set => SetSectionVisibility(nameof(ServicesVisible), value); }
+    public bool NextCommitVisible { get => _settings.Layout.NextCommitVisible; set => SetSectionVisibility(nameof(NextCommitVisible), value); }
     public event PropertyChangedEventHandler? PropertyChanged;
     private void Changed(string name) => PropertyChanged?.Invoke(this, new(name));
 
@@ -794,7 +795,6 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         ApplyLayout();
         Changed(property);
         SaveLayout();
-        if (property == nameof(NextCommitVisible) && visible) _ = RefreshNextCommitAsync();
     }
 
     private void ApplyLayout()

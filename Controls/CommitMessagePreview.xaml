@@ -11,7 +11,7 @@
                      HorizontalScrollBarVisibility="Disabled" SpellCheck.IsEnabled="False"
                      PreviewMouseLeftButtonDown="MessageMouseDown" PreviewMouseLeftButtonUp="MessageSelectionEnded"
                      LostMouseCapture="MessageSelectionEnded" PreviewKeyDown="MessageKeyDown"
-                     AutomationProperties.Name="Next commit message"
+                     AutomationProperties.Name="Git commit message"
                      AutomationProperties.HelpText="New AI text is mint and underlined. Click the message or press Enter to mark its displayed AI updates viewed."
                      ToolTip="Mint underlined text is new. Click the message or press Enter to mark displayed AI updates viewed.">
             <FlowDocument PagePadding="0" FontFamily="Consolas" FontSize="13" LineHeight="21"/>

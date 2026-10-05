@@ -484,5 +484,6 @@ public partial class GitWorkspaceWindow
         WorkspaceTabs.SelectedItem = WorkTab;
         SetStatus(_remoteDraftDirty ? "Connection draft kept for this session. Choose Config to continue setup." : "Git workspace ready. Choose Config to manage connections.");
         Changed();
+        ScheduleMissingReleaseBranchPrompt();
     }
 }

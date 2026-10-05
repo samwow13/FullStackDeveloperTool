@@ -19,6 +19,8 @@ public static partial class GitRepositoryService
             var pending = await ReadPendingSyncAsync(root, token).ConfigureAwait(false);
             var (lastBranch, lastAt) = await ReadLastCreatedBranchAsync(root, snapshot, token).ConfigureAwait(false);
             var release = remote.Length == 0 ? null : await ReadReleaseBranchAsync(root, remote, token).ConfigureAwait(false);
+            var suggestion = release is null && remote.Length > 0
+                ? await ReadReleaseBranchSuggestionAsync(root, remote, snapshot, token).ConfigureAwait(false) : null;
             var conflicts = ConflictPaths(snapshot);
             var ready = pending is not null && await CanFinishSyncAsync(root, remote, snapshot, pending, token).ConfigureAwait(false);
             return new GitPowerDetails
@@ -26,6 +28,8 @@ public static partial class GitRepositoryService
                 LastCreatedBranch = lastBranch, LastCreatedAt = lastAt,
                 LastCreatedEvidence = lastBranch is null ? "No retained branch-creation record is available." : "Latest branch creation found in retained local reflogs; this is not a commit date.",
                 ReleaseBranch = release, PendingSync = pending, ConflictedPaths = conflicts, ReadyToFinish = ready,
+                SuggestedReleaseBranch = suggestion?.Branch, ReleaseBranchDetectionDetail = suggestion?.Detail,
+                CachedRemoteDefaultBranch = suggestion?.RemoteDefaultBranch,
                 CanDismiss = pending is not null && snapshot.OperationState is null,
                 RecoveryMessage = pending is null ? null : RecoveryMessage(pending, remote, conflicts, ready)
             };

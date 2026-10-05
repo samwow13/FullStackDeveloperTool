@@ -40,6 +40,7 @@ public partial class GitWorkspaceWindow
         _gitLoadDepth = Math.Max(0, _gitLoadDepth - 1);
         Changed();
         if (_gitLoadDepth == 0 && GitContentAvailable && _setupOpen && !_busy) OpenSetup(_setupStep);
+        if (_gitLoadDepth == 0) ScheduleMissingReleaseBranchPrompt();
     }
 
     private void FailGitLoad(string message)

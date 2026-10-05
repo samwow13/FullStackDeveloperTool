@@ -10,7 +10,7 @@ using FullStackLauncher.Services;
 
 namespace FullStackLauncher;
 
-public enum GitReleaseBranchMode { Choose, VerifyLocalMerge, VerifyConflictTest }
+public enum GitReleaseBranchMode { Choose, VerifyLocalMerge, VerifyConflictTest, ChooseMissing }
 
 public partial class GitReleaseBranchWindow : Window
 {
@@ -18,6 +18,11 @@ public partial class GitReleaseBranchWindow : Window
     private IReadOnlyList<GitRemoteBranchChoice> _branches = [];
     private readonly string _remote;
     private readonly string _currentBranch;
+    private readonly bool _suggestReleaseBranch;
+    private readonly string? _cachedDefaultBranch;
+    private string? _detectedSelection;
+    private bool _userSelectedBranch;
+    private bool _applyingBranchList;
     private string? _selectionToRestore;
     private CancellationTokenSource? _loadCancellation;
     private bool _initialLoadStarted;
@@ -29,11 +34,14 @@ public partial class GitReleaseBranchWindow : Window
 
     public GitReleaseBranchWindow(string root, string remote, string fetchUrl,
         Func<CancellationToken, Task<IReadOnlyList<GitRemoteBranchChoice>>> loadBranches,
-        string? selected, string currentBranch, GitReleaseBranchMode mode = GitReleaseBranchMode.Choose)
+        string? selected, string currentBranch, GitReleaseBranchMode mode = GitReleaseBranchMode.Choose,
+        bool suggestReleaseBranch = false, string? cachedDefaultBranch = null)
     {
         _loadBranches = loadBranches;
         _remote = remote;
         _currentBranch = currentBranch;
+        _suggestReleaseBranch = suggestReleaseBranch;
+        _cachedDefaultBranch = cachedDefaultBranch;
         _selectionToRestore = selected;
         InitializeComponent();
         Height = Math.Min(Height, SystemParameters.WorkArea.Height);
@@ -42,7 +50,12 @@ public partial class GitReleaseBranchWindow : Window
         MinWidth = Math.Min(MinWidth, SystemParameters.WorkArea.Width);
         Context.Text = $"Current local branch: {currentBranch}\nLoading branches from {remote}…";
         RepositoryContext.Text = SensitiveDataProtection.Redact($"Repository: {root}\nSource remote: {remote}\n{fetchUrl}");
-        if (mode != GitReleaseBranchMode.Choose)
+        if (mode == GitReleaseBranchMode.ChooseMissing)
+        {
+            Headline.Text = "No release branch detected";
+            Description.Text = "Choose the release source for this remote, or cancel and choose it later in Config. Saving this choice does not merge or push.";
+        }
+        else if (mode != GitReleaseBranchMode.Choose)
         {
             Title = "Verify remote source branch";
             Headline.Text = mode == GitReleaseBranchMode.VerifyLocalMerge
@@ -94,6 +107,13 @@ public partial class GitReleaseBranchWindow : Window
             if (_closing) return;
             _branches = branches;
             _loaded = true;
+            if (_suggestReleaseBranch && !_userSelectedBranch)
+            {
+                // Reevaluate the entire live list so new or removed release names
+                // cannot preserve an ambiguous cached suggestion.
+                _selectionToRestore = GitReleaseBranchDetection.Detect(branches.Select(branch => branch.Name), _cachedDefaultBranch).Branch;
+                _detectedSelection = _selectionToRestore;
+            }
             Context.Text = $"Current local branch: {_currentBranch}\nBranches read from {_remote} just now.";
             LoadingStatus.Text = branches.Count == 0
                 ? "The remote has no branches yet."
@@ -148,8 +168,13 @@ public partial class GitReleaseBranchWindow : Window
     {
         var selected = SelectedBranch ?? _selectionToRestore;
         var filtered = _branches.Where(branch => branch.Name.Contains(Search.Text.Trim(), StringComparison.OrdinalIgnoreCase)).ToArray();
-        Branches.ItemsSource = filtered;
-        Branches.SelectedItem = filtered.FirstOrDefault(branch => branch.Name == selected);
+        _applyingBranchList = true;
+        try
+        {
+            Branches.ItemsSource = filtered;
+            Branches.SelectedItem = filtered.FirstOrDefault(branch => branch.Name == selected);
+        }
+        finally { _applyingBranchList = false; }
         EmptyNotice.Text = _branches.Count == 0
             ? "Publish an initial remote branch before choosing a source, then reload the branches here."
             : "No branches match. Change the search, or cancel and check the remote.";
@@ -159,7 +184,15 @@ public partial class GitReleaseBranchWindow : Window
 
     private void Branch_Changed(object sender, SelectionChangedEventArgs e)
     {
-        if (SelectedBranch is { } source) _selectionToRestore = source;
+        if (SelectedBranch is { } source)
+        {
+            _selectionToRestore = source;
+            if (!_applyingBranchList && !_loading)
+            {
+                _userSelectedBranch = true;
+                _detectedSelection = null;
+            }
+        }
         UpdateSelection();
     }
 
@@ -181,7 +214,10 @@ public partial class GitReleaseBranchWindow : Window
         if (SourceSummary != null) SourceSummary.Text = !_initialLoadStarted || _loading
             ? "Loading remote branches before selecting the source…"
             : !_loaded ? "A verified remote branch list is required to continue."
-            : SelectedBranch is { } source ? $"Release source: {_remote}/{source}" : "Select a release branch to continue.";
+            : SelectedBranch is { } source ? source == _detectedSelection
+                ? $"Suggested release source: {_remote}/{source} · confirm or choose another."
+                : $"Release source: {_remote}/{source}"
+            : "Select a release branch to continue.";
     }
 
     private void Submit_Click(object sender, RoutedEventArgs e)

@@ -20,7 +20,14 @@ public partial class GitWorkspaceWindow
     public bool CanDismissSync => IsIdle && _powerDetails?.CanDismiss == true;
     public Visibility SyncRecoveryVisibility => HasSyncRecovery || Changes.Any(change => change.IsConflict) ? Visibility.Visible : Visibility.Collapsed;
     public string ReleaseSourceLabel => _powerDetails?.ReleaseBranch is { Length: > 0 } source && SelectedRemote is { } remote
-        ? $"Release source: {remote.Name}/{source}" : "Release source: choose a remote branch the first time.";
+        ? $"Release source: {remote.Name}/{source}"
+        : _powerDetails?.SuggestedReleaseBranch is { Length: > 0 } suggested && SelectedRemote is { } selectedRemote
+            ? $"Suggested release source: {selectedRemote.Name}/{suggested} · auto-detected"
+            : "Release source: choose a remote branch in Config.";
+    public string ReleaseSourceTooltip => _powerDetails?.ReleaseBranch is { Length: > 0 }
+        ? "Saved release source for this repository and remote URL. Confirm against the fresh remote branch list before merging or testing."
+        : (_powerDetails?.ReleaseBranchDetectionDetail ?? "Load a repository and active remote to detect a release source.")
+            + " Confirm the source in the branch chooser before saving, merging, or testing.";
     public string PowerAvailabilityText => _powerReadError ?? (!IsRepository ? "Select or initialize a repository first."
         : !HasRemote ? "Connect a remote in Config first."
         : HasSyncRecovery ? "A local merge is tracked below. Use Commit all & push when it is ready."
@@ -98,8 +105,9 @@ public partial class GitWorkspaceWindow
             if (!loaded || branches == null)
                 throw readFailure ?? new InvalidOperationException("Remote branches could not load. Retry in this chooser or return to Git to review the connection.");
             return branches;
-        }, savedSource,
-            currentBranch, mode) { Owner = this };
+        }, savedSource ?? _powerDetails?.SuggestedReleaseBranch,
+            currentBranch, mode, suggestReleaseBranch: savedSource is null,
+            cachedDefaultBranch: _powerDetails?.CachedRemoteDefaultBranch) { Owner = this };
         var accepted = picker.ShowDialog() == true;
         if (picker.UnconfirmedCommand is { } pendingCommand)
         {
