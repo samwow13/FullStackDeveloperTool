@@ -397,7 +397,7 @@ public partial class MainWindow
     private async Task<bool> IsConfiguredDashboardGitScopeAsync(DashboardGitWatch watch, CancellationToken token)
     {
         if (!IsCurrentDashboardGitWatch(watch)) return false;
-        var discovery = await DiscoverAgentGitAsync(watch.Project, null, token);
+        var discovery = await DiscoverAgentGitAsync(watch.Project, null, token, includeImmediateRepositories: true);
         if (!IsCurrentDashboardGitWatch(watch)) return false;
         EnsureAgentGitProjectCurrent(discovery);
         return discovery.Repositories.Any(repository => repository.CanRecordChanges

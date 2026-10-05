@@ -27,6 +27,7 @@ public partial class MainWindow
     private readonly Dictionary<string, (AgentGitSummaryBatch? Batch, string? Error)> _nextCommitBatches = [];
 
     public ObservableCollection<NextCommitRepository> NextCommitRepositories { get; } = [];
+    public bool HasNextCommitRepositoryChoices => NextCommitRepositories.Count > 1;
     public bool NextCommitVisible { get => _settings.Layout.NextCommitVisible; set => SetSectionVisibility(nameof(NextCommitVisible), value); }
     public NextCommitRepository? SelectedNextCommitRepository
     {
@@ -63,7 +64,8 @@ public partial class MainWindow
         Closed += (_, _) => NextCommitSettingsToggle.IsChecked = false;
     }
 
-    private void NextCommitSettingsMenu_Opened(object sender, EventArgs e) => NextCommitRepositoryPicker.Focus();
+    private void NextCommitSettingsMenu_Opened(object sender, EventArgs e) =>
+        NextCommitSettingsMenu.Child?.MoveFocus(new TraversalRequest(FocusNavigationDirection.First));
 
     private void NextCommitSettingsToggle_PreviewKeyDown(object sender, KeyEventArgs e)
     {
@@ -75,8 +77,6 @@ public partial class MainWindow
     private void NextCommitSettingsMenu_PreviewKeyDown(object sender, KeyEventArgs e)
     {
         if (e.Key != Key.Escape) return;
-        // Let the repository picker consume Escape to close its own dropdown first.
-        if (NextCommitRepositoryPicker.IsDropDownOpen) return;
         NextCommitSettingsToggle.IsChecked = false;
         NextCommitSettingsToggle.Focus();
         e.Handled = true;
@@ -89,6 +89,7 @@ public partial class MainWindow
         _nextCommitBatches.Clear();
         _nextCommitAcknowledgedIds.Clear();
         NextCommitRepositories.Clear();
+        Changed(nameof(HasNextCommitRepositoryChoices));
         SelectedNextCommitRepository = null;
         _nextCommitUnviewedCount = 0;
         _nextCommitStatus = SelectedProject is null ? "Choose a project to preview its next commit." : "Reading pending AI updates…";
@@ -105,7 +106,8 @@ public partial class MainWindow
         var generation = _nextCommitProjectGeneration;
         try
         {
-            var discovery = await DiscoverAgentGitAsync(project, null, _nextCommitLifetime.Token);
+            var discovery = await DiscoverAgentGitAsync(project, null, _nextCommitLifetime.Token,
+                includeImmediateRepositories: true);
             var results = await Task.WhenAll(discovery.Repositories.Select(async repository =>
             {
                 if (!repository.CanRecordChanges || repository.ActiveConnectionId is null || repository.Branch is null)
@@ -127,9 +129,15 @@ public partial class MainWindow
             }));
             if (_closeRequested || _closing || _closed || generation != _nextCommitProjectGeneration || !ReferenceEquals(project, SelectedProject)) return;
             EnsureAgentGitProjectCurrent(discovery);
+            var duplicateNames = results.GroupBy(result => System.IO.Path.GetFileName(result.Repository.RepositoryRoot),
+                StringComparer.OrdinalIgnoreCase).Where(group => group.Count() > 1)
+                .Select(group => group.Key).ToHashSet(StringComparer.OrdinalIgnoreCase);
+            var projectRoot = _store.ResolveRoot(project);
             var choices = results.Select(result => new NextCommitRepository(result.Repository.RepositoryId,
                 result.Repository.RepositoryRoot, result.Repository.Branch, result.Repository.ActiveConnectionId,
-                result.Batch?.RemoteName ?? result.Repository.Connections.FirstOrDefault(connection => connection.IsActive)?.RemoteName)).ToArray();
+                result.Batch?.RemoteName ?? result.Repository.Connections.FirstOrDefault(connection => connection.IsActive)?.RemoteName,
+                duplicateNames.Contains(System.IO.Path.GetFileName(result.Repository.RepositoryRoot))
+                    ? NextCommitRepositoryRelativeName(projectRoot, result.Repository.RepositoryRoot) : null)).ToArray();
             var oldId = SelectedNextCommitRepository?.RepositoryId;
             _nextCommitBatches.Clear();
             foreach (var result in results)
@@ -147,9 +155,12 @@ public partial class MainWindow
                         ?? NextCommitRepositories.FirstOrDefault();
                 }
                 finally { _updatingNextCommitRepositories = false; }
+                Changed(nameof(HasNextCommitRepositoryChoices));
             }
             UpdateNextCommitUnreadCount();
-            _nextCommitStatus = choices.Length == 0
+            _nextCommitStatus = discovery.Warning is not null
+                ? "Some repository folders could not be checked. Refresh or open Git."
+                : choices.Length == 0
                 ? discovery.Folders.Any(folder => folder.State != nameof(GitBranchState.NotRepository))
                     ? "Git information is unavailable. Open Git to review the configured folders."
                     : "No Git repository in this project's configured folders. Open Git to set one up."
@@ -292,9 +303,16 @@ public partial class MainWindow
         return new(message, ranges, displayed.Length == 0 ? null : batch with { Entries = displayed });
     }
 
-    public sealed record NextCommitRepository(string RepositoryId, string RepositoryRoot, string? Branch, string? ConnectionId, string? RemoteName)
+    private static string NextCommitRepositoryRelativeName(string projectRoot, string repositoryRoot)
     {
-        public string DisplayName => $"{System.IO.Path.GetFileName(RepositoryRoot)} · {Branch ?? "branch unavailable"} · {RemoteName ?? "no active connection"}";
+        var relative = System.IO.Path.GetRelativePath(projectRoot, repositoryRoot);
+        return relative == "." ? System.IO.Path.GetFileName(repositoryRoot) + " (root)" : relative;
+    }
+
+    public sealed record NextCommitRepository(string RepositoryId, string RepositoryRoot, string? Branch, string? ConnectionId, string? RemoteName,
+        string? Label = null)
+    {
+        public string DisplayName => Label ?? System.IO.Path.GetFileName(RepositoryRoot);
     }
 
 }

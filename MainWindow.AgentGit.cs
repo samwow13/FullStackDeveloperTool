@@ -20,7 +20,10 @@ public partial class MainWindow
         string? Detail, IReadOnlyList<AgentGitRemote> Connections);
 
     private sealed record AgentGitDiscovery(ProjectProfile Project, string[] CapturedFolders,
-        AgentGitFolder[] Folders, AgentGitRepository[] Repositories);
+        AgentGitFolder[] Folders, AgentGitRepository[] Repositories)
+    {
+        public string? Warning { get; init; }
+    }
 
     private async Task<object> ListAgentGitConnectionsAsync(AgentBridgeRequest request, CancellationToken token)
     {
@@ -85,13 +88,24 @@ public partial class MainWindow
     }
 
     private async Task<AgentGitDiscovery> DiscoverAgentGitAsync(ProjectProfile project,
-        string? requestedRepositoryId, CancellationToken token)
+        string? requestedRepositoryId, CancellationToken token, bool includeImmediateRepositories = false)
     {
         var folders = AgentGitFolders(project);
         if (folders.Length > 64)
             throw new InvalidOperationException("This project has too many configured Git folders for one bridge request. Use the WPF Git workspace.");
         using var limiter = new SemaphoreSlim(4);
-        var metadata = await Task.WhenAll(folders.Select(async folder =>
+        AgentGitFolder[] metadata;
+        string? warning = null;
+        if (includeImmediateRepositories)
+        {
+            var discovered = await GitRepositoryDiscovery.DiscoverAsync(folders.Select((folder, index) =>
+                new GitRepositoryDiscoveryFolder(index == 0 ? "Project root" : Path.GetFileName(folder), folder,
+                    ScanImmediateChildren: index == 0)).ToArray(), token);
+            metadata = discovered.Folders.Select(folder => new AgentGitFolder(folder.Directory,
+                folder.IsRepository ? folder.Directory : null, folder.State.ToString())).ToArray();
+            warning = discovered.Warning;
+        }
+        else metadata = await Task.WhenAll(folders.Select(async folder =>
         {
             await limiter.WaitAsync(token);
             try
@@ -117,7 +131,7 @@ public partial class MainWindow
             try { return await ReadAgentGitRepositoryAsync(group.Key, group.Select(item => item.Directory).ToArray(), token); }
             finally { limiter.Release(); }
         }));
-        var discovery = new AgentGitDiscovery(project, folders, metadata, repositories);
+        var discovery = new AgentGitDiscovery(project, folders, metadata, repositories) { Warning = warning };
         EnsureAgentGitProjectCurrent(discovery);
         return discovery;
     }

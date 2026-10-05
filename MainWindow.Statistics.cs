@@ -33,7 +33,7 @@ public partial class MainWindow
         try
         {
             popup?.SetCurrentValue(Popup.IsOpenProperty, false);
-            new GitWorkspaceWindow(project.Name, [new GitWorkspaceFolder(service.Name, service.Directory)])
+            new GitWorkspaceWindow(project.Name, [new GitWorkspaceFolder(service.Name, service.Directory)], scanChildRepositories: false)
                 { Owner = this }.ShowDialog();
             await RefreshProjectBranchesAsync();
             await RefreshNextCommitAsync();

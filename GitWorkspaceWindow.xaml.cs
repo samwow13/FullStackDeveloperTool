@@ -28,10 +28,14 @@ public partial class GitWorkspaceWindow : Window, INotifyPropertyChanged
     private GitRemoteComparison? _comparison;
     private string? _comparisonError;
 
-    public GitWorkspaceWindow(string projectName, IReadOnlyList<GitWorkspaceFolder> folders)
+    public GitWorkspaceWindow(string projectName, IReadOnlyList<GitWorkspaceFolder> folders,
+        bool scanChildRepositories = true, string? preferredRepositoryRoot = null)
     {
         ProjectTitle = $"Git · {projectName}";
-        Folders = folders;
+        _configuredFolders = folders.ToArray();
+        _scanProjectRootChildren = scanChildRepositories;
+        _preferredRepositoryRoot = preferredRepositoryRoot;
+        Folders = _configuredFolders;
         InitializeComponent();
         // Keep the footer reachable on smaller displays; the workspace pages scroll.
         Height = Math.Min(Height, SystemParameters.WorkArea.Height);
@@ -39,11 +43,12 @@ public partial class GitWorkspaceWindow : Window, INotifyPropertyChanged
         MinHeight = Math.Min(MinHeight, SystemParameters.WorkArea.Height);
         MinWidth = Math.Min(MinWidth, SystemParameters.WorkArea.Width);
         DataContext = this;
-        FolderPicker.SelectedIndex = folders.Count > 0 ? 0 : -1;
     }
 
     public string ProjectTitle { get; }
-    public IReadOnlyList<GitWorkspaceFolder> Folders { get; }
+    public IReadOnlyList<GitWorkspaceFolder> Folders { get; private set; }
+    public string? SelectedRepositoryRoot => Root ?? RepositoryChoices.FirstOrDefault(repository =>
+        string.Equals(repository.Directory, SelectedFolder?.Directory, StringComparison.OrdinalIgnoreCase))?.Directory;
     public IReadOnlyList<GitChange> Changes => _snapshot?.Changes ?? [];
     public IReadOnlyList<GitBranchInfo> Branches => _snapshot?.Branches ?? [];
     public IReadOnlyList<GitRemoteInfo> Remotes => _snapshot?.Remotes ?? [];
@@ -118,13 +123,12 @@ public partial class GitWorkspaceWindow : Window, INotifyPropertyChanged
     private async void Window_Loaded(object sender, RoutedEventArgs e)
     {
         _ready = true;
-        _displayedFolder = SelectedFolder?.Directory;
-        await LoadGitWorkspaceAsync();
+        await LoadGitWorkspaceAsync(verifyConnection: false);
     }
 
     private async void Folder_Changed(object sender, SelectionChangedEventArgs e)
     {
-        if (!_ready || !IsIdle) return;
+        if (!_ready || !IsIdle || _applyingRepositorySelection || _selectingRepository) return;
         EndPublishBranchEdit();
         var keepConfigOpen = _configOpen;
         ResetPublishFeedback();
@@ -139,7 +143,7 @@ public partial class GitWorkspaceWindow : Window, INotifyPropertyChanged
         RestoreDraft(_displayedFolder != null ? _drafts.GetValueOrDefault(_displayedFolder) : null);
         if (keepConfigOpen) _setupOpen = true;
         Changed();
-        await LoadGitWorkspaceAsync();
+        await LoadGitWorkspaceAsync(verifyConnection: false);
         if (keepConfigOpen && !_gitLoadFailed && !_setupOpen)
         {
             _configOpen = true;
@@ -542,7 +546,8 @@ public partial class GitWorkspaceWindow : Window, INotifyPropertyChanged
     private void Cancel_Click(object sender, RoutedEventArgs e)
     {
         _operation?.Cancel();
-        SetStatus("Cancel requested. Waiting for the command to finish and report its outcome…");
+        SetStatus(_discoveringRepositories ? "Repository discovery canceled. Waiting for folder checks to stop…"
+            : "Cancel requested. Waiting for the command to finish and report its outcome…");
     }
 
     private async void Window_Closing(object? sender, CancelEventArgs e)

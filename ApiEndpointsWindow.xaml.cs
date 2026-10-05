@@ -15,27 +15,31 @@ public partial class ApiEndpointsWindow : Window
     private CancellationTokenSource? _scanCancellation;
     private ApiEndpointInventory? _inventory;
     private string? _openApiFile;
+    private string? _sourceDirectory;
     private bool _closed;
     private bool _initialized;
+    private bool _choosingSourceFolder;
     private DateTimeOffset _checkedAt;
     private readonly DispatcherTimer _filterTimer;
     private int _filterVersion;
     private static readonly string[] CommonVerbs = ["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS", "TRACE", "CONNECT"];
 
-    public ApiEndpointsWindow(string projectName, string serviceName, string workingDirectory)
+    public ApiEndpointsWindow(string projectName, string serviceName, string workingDirectory, string? sourceDirectory = null)
     {
         WorkingDirectory = workingDirectory;
+        _sourceDirectory = sourceDirectory;
         InitializeComponent();
         _filterTimer = new DispatcherTimer(DispatcherPriority.Background, Dispatcher) { Interval = TimeSpan.FromMilliseconds(180) };
         _filterTimer.Tick += (_, _) => { _filterTimer.Stop(); ApplyFilter(); };
         UpdateContext(projectName, serviceName);
-        SourceText.Text = workingDirectory;
+        SourceText.Text = SourceDirectory;
         VerbFilter.ItemsSource = new[] { "All methods" };
         VerbFilter.SelectedIndex = 0;
         _initialized = true;
     }
 
     internal string WorkingDirectory { get; }
+    private string SourceDirectory => _sourceDirectory ?? WorkingDirectory;
     internal event Action<ApiEndpointInventory?>? InventoryChanged;
 
     internal void UpdateContext(string projectName, string serviceName)
@@ -49,14 +53,41 @@ public partial class ApiEndpointsWindow : Window
     private async void RefreshClick(object sender, RoutedEventArgs e) => await ScanAsync();
     private async void ScanSourceClick(object sender, RoutedEventArgs e)
     {
-        if (_scanCancellation is not null) return;
+        if (_closed || _choosingSourceFolder || _scanCancellation is not null) return;
+        _openApiFile = null;
+        await ScanAsync();
+    }
+
+    private async void ChooseSourceFolderClick(object sender, RoutedEventArgs e)
+    {
+        if (_closed || _choosingSourceFolder || _scanCancellation is not null) return;
+        string selectedFolder;
+        _choosingSourceFolder = true;
+        try
+        {
+            var picker = new OpenFolderDialog
+            {
+                Title = "Choose the controllers or endpoints source folder",
+                Multiselect = false,
+                InitialDirectory = SourceDirectory
+            };
+            if (picker.ShowDialog(this) != true || _closed) return;
+            selectedFolder = picker.FolderName;
+        }
+        catch
+        {
+            if (!_closed) SetStatus("The source folder picker is unavailable. Try choosing the folder again.", warning: true);
+            return;
+        }
+        finally { _choosingSourceFolder = false; }
+        _sourceDirectory = selectedFolder;
         _openApiFile = null;
         await ScanAsync();
     }
 
     private async void OpenApiClick(object sender, RoutedEventArgs e)
     {
-        if (_scanCancellation is not null) return;
+        if (_closed || _choosingSourceFolder || _scanCancellation is not null) return;
         var picker = new OpenFileDialog
         {
             Title = "Choose this API's OpenAPI or Swagger JSON document",
@@ -71,7 +102,7 @@ public partial class ApiEndpointsWindow : Window
 
     private async Task ScanAsync()
     {
-        if (_closed || _scanCancellation is not null) return;
+        if (_closed || _choosingSourceFolder || _scanCancellation is not null) return;
         using var cancellation = new CancellationTokenSource();
         _scanCancellation = cancellation;
         SetBusy(true);
@@ -82,24 +113,28 @@ public partial class ApiEndpointsWindow : Window
         VerbsText.Text = "";
         OperationsGrid.ItemsSource = null;
         ControllersGrid.ItemsSource = null;
+        MinimalGrid.ItemsSource = null;
         SelectedDetails.Text = "";
         WarningsPanel.Visibility = Visibility.Collapsed;
+        SourceFolderPrompt.Visibility = Visibility.Collapsed;
         CopyButton.IsEnabled = false;
         EmptyText.Text = "Reading API metadata…";
         EmptyText.Visibility = Visibility.Visible;
-        SourceText.Text = _openApiFile ?? WorkingDirectory;
-        SetStatus(_openApiFile is null ? "Scanning attributed controller source…" : "Reading local OpenAPI JSON…");
+        SourceText.Text = _openApiFile ?? SourceDirectory;
+        SetStatus(_openApiFile is null ? "Scanning controller actions and minimal API source…" : "Reading local OpenAPI JSON…");
         try
         {
             var result = _openApiFile is { } file
                 ? await ApiEndpointDiscovery.LoadOpenApiAsync(file, cancellation.Token)
-                : await ApiEndpointDiscovery.AnalyzeSourceAsync(WorkingDirectory, cancellation.Token);
-            var controllerRows = await Task.Run(() => BuildControllerRows(result), cancellation.Token);
+                : _sourceDirectory is { } sourceDirectory
+                    ? await ApiEndpointDiscovery.AnalyzeSourceFolderAsync(sourceDirectory, cancellation.Token)
+                    : await ApiEndpointDiscovery.AnalyzeSourceAsync(WorkingDirectory, cancellation.Token);
+            var rows = await Task.Run(() => (Controllers: BuildControllerRows(result), Minimal: BuildMinimalRows(result)), cancellation.Token);
             cancellation.Token.ThrowIfCancellationRequested();
             if (_closed) return;
             _inventory = result;
             _checkedAt = DateTimeOffset.Now;
-            ShowInventory(controllerRows);
+            ShowInventory(rows.Controllers, rows.Minimal);
             InventoryChanged?.Invoke(result);
         }
         catch (OperationCanceledException)
@@ -122,28 +157,34 @@ public partial class ApiEndpointsWindow : Window
         }
     }
 
-    private void ShowInventory(ControllerRow[] controllerRows)
+    private void ShowInventory(ControllerRow[] controllerRows, MinimalRow[] minimalRows)
     {
         if (_inventory is not { } result) return;
         var source = result.SourceKind == "Source";
         SourceText.Text = $"{result.SourceLabel} · {result.SourcePath}";
         CountsText.Text = $"{result.TotalOperationCount:N0} discovered endpoint operations" +
-            (source ? $" · {result.ControllerCount:N0} controllers · {result.ControllerActionCount:N0} declared action methods" : "");
+            (source ? $" · {result.ControllerCount:N0} controllers · {result.ControllerActionCount:N0} declared action methods" +
+                $" · {result.MinimalEndpointCount:N0} minimal API registrations · {result.MinimalHandlerCount:N0} identifiable minimal handlers" : "");
         var counts = result.HttpMethodCounts.ToDictionary(item => item.HttpMethod, item => item.Count, StringComparer.OrdinalIgnoreCase);
         VerbsText.Text = string.Join("   ·   ", CommonVerbs.Concat(counts.Keys.Except(CommonVerbs, StringComparer.OrdinalIgnoreCase))
             .Select(verb => $"{verb} {counts.GetValueOrDefault(verb):N0}"));
         SetStatus($"{(result.IsPartial ? "Partial inventory — review limitations below" : "Inventory read") } · {_checkedAt:t}" +
-            (source ? $" · {result.ScannedFileCount:N0} source files" : " · controller/action counts unavailable from OpenAPI"), result.IsPartial);
+            (source ? $" · {result.ScannedFileCount:N0} source files" : " · controller/action/minimal counts unavailable from OpenAPI"), result.IsPartial);
         WarningsText.Text = string.Join(Environment.NewLine, result.Warnings.Select(warning => "• " + warning));
         WarningsPanel.Visibility = result.Warnings.Count > 0 ? Visibility.Visible : Visibility.Collapsed;
+        SourceFolderPrompt.Visibility = source && result.TotalOperationCount == 0 ? Visibility.Visible : Visibility.Collapsed;
         var previousVerb = VerbFilter.SelectedItem as string;
         VerbFilter.ItemsSource = new[] { "All methods" }.Concat(CommonVerbs)
             .Concat(counts.Keys.Except(CommonVerbs, StringComparer.OrdinalIgnoreCase)).ToArray();
         VerbFilter.SelectedItem = previousVerb ?? "All methods";
         if (VerbFilter.SelectedIndex < 0) VerbFilter.SelectedIndex = 0;
         ControllersGrid.ItemsSource = controllerRows;
+        MinimalGrid.ItemsSource = minimalRows;
+        if (!source && ReferenceEquals(DetailsTabs.SelectedItem, MinimalTab)) DetailsTabs.SelectedIndex = 0;
+        MinimalTab.Visibility = source ? Visibility.Visible : Visibility.Collapsed;
         CopyButton.IsEnabled = true;
         SelectedDetails.Text = ApiEndpointInventory.ActionCountingSemantics +
+            (source ? " " + ApiEndpointInventory.MinimalEndpointCountingSemantics + " Minimal API rows summarize resolved registrations by source file." : "") +
             " Controller rows summarize resolved operations and may overlap; their totals need not add to the inventory total. OpenAPI grouping uses the first tag on each operation.";
         ApplyFilter();
     }
@@ -152,6 +193,7 @@ public partial class ApiEndpointsWindow : Window
     {
         var source = result.SourceKind == "Source";
         return result.Operations.SelectMany(operation => operation.Origins.Select(origin => (operation, origin)))
+            .Where(entry => !source || entry.origin.OriginKind != "Minimal")
             .GroupBy(entry => source
                 ? string.IsNullOrWhiteSpace(entry.origin.ControllerIdentity ?? entry.origin.Controller) ? "Unattributed" : entry.origin.ControllerIdentity ?? entry.origin.Controller
                 : string.IsNullOrWhiteSpace(entry.origin.Tag) ? "Untagged" : entry.origin.Tag)
@@ -162,6 +204,16 @@ public partial class ApiEndpointsWindow : Window
                 string.Join(" · ", group.Select(entry => entry.operation).Distinct().GroupBy(operation => operation.HttpMethod)
                     .OrderBy(verbs => verbs.Key).Select(verbs => $"{verbs.Key} {verbs.Count():N0}")))).ToArray();
     }
+
+    private static MinimalRow[] BuildMinimalRows(ApiEndpointInventory result) => result.Operations
+        .SelectMany(operation => operation.Origins.Where(origin => origin.OriginKind == "Minimal").Select(origin => (operation, origin)))
+        .GroupBy(entry => entry.origin.File)
+        .OrderBy(group => group.Key, StringComparer.OrdinalIgnoreCase)
+        .Select(group => new MinimalRow(group.Key,
+            group.Select(entry => (entry.origin.File, entry.origin.DeclarationOffset)).Distinct().Count(),
+            group.Select(entry => entry.operation).Distinct().Count(),
+            string.Join(" · ", group.Select(entry => entry.operation).Distinct().GroupBy(operation => operation.HttpMethod)
+                .OrderBy(verbs => verbs.Key).Select(verbs => $"{verbs.Key} {verbs.Count():N0}")))).ToArray();
 
     private void FilterChanged(object sender, SelectionChangedEventArgs e) { if (_initialized) QueueFilter(); }
     private void SearchChanged(object sender, TextChangedEventArgs e) { if (_initialized) QueueFilter(); }
@@ -188,7 +240,9 @@ public partial class ApiEndpointsWindow : Window
         OperationsGrid.ItemsSource = visible;
         EmptyText.Visibility = visible.Length == 0 ? Visibility.Visible : Visibility.Collapsed;
         EmptyText.Text = result.TotalOperationCount == 0
-            ? "No supported endpoint operations were discovered. Review limitations or choose an OpenAPI JSON file."
+            ? result.SourceKind == "Source"
+                ? "No supported endpoint operations were discovered. Choose a controllers or endpoints folder, or review limitations."
+                : "No endpoint operations were found in the selected OpenAPI JSON file."
             : "No endpoints match these filters.";
     }
 
@@ -201,8 +255,9 @@ public partial class ApiEndpointsWindow : Window
 
     private void SetBusy(bool busy)
     {
-        SourceButton.IsEnabled = OpenApiButton.IsEnabled = RefreshButton.IsEnabled = !busy;
+        SourceButton.IsEnabled = SourceFolderButton.IsEnabled = OpenApiButton.IsEnabled = RefreshButton.IsEnabled = !busy;
         CancelButton.IsEnabled = busy;
+        ScanProgress.Visibility = busy ? Visibility.Visible : Visibility.Collapsed;
     }
 
     private void SetStatus(string text, bool warning = false)
@@ -233,6 +288,7 @@ public partial class ApiEndpointsWindow : Window
             .AppendLine($"Read {_checkedAt:g}; {(result.IsPartial ? "partial" : "static metadata inventory")}")
             .AppendLine(CountsText.Text).AppendLine(VerbsText.Text)
             .AppendLine(ApiEndpointInventory.CountingSemantics).AppendLine(ApiEndpointInventory.ActionCountingSemantics);
+        if (result.SourceKind == "Source") text.AppendLine(ApiEndpointInventory.MinimalEndpointCountingSemantics);
         foreach (var warning in result.Warnings) text.AppendLine("Limitation: " + warning);
         text.AppendLine().AppendLine("HTTP method\tRoute template\tDeclared by");
         foreach (var operation in result.Operations)
@@ -251,4 +307,5 @@ public partial class ApiEndpointsWindow : Window
     }
 
     private sealed record ControllerRow(string Name, string ActionCount, int OperationCount, string Verbs);
+    private sealed record MinimalRow(string Name, int RegistrationCount, int OperationCount, string Verbs);
 }

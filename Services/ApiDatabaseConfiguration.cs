@@ -24,12 +24,14 @@ public sealed class ApiDatabaseConfiguration
     private readonly string? _selection;
     private readonly string? _launchCommand;
     private readonly ApiSecretStore _store;
+    private readonly bool _discoveryOnly;
     private readonly int? _npgsqlMajorVersion;
     private readonly Dictionary<string, string?> _fileRevisions = new(StringComparer.OrdinalIgnoreCase);
     private ApiSecretSnapshot _snapshot;
     private bool _hasSaved;
 
-    private ApiDatabaseConfiguration(ServiceProfile profile, string directory, bool importLegacyForReview)
+    private ApiDatabaseConfiguration(ServiceProfile profile, string directory, bool importLegacyForReview,
+        bool discoveryOnly = false)
     {
         if (profile.IsConsole)
             throw new ApiSecretStoreException("Choose a web API service before changing its database.");
@@ -41,6 +43,7 @@ public sealed class ApiDatabaseConfiguration
             throw new ApiSecretStoreException("Set a loopback HTTP or HTTPS API URL before changing its database.");
 
         _profile = profile;
+        _discoveryOnly = discoveryOnly;
         _profileId = profile.Id;
         _profileDirectory = profile.WorkingDirectory;
         _startCommand = profile.StartCommand;
@@ -56,21 +59,29 @@ public sealed class ApiDatabaseConfiguration
 
         if (!_snapshot.HasProtectedStore && _store.HasUserSecretsReference)
         {
-            // Track even a missing legacy file so a new external store cannot silently appear
-            // between review and the first protected save. A protected store remains authoritative.
-            var legacyPath = Path.Combine(System.Environment.GetFolderPath(System.Environment.SpecialFolder.ApplicationData),
-                "Microsoft", "UserSecrets", _store.UserSecretsId, "secrets.json");
-            ObserveRevision(legacyPath);
+            // Passive discovery must never read external plaintext values. A protected
+            // store, including an empty store, remains authoritative over legacy values.
+            if (!discoveryOnly)
+            {
+                // Track even a missing legacy file so a new external store cannot silently
+                // appear between explicit review and the first protected save.
+                var legacyPath = Path.Combine(System.Environment.GetFolderPath(System.Environment.SpecialFolder.ApplicationData),
+                    "Microsoft", "UserSecrets", _store.UserSecretsId, "secrets.json");
+                ObserveRevision(legacyPath);
+            }
             if (_snapshot.HasLegacyStore)
             {
-                if (!importLegacyForReview)
+                if (discoveryOnly || !importLegacyForReview)
                     throw new ApiSecretStoreException("Review and import this Local profile's existing .NET user-secrets before changing its database. Original plaintext files remain unchanged.");
                 _snapshot = _store.ReadLegacyForImport(production: false, _snapshot);
             }
         }
 
-        if (_selection is null) ValidateLegacyLaunch(endpoint);
-        ValidateStartupConfiguration();
+        if (!discoveryOnly)
+        {
+            if (_selection is null) ValidateLegacyLaunch(endpoint);
+            ValidateStartupConfiguration();
+        }
         var connections = new Dictionary<string, ApiDatabaseConnectionSetting>(StringComparer.OrdinalIgnoreCase);
         ReadAppSettings("appsettings.json", connections);
         ReadAppSettings("appsettings.Development.json", connections);
@@ -80,7 +91,7 @@ public sealed class ApiDatabaseConfiguration
                 _snapshot.IsLegacyImport ? "Reviewed Local .NET user-secrets" : "Encrypted Local launcher override",
                 ReadDatabaseName(pair.Value));
         }
-        if (connections.Count == 0)
+        if (connections.Count == 0 && !discoveryOnly)
             throw new ApiSecretStoreException("No DefaultConnectionString or standard ConnectionStrings setting was found in this API's Local configuration. Add one in API configuration, then reopen Change DB.");
         Connections = Array.AsReadOnly(connections.Values.OrderBy(setting => ApiDatabaseIdentifier.ConnectionKeyPriority(setting.Key))
             .ThenBy(setting => setting.Key, StringComparer.OrdinalIgnoreCase).ToArray());
@@ -106,9 +117,21 @@ public sealed class ApiDatabaseConfiguration
         }
     }
 
+    /// <summary>Reads standard Local names without importing legacy values or granting restart eligibility.</summary>
+    internal static ApiDatabaseConfiguration LoadForDiscovery(ServiceProfile profile, string directory)
+    {
+        try { return new(profile, directory, importLegacyForReview: false, discoveryOnly: true); }
+        catch (Exception ex) when (IsFileError(ex))
+        {
+            throw new ApiSecretStoreException("The API's Local database configuration could not be read safely. Check its project folder, configuration files and access permissions.");
+        }
+    }
+
     /// <summary>Validates an edited value and source snapshots without writing or connecting.</summary>
     public ApiDatabaseConnectionChange Prepare(string key, string connectionString)
     {
+        if (_discoveryOnly)
+            throw new ApiSecretStoreException("Open Change DB and review the Local configuration before saving a database change.");
         ValidateSnapshot();
         if (!Connections.Any(setting => setting.Key.Equals(key, StringComparison.OrdinalIgnoreCase)))
             throw new ApiSecretStoreException("Choose one of the discovered connection settings before saving.");
@@ -209,7 +232,8 @@ public sealed class ApiDatabaseConfiguration
                 finally { if (bytes is not null) CryptographicOperations.ZeroMemory(bytes); }
             }
             var latest = _store.Load(production: false);
-            if (latest.Revision != _snapshot.Revision || latest.HasProtectedStore != _snapshot.HasProtectedStore)
+            if (latest.Revision != _snapshot.Revision || latest.HasProtectedStore != _snapshot.HasProtectedStore ||
+                (_discoveryOnly && !latest.HasProtectedStore && latest.HasLegacyStore != _snapshot.HasLegacyStore))
                 throw Changed();
         }
         catch (Exception ex) when (IsFileError(ex))
@@ -228,6 +252,10 @@ public sealed class ApiDatabaseConfiguration
         }
         catch (Exception ex) when (ex is ArgumentException or FormatException or OverflowException) { return null; }
     }
+
+    /// <summary>Reads a safe title without granting support for editing SQLite file references.</summary>
+    public static string? ReadDatabaseDisplayName(string connectionString) =>
+        ApiDatabaseIdentifier.FromConnectionString(connectionString);
 
     public static string WithDatabaseName(string connectionString, string databaseName)
     {
@@ -552,11 +580,16 @@ public sealed class ApiDatabaseConfiguration
 public sealed class ApiDatabaseConnectionSetting
 {
     internal ApiDatabaseConnectionSetting(string key, string value, string source, string? databaseName)
-    { Key = key; Value = value; Source = source; DatabaseName = databaseName; }
+    {
+        Key = key; Value = value; Source = source; DatabaseName = databaseName;
+        DatabaseDisplayName = ApiDatabaseConfiguration.ReadDatabaseDisplayName(value);
+    }
     public string Key { get; }
     public string Value { get; }
     public string Source { get; }
     public string? DatabaseName { get; }
+    public string? DatabaseDisplayName { get; }
+    public bool CanEditDatabaseName => DatabaseName is not null;
     public override string ToString() => Key;
 }
 

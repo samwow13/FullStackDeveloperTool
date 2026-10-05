@@ -166,13 +166,13 @@ public sealed partial class ServiceViewModel(ServiceRunner runner) : ObservableO
         : Runner.AppliedDatabaseIdentifier is not null
             ? $"Name from applied {Runner.AppliedConfigurationEnvironment} launcher connection overrides. Active database connection not verified."
             : "Launcher cannot identify the running API database from this service. External processes and custom configuration providers are unverified.";
-    // A database card represents a successful API query, not a configured connection string.
-    // Retain that observation while this API is stopped, but never retain it across API runs.
+    // Verification belongs to one API run. Discovered configuration remains separately
+    // tracked across stops and restarts without being represented as a live query.
     public string? VerifiedDatabaseName => LiveDatabaseName;
     public string? LastVerifiedDatabaseName => _verifiedDatabaseRunVersion == Runner.ManagedApiRunVersion
         ? _verifiedDatabaseName : null;
     public bool HasVerifiedDatabaseCard => LastVerifiedDatabaseName is not null || _databaseChangeCardName is not null;
-    public bool ShowChangeDatabaseRecovery => HasApiConfiguration && !HasVerifiedDatabaseCard;
+    public bool ShowChangeDatabaseRecovery => HasApiConfiguration && !HasDatabaseCard;
     public bool IsVerifiedDatabaseHealthy => VerifiedDatabaseName is { } name && LastVerifiedDatabaseName == name;
     public string DatabaseCardName => LastVerifiedDatabaseName ?? _databaseChangeCardName ?? "Database";
     public string DatabaseCardStatus => _databaseChangeStatus ?? (IsVerifiedDatabaseHealthy ? "Connected · Healthy"
@@ -185,7 +185,7 @@ public sealed partial class ServiceViewModel(ServiceRunner runner) : ObservableO
 
     internal void BeginDatabaseChange(string expectedName)
     {
-        _databaseChangeCardName = DatabaseCardName;
+        _databaseChangeCardName = LastVerifiedDatabaseName ?? expectedName;
         _databaseChangeExpectedName = expectedName;
         _databaseChangePreviousRun = Runner.ManagedApiRunVersion;
         _databaseChangeStatus = "Changing DB…";
@@ -288,6 +288,7 @@ public sealed partial class ServiceViewModel(ServiceRunner runner) : ObservableO
 
     private void NotifyDatabaseCard()
     {
+        UpdateApiDatabaseServices();
         NotifyIfChanged(VerifiedDatabaseName, nameof(VerifiedDatabaseName));
         NotifyIfChanged(LastVerifiedDatabaseName, nameof(LastVerifiedDatabaseName));
         NotifyIfChanged(HasVerifiedDatabaseCard, nameof(HasVerifiedDatabaseCard));

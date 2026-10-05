@@ -50,9 +50,15 @@ public partial class MainWindow
                 .GroupBy(folder => folder.Directory, StringComparer.OrdinalIgnoreCase)
                 .Select(group => new GitWorkspaceFolder(string.Join(" / ", group.Select(folder => folder.Label)), group.Key))
                 .ToArray();
-            new GitWorkspaceWindow(project.Name, folders) { Owner = this }.ShowDialog();
+            var workspace = new GitWorkspaceWindow(project.Name, folders,
+                preferredRepositoryRoot: SelectedNextCommitRepository?.RepositoryRoot) { Owner = this };
+            workspace.ShowDialog();
             await RefreshProjectBranchesAsync();
             await RefreshNextCommitAsync();
+            if (ReferenceEquals(SelectedProjectItem, project) && workspace.SelectedRepositoryRoot is { } root)
+                SelectedNextCommitRepository = NextCommitRepositories.FirstOrDefault(repository =>
+                    string.Equals(repository.RepositoryRoot, root, StringComparison.OrdinalIgnoreCase))
+                    ?? SelectedNextCommitRepository;
         }
         catch (Exception)
         {

@@ -24,7 +24,8 @@ public partial class MainWindow
         try
         {
             editor = new ChangeDatabaseWindow(service.Profile, service.Directory,
-                (configuration, key, value) => SaveDatabaseAndRestartAsync(service, configuration, key, value, editor!))
+                (configuration, key, value) => SaveDatabaseAndRestartAsync(service, configuration, key, value, editor!),
+                service.ObserveDatabaseConfiguration)
                 { Owner = this };
             editor.ShowDialog();
         }
@@ -66,6 +67,8 @@ public partial class MainWindow
                 editor.SetStatus("Saving encrypted Local API configuration…");
                 await Task.Run(() => configuration.Save(change));
                 saved = true;
+                service.Runner.ConfigurationNeedsRestart = true;
+                service.ObserveDatabaseConfiguration(configuration);
                 editor.MarkConfigurationSaved();
                 service.BeginDatabaseChange(expectedName);
                 foreach (var other in _runners.Values.SelectMany(list => list).Where(item =>

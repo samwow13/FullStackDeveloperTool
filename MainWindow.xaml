@@ -479,9 +479,9 @@
                                        VerticalAlignment="Center" Margin="0,0,10,4"/>
                             <Border Background="#173B34" BorderBrush="{StaticResource AccentBrush}" BorderThickness="1" CornerRadius="7"
                                     Padding="8,3" Margin="0,0,0,4" VerticalAlignment="Center"
-                                    Visibility="{Binding AllServicesRunning, Converter={StaticResource BoolToVisibility}}">
+                                    Visibility="{Binding AllTrackedServicesHealthy, Converter={StaticResource BoolToVisibility}}">
                                 <TextBlock Text="● Running" Foreground="{StaticResource AccentBrush}" FontWeight="SemiBold" FontSize="11"
-                                           ToolTip="All services are running." AutomationProperties.Name="All services are running"
+                                           ToolTip="All apps are running and tracked databases have verified health." AutomationProperties.Name="All apps running and tracked databases healthy"
                                            AutomationProperties.LiveSetting="Polite"/>
                             </Border>
                         </WrapPanel>
@@ -707,7 +707,7 @@
                                                                         </TextBlock>
                                                                         <Grid Grid.Row="4" Grid.ColumnSpan="3" Margin="0,12,0,0" Visibility="{Binding ShowApiDatabaseLabel, Converter={StaticResource BoolToVisibility}}">
                                                                             <Grid.ColumnDefinitions><ColumnDefinition Width="90"/><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
-                                                                            <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
+                                                                            <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
                                                                             <TextBlock Text="Endpoints" FontSize="12" VerticalAlignment="Center" Foreground="{StaticResource MutedBrush}"/>
                                                                             <TextBlock Grid.Column="1" Text="{Binding ApiEndpoints.Value}" Foreground="{Binding ApiEndpoints.Foreground}" FontSize="14" VerticalAlignment="Center" Margin="0,0,10,0"
                                                                                        AutomationProperties.Name="API endpoints" AutomationProperties.LiveSetting="Polite" ToolTipService.ShowDuration="30000">
@@ -718,11 +718,13 @@
                                                                             <ProgressBar Grid.Row="1" Grid.ColumnSpan="3" Height="3" IsIndeterminate="True" Margin="0,6,0,4" Foreground="{StaticResource AccentBrush}" Background="#111923" BorderThickness="0"
                                                                                          Visibility="{Binding ApiEndpoints.IsBusy, Converter={StaticResource BoolToVisibility}}" AutomationProperties.Name="Counting API endpoints"/>
                                                                             <TextBlock Grid.Row="2" Grid.ColumnSpan="2" Text="{Binding ApiEndpoints.Status}" Foreground="#FFD27A" FontSize="11" TextWrapping="Wrap" Margin="0,6,10,0"
-                                                                                       Visibility="{Binding ApiEndpoints.HasError, Converter={StaticResource BoolToVisibility}}" AutomationProperties.LiveSetting="Polite"/>
+                                                                                       Visibility="{Binding ApiEndpoints.HasStatus, Converter={StaticResource BoolToVisibility}}" AutomationProperties.LiveSetting="Polite"/>
                                                                             <Button Grid.Row="3" Grid.Column="1" Content="Details…" Click="ApiEndpoints_Click" Padding="0,3" FontSize="11" Background="Transparent" BorderThickness="0" Foreground="{StaticResource MutedBrush}" HorizontalAlignment="Left"
                                                                                     Visibility="{Binding ApiEndpoints.HasResult, Converter={StaticResource BoolToVisibility}}" AutomationProperties.Name="API endpoint details"/>
                                                                             <Button Grid.Row="3" Grid.ColumnSpan="3" Content="Select branch…" Click="SelectStatisticsBranch_Click" Padding="0,3" FontSize="11" Background="Transparent" BorderThickness="0" Foreground="{StaticResource AccentBrush}" HorizontalAlignment="Left"
                                                                                     Tag="{Binding ElementName=StatisticsPopup}" Visibility="{Binding ApiEndpoints.NeedsBranch, Converter={StaticResource BoolToVisibility}}" AutomationProperties.Name="Select tracked branch for endpoint count"/>
+                                                                            <Button Grid.Row="4" Grid.Column="1" Grid.ColumnSpan="2" Content="Choose source folder…" Click="ChooseApiEndpointFolder_Click" Padding="0,5,0,3" FontSize="11" Background="Transparent" BorderThickness="0" Foreground="{StaticResource AccentBrush}" HorizontalAlignment="Left"
+                                                                                    Tag="{Binding ElementName=StatisticsPopup}" Visibility="{Binding ApiEndpoints.ShowSourceFolderChoice, Converter={StaticResource BoolToVisibility}}" IsEnabled="{Binding ApiEndpoints.CanChooseSourceFolder}" AutomationProperties.Name="Choose controllers or endpoints folder and recount"/>
                                                                         </Grid>
                                                                     </Grid>
                                                                 </ScrollViewer>
@@ -794,32 +796,36 @@
                         <ItemsControl ItemsSource="{Binding Services}">
                             <ItemsControl.ItemTemplate><DataTemplate>
                                 <StackPanel>
-                                <Border Background="{StaticResource CardBrush}" BorderBrush="{StaticResource BorderBrush}" BorderThickness="1" CornerRadius="9" Padding="12" Margin="0,0,0,8"
-                                        Visibility="{Binding HasVerifiedDatabaseCard, Converter={StaticResource BoolToVisibility}}">
-                                    <Expander Style="{StaticResource ServiceCardExpander}" AutomationProperties.Name="{Binding DatabaseCardName}"
-                                              AutomationProperties.HelpText="{Binding DatabaseCardDetails}">
+                                <ItemsControl ItemsSource="{Binding ApiDatabases}">
+                                    <ItemsControl.ItemTemplate><DataTemplate>
+                                <Border Background="{StaticResource CardBrush}" BorderBrush="{StaticResource BorderBrush}" BorderThickness="1" CornerRadius="9" Padding="12" Margin="0,0,0,8">
+                                    <Expander Style="{StaticResource ServiceCardExpander}" AutomationProperties.Name="{Binding Name}"
+                                              AutomationProperties.HelpText="{Binding Details}">
                                         <Expander.Header>
                                             <Grid>
                                                 <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
                                                 <StackPanel Margin="0,0,12,0">
                                                     <WrapPanel VerticalAlignment="Center">
-                                                        <TextBlock Text="{Binding DatabaseCardName}" FontSize="17" FontWeight="SemiBold" TextWrapping="Wrap" VerticalAlignment="Center" Margin="0,0,10,0" AutomationProperties.LiveSetting="Polite"/>
-                                                        <ToggleButton Content="Change DB" Click="ChangeDatabase_Click" Style="{StaticResource ServiceUtilityToggle}" Padding="9,5" FontSize="11"
+                                                        <TextBlock Text="{Binding Name}" FontSize="17" FontWeight="SemiBold" TextWrapping="Wrap" VerticalAlignment="Center" Margin="0,0,10,0" AutomationProperties.LiveSetting="Polite"/>
+                                                        <ToggleButton DataContext="{Binding Service}" Content="Change DB" Click="ChangeDatabase_Click" Style="{StaticResource ServiceUtilityToggle}" Padding="9,5" FontSize="11"
                                                                 IsEnabled="{Binding CanChangeDatabase}" AutomationProperties.Name="Change API database"
                                                                 ToolTip="Change the Local API connection and restart that API." ToolTipService.ShowOnDisabled="True"/>
                                                     </WrapPanel>
-                                                    <TextBlock Text="{Binding Name, StringFormat=Discovered through {0}}" Foreground="{StaticResource MutedBrush}" FontSize="12" TextWrapping="Wrap" Margin="0,4,0,0"/>
+                                                    <TextBlock Text="{Binding SourceLabel}" Foreground="{StaticResource MutedBrush}" FontSize="12" TextWrapping="Wrap" Margin="0,4,0,0" ToolTip="{Binding ConnectionSource}"/>
                                                 </StackPanel>
-                                                <Border Grid.Column="1" Background="#111923" CornerRadius="5" Padding="10,5" VerticalAlignment="Top" ToolTip="{Binding DatabaseCardDetails}">
-                                                    <TextBlock Text="{Binding DatabaseCardStatus}" Foreground="{Binding DatabaseCardStatusColor}" FontWeight="SemiBold" FontSize="12" AutomationProperties.LiveSetting="Polite"/>
+                                                <Border Grid.Column="1" Background="#111923" CornerRadius="5" Padding="10,5" VerticalAlignment="Top" ToolTip="{Binding Details}">
+                                                    <TextBlock Text="{Binding Status}" Foreground="{Binding StatusColor}" FontWeight="SemiBold" FontSize="12" AutomationProperties.LiveSetting="Polite"/>
                                                 </Border>
                                             </Grid>
                                         </Expander.Header>
                                         <StackPanel Margin="29,8,0,0">
-                                            <TextBlock Text="{Binding DatabaseCardDetails}" Foreground="{StaticResource MutedBrush}" FontSize="13" TextWrapping="Wrap"/>
+                                            <TextBlock Text="{Binding ConnectionSource}" Foreground="{StaticResource MutedBrush}" FontSize="12" TextWrapping="Wrap" Margin="0,0,0,6"/>
+                                            <TextBlock Text="{Binding Details}" Foreground="{StaticResource MutedBrush}" FontSize="13" TextWrapping="Wrap"/>
                                         </StackPanel>
                                     </Expander>
                                 </Border>
+                                    </DataTemplate></ItemsControl.ItemTemplate>
+                                </ItemsControl>
                                 <ItemsControl ItemsSource="{Binding FlutterDatabases}">
                                     <ItemsControl.ItemTemplate><DataTemplate>
                                         <Border Background="{StaticResource CardBrush}" BorderBrush="{StaticResource BorderBrush}" BorderThickness="1" CornerRadius="9" Padding="12" Margin="0,0,0,8">
@@ -871,7 +877,7 @@
                     <Grid Grid.Column="1">
                         <ToggleButton x:Name="NextCommitSettingsToggle" Style="{StaticResource NextCommitSettingsButton}"
                                       PreviewKeyDown="NextCommitSettingsToggle_PreviewKeyDown" ToolTip="Next commit settings"
-                                      AutomationProperties.Name="Next commit settings" AutomationProperties.HelpText="Choose repository and PR sound reminder. Click outside or press Escape to close."/>
+                                      AutomationProperties.Name="Next commit settings" AutomationProperties.HelpText="Set PR sound reminder. Click outside or press Escape to close."/>
                         <Popup x:Name="NextCommitSettingsMenu" PlacementTarget="{Binding ElementName=NextCommitSettingsToggle}" Placement="Bottom" VerticalOffset="6"
                                IsOpen="{Binding IsChecked, ElementName=NextCommitSettingsToggle, Mode=TwoWay}" StaysOpen="False" AllowsTransparency="True"
                                DataContext="{Binding PlacementTarget.DataContext, RelativeSource={RelativeSource Self}}" Opened="NextCommitSettingsMenu_Opened">
@@ -879,9 +885,6 @@
                                     PreviewKeyDown="NextCommitSettingsMenu_PreviewKeyDown" KeyboardNavigation.TabNavigation="Cycle">
                                 <StackPanel>
                                     <TextBlock Text="Next commit settings" Foreground="{StaticResource TextBrush}" FontWeight="SemiBold" Margin="0,0,0,12"/>
-                                    <Label Content="_Repository" Target="{Binding ElementName=NextCommitRepositoryPicker}" Padding="0,0,0,5" Foreground="{StaticResource MutedBrush}" FontSize="11"/>
-                                    <ComboBox x:Name="NextCommitRepositoryPicker" ItemsSource="{Binding NextCommitRepositories}" SelectedItem="{Binding SelectedNextCommitRepository, Mode=TwoWay}"
-                                              DisplayMemberPath="DisplayName" ToolTip="{Binding SelectedNextCommitRepository.RepositoryRoot}" AutomationProperties.Name="Next commit repository"/>
                                     <TextBlock Text="{Binding NextCommitStatus}" Foreground="{StaticResource MutedBrush}" FontSize="11" TextWrapping="Wrap" Margin="0,8,0,0"/>
                                     <Border Height="1" Background="{StaticResource BorderBrush}" Margin="0,12,0,12"/>
                                     <TextBlock Text="{Binding NextCommitCharacterCount}" TextWrapping="Wrap" FontSize="11" Foreground="{StaticResource MutedBrush}"/>
@@ -898,8 +901,20 @@
                     <Button Grid.Column="2" Style="{StaticResource HideSectionButton}" Tag="NextCommit" Click="HideSection_Click" HorizontalAlignment="Right" AutomationProperties.Name="Hide next commit"/>
                 </Grid>
                 <Grid Grid.Row="1">
-                    <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="*"/></Grid.RowDefinitions>
-                    <Border Background="{StaticResource CardBrush}" BorderBrush="{StaticResource BorderBrush}" BorderThickness="1" CornerRadius="7" Padding="10" Margin="0,0,0,12">
+                    <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="*"/></Grid.RowDefinitions>
+                    <Grid Margin="0,0,0,12" Visibility="{Binding HasNextCommitRepositoryChoices, Converter={StaticResource BoolToVisibility}}">
+                        <Grid.ColumnDefinitions><ColumnDefinition Width="Auto"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+                        <Label Content="_Repo" Target="{Binding ElementName=NextCommitRepositoryPicker}" Padding="0,0,8,0"
+                               Foreground="{StaticResource MutedBrush}" FontSize="11" VerticalAlignment="Center"/>
+                        <ComboBox x:Name="NextCommitRepositoryPicker" Grid.Column="1" ItemsSource="{Binding NextCommitRepositories}"
+                                  SelectedItem="{Binding SelectedNextCommitRepository, Mode=TwoWay}" DisplayMemberPath="DisplayName"
+                                  ToolTip="{Binding SelectedNextCommitRepository.RepositoryRoot}" AutomationProperties.Name="Next commit repository">
+                            <ComboBox.ItemContainerStyle><Style TargetType="ComboBoxItem">
+                                <Setter Property="ToolTip" Value="{Binding RepositoryRoot}"/>
+                            </Style></ComboBox.ItemContainerStyle>
+                        </ComboBox>
+                    </Grid>
+                    <Border Grid.Row="1" Background="{StaticResource CardBrush}" BorderBrush="{StaticResource BorderBrush}" BorderThickness="1" CornerRadius="7" Padding="10" Margin="0,0,0,12">
                         <StackPanel>
                             <Grid>
                                 <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
@@ -934,7 +949,7 @@
                                        ToolTip="{Binding DashboardGitConflictSchedule}" AutomationProperties.LiveSetting="Polite"/>
                         </StackPanel>
                     </Border>
-                    <StackPanel Grid.Row="1" Margin="0,0,0,10">
+                    <StackPanel Grid.Row="2" Margin="0,0,0,10">
                         <TextBlock Text="{Binding NextCommitStatus}" Foreground="{StaticResource MutedBrush}" FontSize="11" TextWrapping="Wrap" Margin="0,0,0,10"
                                    Visibility="{Binding HasNextCommitStatusNotice, Converter={StaticResource BoolToVisibility}}" AutomationProperties.LiveSetting="Polite"/>
                         <TextBlock Text="{Binding NextCommitDraftHint}" Foreground="{StaticResource MutedBrush}" FontSize="11" TextWrapping="Wrap" Margin="0,0,0,10"
@@ -947,7 +962,7 @@
                             </Style.Triggers></Style></TextBlock.Style>
                         </TextBlock>
                     </StackPanel>
-                    <controls:CommitMessagePreview Grid.Row="2" Presentation="{Binding NextCommitPresentation}" ReadRequested="NextCommitMessage_ReadRequested"
+                    <controls:CommitMessagePreview Grid.Row="3" Presentation="{Binding NextCommitPresentation}" ReadRequested="NextCommitMessage_ReadRequested"
                                                    MinHeight="80" AutomationProperties.Name="Next commit message"
                                                    ToolTip="Unread text is mint and underlined. Click the message or press Enter to mark displayed updates read."/>
                 </Grid>

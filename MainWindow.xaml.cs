@@ -41,14 +41,29 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     public ObservableCollection<DeveloperToolViewModel> DeveloperTools { get; } = [];
     public ProjectProfile? SelectedProject { get; private set; }
     public string RootPath => SelectedProject is null ? "Add a project to start your workspace." : _store.ResolveRoot(SelectedProject);
-    public string Summary => Services.Count == 0 ? "No apps configured" : Services.Any(service => service.Profile.IsConsole)
-        ? $"{Services.Count(service => service.IsRunning)} running · {Services.Count(service => service.Runner.Snapshot.State == ServiceState.Completed)} completed · {Services.Count} apps"
-        : $"{Services.Count(x => x.IsRunning)} / {Services.Count} services online";
+    public string Summary
+    {
+        get
+        {
+            if (Services.Count == 0) return "No apps configured";
+            var databases = Services.Sum(service => service.DatabaseServiceCount);
+            var healthyDatabases = Services.Sum(service => service.HealthyDatabaseServiceCount);
+            var running = Services.Count(service => service.IsRunning);
+            if (Services.Any(service => service.Profile.IsConsole))
+            {
+                var apps = $"{running} running · {Services.Count(service => service.Runner.Snapshot.State == ServiceState.Completed)} completed · {Services.Count} apps";
+                return databases == 0 ? apps : $"{apps} · {healthyDatabases} / {databases} databases online";
+            }
+            return $"{running + healthyDatabases} / {Services.Count + databases} services online";
+        }
+    }
     public bool CanBatch => !IsEditing && !_addingProjectService && !_savingProjectEdits && !_checkingStartupServices && !_closeRequested && !_batchBusy && !_forceStopBatchBusy && !_closing && Services.Count > 0 && Services.All(x => !x.IsBusy && !x.IsStopping);
     public bool AllServicesRunning => Services.Count > 0 && Services.All(service => service.ShowRunningDot);
+    public bool AllTrackedServicesHealthy => AllServicesRunning &&
+        Services.All(service => service.DatabaseServiceCount == service.HealthyDatabaseServiceCount);
     public bool CanStartBatch => CanBatch && !_closeRequested && Services.Any(service => service.CanStart);
     public string StartAllDescription => AllServicesRunning
-        ? "All services are already running. No start is needed."
+        ? "All apps are already running. No start is needed."
         : CanStartBatch ? "Start only services that are stopped. Running services stay running."
         : Services.Count == 0 ? "No services are configured for this project."
         : "Start is unavailable while services are checking, starting, busy, blocked, or being edited. Review each service's status.";
@@ -158,6 +173,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
             runner.LogReceived += log => QueueLog(project.Id, runner, profile.Name, log);
             runner.ConsoleOutputReset += () => QueueConsoleReset(project.Id, runner);
             var service = new ServiceViewModel(runner) { AreCommandsBlocked = _addingProjectService || _checkingStartupServices || _closeRequested };
+            service.PropertyChanged += ServiceDatabaseSummary_PropertyChanged;
             service.ConfigureFlutterDatabases(project, _store.ResolveRoot(project), _flutterDatabaseLifetime.Token);
             runner.SnapshotChanged += () => QueueServiceStatusUpdate(project.Id, runner);
             runner.FrontendReady += (url, generation) => QueueFrontendBrowserOpen(project, service, url, generation);
@@ -168,6 +184,23 @@ public partial class MainWindow : Window, INotifyPropertyChanged
             runner.Dispose();
             throw;
         }
+    }
+
+    private void ServiceDatabaseSummary_PropertyChanged(object? sender, PropertyChangedEventArgs e)
+    {
+        if (sender is not ServiceViewModel service ||
+            e.PropertyName is not (nameof(ServiceViewModel.DatabaseServiceCount) or nameof(ServiceViewModel.HealthyDatabaseServiceCount))) return;
+        if (Dispatcher.HasShutdownStarted || Dispatcher.HasShutdownFinished) return;
+        void RefreshSummary()
+        {
+            if (!_closed && !_closeRequested && !_closing && Services.Contains(service))
+            {
+                Changed(nameof(Summary));
+                Changed(nameof(AllTrackedServicesHealthy));
+            }
+        }
+        if (Dispatcher.CheckAccess()) RefreshSummary();
+        else _ = Dispatcher.BeginInvoke(new Action(RefreshSummary), DispatcherPriority.Background);
     }
 
     private void QueueServiceStatusUpdate(string projectId, ServiceRunner runner)
@@ -242,6 +275,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
                 // Folder discovery is independent of process polling; a slow drive must
                 // not hold the global status refresh or a service command on the UI thread.
                 _ = service.RefreshApiProjectAvailabilityAsync();
+                _ = service.RefreshApiDatabaseDiscoveryAsync();
                 if (service.IsBusy || service.IsStopping) return;
                 try
                 {
@@ -282,6 +316,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     private void NotifyStartAllChanged()
     {
         Changed(nameof(AllServicesRunning));
+        Changed(nameof(AllTrackedServicesHealthy));
         Changed(nameof(CanStartBatch));
         Changed(nameof(StartAllDescription));
     }
@@ -305,6 +340,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
                 if ((applied == "Prod" && editor.SavedProdChanges) || (applied != "Prod" && editor.SavedLocalChanges))
                     other.Runner.ConfigurationNeedsRestart = true;
                 other.Update();
+                _ = other.RefreshApiDatabaseDiscoveryAsync(force: true);
             }
             Notice = "API configuration saved. Restart the API to apply its selected configuration, or choose Use Local & restart in API settings.";
             UpdateActions();

@@ -1,8 +1,10 @@
 using System.Windows;
+using System.Windows.Controls.Primitives;
 using System.Windows.Threading;
 using FullStackLauncher.Models;
 using FullStackLauncher.Services;
 using FullStackLauncher.ViewModels;
+using Microsoft.Win32;
 
 namespace FullStackLauncher;
 
@@ -12,7 +14,7 @@ public partial class MainWindow
     private readonly Dictionary<ServiceViewModel, ApiEndpointCountContext> _apiEndpointCountContexts = [];
     private readonly Dictionary<ServiceViewModel, CancellationTokenSource> _apiEndpointCountRuns = [];
 
-    private sealed record ApiEndpointCountContext(ProjectProfile Project, string Directory);
+    private sealed record ApiEndpointCountContext(ProjectProfile Project, string Directory, string? SourceDirectory = null);
 
     private async void CountApiEndpoints_Click(object sender, RoutedEventArgs e)
     {
@@ -20,14 +22,62 @@ public partial class MainWindow
         if (ServiceFrom(sender) is { } service) await CountApiEndpointsAsync(service);
     }
 
-    private async Task CountApiEndpointsAsync(ServiceViewModel service)
+    private async void ChooseApiEndpointFolder_Click(object sender, RoutedEventArgs e)
+    {
+        e.Handled = true;
+        if (_closing || _closed || _closeRequested || IsEditing ||
+            ServiceFrom(sender) is not { ShowApiDatabaseLabel: true } service || !service.ApiEndpoints.CanChooseSourceFolder ||
+            SelectedProject is not { } project) return;
+        var directory = service.Directory;
+        var popup = (sender as FrameworkElement)?.Tag as Popup;
+        var restorePopup = true;
+        popup?.SetCurrentValue(Popup.IsOpenProperty, false);
+        try
+        {
+            var picker = new OpenFolderDialog
+            {
+                Title = "Choose this API's controllers or endpoints folder",
+                InitialDirectory = _apiEndpointCountContexts.GetValueOrDefault(service)?.SourceDirectory ?? directory,
+                Multiselect = false
+            };
+            if (picker.ShowDialog(this) == true && IsCurrentApiEndpointFolderChoice(project, service, directory))
+            {
+                var count = CountApiEndpointsAsync(service, picker.FolderName);
+                // BeginCount runs before the popup reopens, retaining visible progress without
+                // its Opened handler starting a second automatic scan.
+                popup?.SetCurrentValue(Popup.IsOpenProperty, true);
+                restorePopup = false;
+                await count;
+            }
+        }
+        catch (Exception)
+        {
+            if (IsCurrentApiEndpointFolderChoice(project, service, directory))
+                service.ApiEndpoints.Fail("Source folder could not open. Retry.");
+        }
+        finally
+        {
+            if (restorePopup && IsCurrentApiEndpointFolderChoice(project, service, directory))
+                popup?.SetCurrentValue(Popup.IsOpenProperty, true);
+        }
+    }
+
+    private bool IsCurrentApiEndpointFolderChoice(ProjectProfile project, ServiceViewModel service, string directory) =>
+        !_closing && !_closed && !_closeRequested && ReferenceEquals(SelectedProject, project) && Projects.Contains(project) &&
+        _runners.GetValueOrDefault(project.Id)?.Contains(service) == true && service.ShowApiDatabaseLabel &&
+        string.Equals(service.Directory, directory, StringComparison.OrdinalIgnoreCase);
+
+    private async Task CountApiEndpointsAsync(ServiceViewModel service, string? sourceDirectory = null)
     {
         if (_closing || _closed || _closeRequested || !service.ShowApiDatabaseLabel || service.ApiEndpoints.IsBusy) return;
         var project = Projects.FirstOrDefault(candidate =>
             _runners.GetValueOrDefault(candidate.Id)?.Contains(service) == true);
         if (project is null || !ReferenceEquals(SelectedProject, project)) return;
 
-        var context = new ApiEndpointCountContext(project, service.Directory);
+        var previous = _apiEndpointCountContexts.GetValueOrDefault(service);
+        var context = new ApiEndpointCountContext(project, service.Directory, sourceDirectory ??
+            (previous is not null && ReferenceEquals(previous.Project, project) &&
+             string.Equals(previous.Directory, service.Directory, StringComparison.OrdinalIgnoreCase) ? previous.SourceDirectory : null));
         _apiEndpointCountContexts[service] = context;
         using var cancellation = CancellationTokenSource.CreateLinkedTokenSource(_sourceLineCountLifetime.Token);
         cancellation.CancelAfter(TimeSpan.FromMinutes(5));
@@ -41,8 +91,11 @@ public partial class MainWindow
             cancellation.Token.ThrowIfCancellationRequested();
             if (!IsCurrentApiEndpointCount(service, context)) return;
             if (!HasApiEndpointBranch(service, branch)) return;
+            if (!await HasApiEndpointSourceBranchAsync(service, context, branch, cancellation.Token)) return;
 
-            var result = await ApiEndpointDiscovery.AnalyzeSourceAsync(context.Directory, cancellation.Token);
+            var result = context.SourceDirectory is { } folder
+                ? await ApiEndpointDiscovery.AnalyzeSourceFolderAsync(folder, cancellation.Token)
+                : await ApiEndpointDiscovery.AnalyzeSourceAsync(context.Directory, cancellation.Token);
             var finalBranch = await ReadBranchFolderAsync(context.Directory).WaitAsync(cancellation.Token);
             cancellation.Token.ThrowIfCancellationRequested();
             if (!IsCurrentApiEndpointCount(service, context)) return;
@@ -53,6 +106,9 @@ public partial class MainWindow
                 service.ApiEndpoints.Fail("Branch changed. Recount.");
                 return;
             }
+            if (!await HasApiEndpointSourceBranchAsync(service, context, finalBranch, cancellation.Token)) return;
+            cancellation.Token.ThrowIfCancellationRequested();
+            if (!IsCurrentApiEndpointCount(service, context)) return;
             service.ApiEndpoints.Complete(result, branch.DisplayText);
         }
         catch (OperationCanceledException)
@@ -77,6 +133,25 @@ public partial class MainWindow
                 if (service.ApiEndpoints.IsBusy) service.ApiEndpoints.Cancel();
             }
         }
+    }
+
+    private async Task<bool> HasApiEndpointSourceBranchAsync(ServiceViewModel service, ApiEndpointCountContext context,
+        GitBranchSnapshot branch, CancellationToken token)
+    {
+        if (context.SourceDirectory is not { } folder) return true;
+        var sourceBranch = await ReadBranchFolderAsync(folder).WaitAsync(token);
+        token.ThrowIfCancellationRequested();
+        if (!IsCurrentApiEndpointCount(service, context)) return false;
+        if (sourceBranch.State == GitBranchState.Branch &&
+            string.Equals(branch.RepositoryPath, sourceBranch.RepositoryPath, StringComparison.OrdinalIgnoreCase) &&
+            string.Equals(branch.DisplayText, sourceBranch.DisplayText, StringComparison.Ordinal)) return true;
+        service.ApiEndpoints.Fail(sourceBranch.State switch
+        {
+            GitBranchState.MissingDirectory => "Source folder unavailable. Choose another folder.",
+            GitBranchState.Unavailable => "Source branch unavailable. Retry or choose another folder.",
+            _ => "Choose a source folder in this API's selected Git repository."
+        });
+        return false;
     }
 
     private static bool HasApiEndpointBranch(ServiceViewModel service, GitBranchSnapshot branch)
@@ -110,7 +185,8 @@ public partial class MainWindow
         var project = Projects.FirstOrDefault(candidate =>
             _runners.GetValueOrDefault(candidate.Id)?.Contains(service) == true);
         if (project is null) return;
-        var window = new ApiEndpointsWindow(project.Name, service.Name, service.Directory) { Owner = this };
+        var sourceDirectory = _apiEndpointCountContexts.GetValueOrDefault(service)?.SourceDirectory;
+        var window = new ApiEndpointsWindow(project.Name, service.Name, service.Directory, sourceDirectory) { Owner = this };
         // Statistics owns its branch-validated source result. Independent detail scans/imports
         // must not replace it or bypass its progress and branch-selection state.
         window.Closed += (_, _) => _apiEndpointWindows.Remove(service);

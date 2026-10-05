@@ -63,27 +63,33 @@
         </Grid.RowDefinitions>
         <ScrollViewer Grid.Row="0" MaxHeight="290" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled" Margin="0,0,0,8">
         <Grid>
-        <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
+        <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
         <StackPanel Margin="0,0,0,12">
             <TextBlock Text="API ENDPOINT INVENTORY" Foreground="{StaticResource AccentBrush}" FontSize="10" FontWeight="Bold"/>
             <TextBlock x:Name="ServiceHeading" FontSize="22" FontWeight="SemiBold" Margin="0,4,0,3" TextWrapping="Wrap"/>
             <TextBlock x:Name="ProjectHeading" Foreground="{StaticResource MutedBrush}" TextWrapping="Wrap"/>
         </StackPanel>
         <WrapPanel Grid.Row="1" Margin="0,0,0,8">
-            <Button x:Name="SourceButton" Content="Scan _source" Click="ScanSourceClick" Margin="0,0,8,6" Padding="10,7" ToolTip="Read attributed controller declarations in this service folder without starting the API."/>
+            <Button x:Name="SourceButton" Content="Scan _source" Click="ScanSourceClick" Margin="0,0,8,6" Padding="10,7" ToolTip="Read controller actions and supported minimal API registrations in the selected source folder without starting the API."/>
+            <Button x:Name="SourceFolderButton" Content="Choose source _folder…" Click="ChooseSourceFolderClick" Margin="0,0,8,6" Padding="10,7" ToolTip="Choose a controllers or endpoints folder and scan its C# source. A project file is not required. This selection is kept only for this session."/>
             <Button x:Name="OpenApiButton" Content="OpenAPI _JSON…" Click="OpenApiClick" Margin="0,0,8,6" Padding="10,7" ToolTip="Read a local OpenAPI 3 or Swagger 2 JSON document. No URL is requested."/>
             <Button x:Name="RefreshButton" Content="_Refresh" Click="RefreshClick" Margin="0,0,8,6" Padding="10,7" ToolTip="Read the selected source again to include newly added endpoints."/>
             <Button x:Name="CancelButton" Content="_Cancel scan" Click="CancelClick" IsEnabled="False" Margin="0,0,8,6" Padding="10,7"/>
         </WrapPanel>
-        <StackPanel Grid.Row="2" Margin="0,0,0,10">
+        <StackPanel Grid.Row="3" Margin="0,0,0,10">
             <TextBlock x:Name="StatusText" Foreground="{StaticResource AccentBrush}" TextWrapping="Wrap" AutomationProperties.LiveSetting="Polite"/>
+            <ProgressBar x:Name="ScanProgress" Visibility="Collapsed" IsIndeterminate="True" Height="4" Margin="0,6,0,0"/>
             <TextBlock x:Name="SourceText" Foreground="{StaticResource MutedBrush}" TextWrapping="Wrap" FontSize="11" Margin="0,5,0,0"/>
             <TextBlock x:Name="CountsText" FontSize="19" FontWeight="SemiBold" TextWrapping="Wrap" Margin="0,8,0,4"/>
             <TextBlock x:Name="VerbsText" Foreground="{StaticResource AccentBrush}" FontWeight="SemiBold" TextWrapping="Wrap"/>
-            <TextBlock Text="Counts unique HTTP method + route-template pairs; repeated declarations merge. ALL means an unconstrained method. Controller action methods are a separate count."
+            <TextBlock Text="Counts unique HTTP method + route-template pairs; repeated declarations merge. ALL means an unconstrained method. Controller actions and minimal API registrations are separate counts."
                        Foreground="{StaticResource MutedBrush}" TextWrapping="Wrap" FontSize="11" Margin="0,5,0,0"/>
         </StackPanel>
-        <Border x:Name="WarningsPanel" Grid.Row="3" Visibility="Collapsed" BorderBrush="#6B5633" Background="#302A20" BorderThickness="1" CornerRadius="6" Padding="9" Margin="0,0,0,10">
+        <Border x:Name="SourceFolderPrompt" Grid.Row="2" Visibility="Collapsed" BorderBrush="{StaticResource BorderBrush}" Background="{StaticResource CardBrush}" BorderThickness="1" CornerRadius="6" Padding="9" Margin="0,0,0,10">
+            <TextBlock Text="No endpoints found. Choose a controllers or endpoints folder using Choose source folder… above."
+                       Foreground="{StaticResource AccentBrush}" TextWrapping="Wrap" AutomationProperties.LiveSetting="Polite"/>
+        </Border>
+        <Border x:Name="WarningsPanel" Grid.Row="4" Visibility="Collapsed" BorderBrush="#6B5633" Background="#302A20" BorderThickness="1" CornerRadius="6" Padding="9" Margin="0,0,0,10">
             <ScrollViewer MaxHeight="95" VerticalScrollBarVisibility="Auto"><TextBlock x:Name="WarningsText" Foreground="#FFD27A" TextWrapping="Wrap"/></ScrollViewer>
         </Border>
         </Grid>
@@ -92,7 +98,7 @@
             <Label Content="_Verb" Target="{Binding ElementName=VerbFilter}" Foreground="{StaticResource TextBrush}" Padding="0,5,8,0"/>
             <ComboBox x:Name="VerbFilter" Width="128" SelectionChanged="FilterChanged" Margin="0,0,16,0" AutomationProperties.Name="HTTP method filter"/>
             <Label Content="_Find" Target="{Binding ElementName=SearchText}" Foreground="{StaticResource TextBrush}" Padding="0,5,8,0"/>
-            <TextBox x:Name="SearchText" Width="260" TextChanged="SearchChanged" AutomationProperties.Name="Find route or controller action" ToolTip="Filter by route, controller, action or source filename."/>
+            <TextBox x:Name="SearchText" Width="260" TextChanged="SearchChanged" AutomationProperties.Name="Find route, controller action or minimal API handler" ToolTip="Filter by route, controller, action, minimal API handler or source filename."/>
         </WrapPanel>
         <TabControl x:Name="DetailsTabs" Grid.Row="2" Background="{StaticResource SurfaceBrush}" Foreground="{StaticResource TextBrush}" BorderBrush="{StaticResource BorderBrush}">
             <TabItem Header="Endpoint operations">
@@ -112,6 +118,16 @@
                     <DataGrid.Columns>
                         <DataGridTextColumn Header="Controller / OpenAPI tag" Binding="{Binding Name, Mode=OneWay}" Width="*"/>
                         <DataGridTextColumn Header="Resolved action methods" Binding="{Binding ActionCount, Mode=OneWay}" Width="170"/>
+                        <DataGridTextColumn Header="Operations" Binding="{Binding OperationCount, Mode=OneWay}" Width="100"/>
+                        <DataGridTextColumn Header="HTTP method counts" Binding="{Binding Verbs, Mode=OneWay}" Width="2*"/>
+                    </DataGrid.Columns>
+                </DataGrid>
+            </TabItem>
+            <TabItem x:Name="MinimalTab" Header="Minimal API source">
+                <DataGrid x:Name="MinimalGrid" AutomationProperties.Name="Minimal API source breakdown">
+                    <DataGrid.Columns>
+                        <DataGridTextColumn Header="Source file" Binding="{Binding Name, Mode=OneWay}" Width="*"/>
+                        <DataGridTextColumn Header="Resolved registrations" Binding="{Binding RegistrationCount, Mode=OneWay}" Width="170"/>
                         <DataGridTextColumn Header="Operations" Binding="{Binding OperationCount, Mode=OneWay}" Width="100"/>
                         <DataGridTextColumn Header="HTTP method counts" Binding="{Binding Verbs, Mode=OneWay}" Width="2*"/>
                     </DataGrid.Columns>

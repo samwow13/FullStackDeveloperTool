@@ -15,7 +15,7 @@ namespace FullStackLauncher.Services;
 /// Inspects source syntax or an explicitly chosen local OpenAPI file. Never loads an API assembly,
 /// evaluates MSBuild, starts a host, fetches a URL, or invokes application methods.
 /// </summary>
-public static class ApiEndpointDiscovery
+public static partial class ApiEndpointDiscovery
 {
     private static unsafe AssemblyMetadata ReadRuntimeMetadata()
     {
@@ -45,8 +45,6 @@ public static class ApiEndpointDiscovery
     };
     private static readonly HashSet<string> OpenApiMethods = new(StringComparer.OrdinalIgnoreCase)
         { "get", "post", "put", "patch", "delete", "head", "options", "trace" };
-    private static readonly HashSet<string> MapMethods = new(StringComparer.Ordinal)
-        { "MapGet", "MapPost", "MapPut", "MapPatch", "MapDelete", "MapMethods", "Map", "MapGroup", "MapFallback", "MapFallbackToFile" };
     private static readonly HashSet<string> KnownNonRoutingAttributes = new(StringComparer.Ordinal)
     {
         "ApiController", "Controller", "NonController", "NonAction", "ActionName", "Area", "Authorize", "AllowAnonymous",
@@ -58,7 +56,11 @@ public static class ApiEndpointDiscovery
     };
 
     public static Task<ApiEndpointInventory> AnalyzeSourceAsync(string workingDirectory, CancellationToken cancellationToken = default) =>
-        Task.Run(() => AnalyzeDirectory(workingDirectory, cancellationToken), cancellationToken);
+        Task.Run(() => AnalyzeDirectory(workingDirectory, cancellationToken, explicitSourceFolder: false), cancellationToken);
+
+    /// <summary>Scans an explicitly selected source folder without requiring a project file or evaluating source membership.</summary>
+    public static Task<ApiEndpointInventory> AnalyzeSourceFolderAsync(string sourceDirectory, CancellationToken cancellationToken = default) =>
+        Task.Run(() => AnalyzeDirectory(sourceDirectory, cancellationToken, explicitSourceFolder: true), cancellationToken);
 
     public static Task<ApiEndpointInventory> LoadOpenApiAsync(string filePath, CancellationToken cancellationToken = default) =>
         Task.Run(() =>
@@ -82,23 +84,28 @@ public static class ApiEndpointDiscovery
     public static ApiEndpointInventory AnalyzeSources(IReadOnlyDictionary<string, string> sources, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(sources);
-        var builder = new InventoryBuilder("Source", "Attributed source (static declarations)", "Source text");
+        var builder = new InventoryBuilder("Source", "Controllers + minimal APIs (static declarations)", "Source text");
         return AnalyzeSourcesCore(sources, builder, cancellationToken);
     }
 
-    private static ApiEndpointInventory AnalyzeDirectory(string workingDirectory, CancellationToken token)
+    private static ApiEndpointInventory AnalyzeDirectory(string workingDirectory, CancellationToken token, bool explicitSourceFolder)
     {
         token.ThrowIfCancellationRequested();
         var root = GetFullPath(workingDirectory, "The API working folder is unavailable.");
         if (!Directory.Exists(root) || IsFileSystemLink(root))
             throw new ApiEndpointDiscoveryException("The API working folder is unavailable or is a filesystem link.");
-        var builder = new InventoryBuilder("Source", "Attributed source (static declarations)", root);
+        var builder = new InventoryBuilder("Source", explicitSourceFolder ? "Selected source folder (controllers + minimal APIs)" : "Controllers + minimal APIs (static declarations)", root);
         try
         {
             var projects = Directory.EnumerateFiles(root, "*.csproj", SearchOption.TopDirectoryOnly).Take(2).ToArray();
-            if (projects.Length != 1)
-                throw new ApiEndpointDiscoveryException("Source counting requires a service working folder containing exactly one .csproj. Choose a local OpenAPI JSON snapshot for other layouts.");
-            InspectProject(projects[0], builder, token);
+            if (!explicitSourceFolder)
+            {
+                if (projects.Length != 1)
+                    throw new ApiEndpointDiscoveryException("Source counting requires a service working folder containing exactly one .csproj. Choose the controller/endpoint source folder or a local OpenAPI JSON snapshot for other layouts.");
+                InspectProject(projects[0], builder, token);
+            }
+            else
+                builder.Warn("Explicit folder scope: only C# declarations in the selected folder are inspected. Project membership, constants and registrations outside this folder are not evaluated.");
             var sources = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
             var stack = new Stack<string>();
             stack.Push(root);
@@ -127,7 +134,7 @@ public static class ApiEndpointDiscovery
                             var name = Path.GetFileName(entry);
                             if (!ExcludedDirectories.Contains(name) && !name.StartsWith('.'))
                             {
-                                if (Directory.EnumerateFiles(entry, "*.csproj", SearchOption.TopDirectoryOnly).Any())
+                                if (!explicitSourceFolder && Directory.EnumerateFiles(entry, "*.csproj", SearchOption.TopDirectoryOnly).Any())
                                     builder.Warn("Nested project folders were skipped; this scan is scoped to the selected service project folder.");
                                 else stack.Push(entry);
                             }
@@ -215,7 +222,6 @@ public static class ApiEndpointDiscovery
             foreach (var invocation in root.DescendantNodes().OfType<InvocationExpressionSyntax>())
             {
                 var name = invocation.Expression switch { MemberAccessExpressionSyntax member => member.Name.Identifier.ValueText, IdentifierNameSyntax identifier => identifier.Identifier.ValueText, _ => "" };
-                if (MapMethods.Contains(name)) builder.Warn("Minimal API/dynamic mapping calls were found. Those operations are omitted from attributed-controller counts; import a generated local OpenAPI snapshot for broader coverage.");
                 if (name is "MapControllerRoute" or "MapDefaultControllerRoute" or "MapAreaControllerRoute" or "UseMvc") builder.Warn("Conventional MVC routing was found; conventional route operations cannot be established from action attributes.");
                 if (name is "AddApplicationPart" or "ConfigureApplicationPartManager") builder.Warn("Application-part customization was found; controllers from other assemblies are outside this scan.");
             }
@@ -292,6 +298,7 @@ public static class ApiEndpointDiscovery
         }
         builder.ControllerCount = controllers;
         builder.ControllerActionCount = actions;
+        AnalyzeMinimalApis(trees, compilation, builder, token);
         return builder.Build();
     }
 
@@ -558,7 +565,7 @@ public static class ApiEndpointDiscovery
                     if (tag?.Length > 256)
                     { tag = null; builder.Warn("An oversized first tag was omitted from display metadata."); }
                     var route = (basePath.TrimEnd('/') + path.Name);
-                    builder.Add(property.Name.ToUpperInvariant(), route, new ApiEndpointOrigin(sourceLabel, 0, "", operationId, tag));
+                    builder.Add(property.Name.ToUpperInvariant(), route, new ApiEndpointOrigin(sourceLabel, 0, "", operationId, tag, OriginKind: "OpenAPI"));
                 }
             }
             return builder.Build();
@@ -643,6 +650,8 @@ public static class ApiEndpointDiscovery
         public int ScannedFileCount { get; set; }
         public int? ControllerCount { get; set; }
         public int? ControllerActionCount { get; set; }
+        public int? MinimalEndpointCount { get; set; }
+        public int? MinimalHandlerCount { get; set; }
         public bool TryInspectSelector()
         {
             if (++_inspectedSelectors <= 100000) return true;
@@ -679,6 +688,7 @@ public static class ApiEndpointDiscovery
         {
             SourceKind = sourceKind, SourceLabel = sourceLabel, SourcePath = sourcePath,
             ScannedFileCount = ScannedFileCount, ControllerCount = ControllerCount, ControllerActionCount = ControllerActionCount,
+            MinimalEndpointCount = MinimalEndpointCount, MinimalHandlerCount = MinimalHandlerCount,
             Operations = _operations.Values.OrderBy(operation => operation.Route, StringComparer.OrdinalIgnoreCase)
                 .ThenBy(operation => operation.Method, StringComparer.Ordinal).Select(operation => new ApiEndpointOperation(operation.Method, operation.Route, operation.Origins.ToArray())).ToArray(),
             Warnings = _warnings.ToArray(), IsPartial = _warnings.Count > 0

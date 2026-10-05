@@ -207,7 +207,12 @@ public partial class GitWorkspaceWindow
             else OpenSetup(SetupStep.Choice);
             return;
         }
-        if (!verifyConnection) return;
+        if (!verifyConnection)
+        {
+            if (_configOpen) OpenSetup(SetupStep.Connections);
+            else ShowLocalWorkspace();
+            return;
+        }
         BeginConnection(remote);
         if (_setupProvider is not { } provider || Root is not { } root) return;
         if (remote.FetchUrl == remote.PushUrl && GitConnectionWarmup.TryGetReadyForSession(root, provider, remote.FetchUrl, out _))

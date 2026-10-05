@@ -15,13 +15,13 @@ public partial class GitWorkspaceWindow
     public bool CanRetryGit => !_busy && _gitLoadDepth == 0;
     private string _gitLoadFailure = "Git could not load. Try again.";
     private bool IsGitLoading => _initialGitLoad || _gitLoadDepth > 0;
-    private bool GitContentAvailable => !IsGitLoading && !_gitLoadFailed;
+    private bool GitContentAvailable => !IsGitLoading && !_gitLoadFailed && _repositoryDiscoveryComplete && !_selectingRepository;
     public Visibility GitLoadingVisibility => IsGitLoading ? Visibility.Visible : Visibility.Collapsed;
     public bool AnimateGitLoading => IsGitLoading && SystemParameters.ClientAreaAnimation;
     public Visibility GitFailureVisibility => !IsGitLoading && _gitLoadFailed ? Visibility.Visible : Visibility.Collapsed;
     public Visibility GitHeaderActionsVisibility => GitContentAvailable ? Visibility.Visible : Visibility.Collapsed;
     public Visibility BranchHeaderVisibility => GitContentAvailable && !_setupOpen && IsRepository ? Visibility.Visible : Visibility.Collapsed;
-    public Visibility GitStatusVisibility => !IsGitLoading && !_gitLoadFailed ? Visibility.Visible : Visibility.Collapsed;
+    public Visibility GitStatusVisibility => GitContentAvailable ? Visibility.Visible : Visibility.Collapsed;
     public Visibility GitErrorVisibility => !IsGitLoading && !string.IsNullOrEmpty(_latestErrorDetails) ? Visibility.Visible : Visibility.Collapsed;
     public string GitLoadFailure => _gitLoadFailure;
     public Visibility TrustFailureVisibility => _trustRoot != null ? Visibility.Visible : Visibility.Collapsed;
@@ -58,6 +58,7 @@ public partial class GitWorkspaceWindow
     private async Task LoadGitWorkspaceAsync(bool verifyConnection = true)
     {
         if (_busy || _gitLoadDepth > 0) return;
+        if (!await EnsureRepositorySelectedAsync()) return;
         if (_unconfirmedGitCommand is { } command)
         {
             _busy = true;

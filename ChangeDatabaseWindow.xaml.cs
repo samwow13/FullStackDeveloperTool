@@ -13,6 +13,7 @@ public partial class ChangeDatabaseWindow : Window
     private readonly ServiceProfile _profile;
     private readonly string _directory;
     private readonly Func<ApiDatabaseConfiguration, string, string, Task<bool>> _saveAndRestart;
+    private readonly Action<ApiDatabaseConfiguration>? _configurationDiscovered;
     private ApiDatabaseConfiguration? _snapshot;
     private ApiDatabaseConnectionSetting? _selectedConnection;
     private string _baselineValue = "";
@@ -27,12 +28,14 @@ public partial class ChangeDatabaseWindow : Window
     private bool _configurationSaved;
 
     public ChangeDatabaseWindow(ServiceProfile profile, string directory,
-        Func<ApiDatabaseConfiguration, string, string, Task<bool>> saveAndRestart)
+        Func<ApiDatabaseConfiguration, string, string, Task<bool>> saveAndRestart,
+        Action<ApiDatabaseConfiguration>? configurationDiscovered = null)
     {
         InitializeComponent();
         _profile = profile;
         _directory = directory;
         _saveAndRestart = saveAndRestart;
+        _configurationDiscovered = configurationDiscovered;
         ServiceNameText.Text = profile.Name;
         SourceFolderText.Text = $"Folder: {directory}";
         SourceProjectText.Text = "Project: discovering…";
@@ -64,6 +67,7 @@ public partial class ChangeDatabaseWindow : Window
             var loaded = await Task.Run(() => ApiDatabaseConfiguration.Load(
                 _profile, _directory, "Local", importLegacyForReview: true));
             _snapshot = loaded;
+            _configurationDiscovered?.Invoke(loaded);
             SourceFolderText.Text = $"Folder: {loaded.WorkingDirectory}";
             SourceProjectText.Text = $"Project: {loaded.ProjectFilePath}";
             LegacyDisclosureText.Visibility = loaded.HasStagedLegacyValues ? Visibility.Visible : Visibility.Collapsed;
@@ -136,7 +140,7 @@ public partial class ChangeDatabaseWindow : Window
     {
         _selectedConnection = connection;
         _baselineValue = connection?.Value ?? "";
-        _baselineDatabaseName = connection?.DatabaseName ?? "";
+        _baselineDatabaseName = connection?.DatabaseDisplayName ?? "";
         _suppressEditor = true;
         RevealCheckBox.IsChecked = false;
         RevealedConnectionBox.Clear();
@@ -159,7 +163,7 @@ public partial class ChangeDatabaseWindow : Window
     {
         if (!_ready || _suppressEditor) return;
         _suppressEditor = true;
-        DatabaseNameBox.Text = ApiDatabaseConfiguration.ReadDatabaseName(EditorValue) ?? "";
+        DatabaseNameBox.Text = ApiDatabaseConfiguration.ReadDatabaseDisplayName(EditorValue) ?? "";
         _databaseNameNeedsApply = false;
         _suppressEditor = false;
         UpdateControls();
@@ -302,11 +306,13 @@ public partial class ChangeDatabaseWindow : Window
         if (!_ready) return;
         var editable = !_busy && _snapshot is not null && _selectedConnection is not null;
         EditorPanel.IsEnabled = editable;
-        DatabaseNameBox.IsEnabled = editable && (_databaseNameNeedsApply ||
-            ApiDatabaseConfiguration.ReadDatabaseName(EditorValue) is not null);
-        DatabaseNameHint.Text = DatabaseNameBox.IsEnabled
+        var canEditDatabaseName = _databaseNameNeedsApply || ApiDatabaseConfiguration.ReadDatabaseName(EditorValue) is not null;
+        DatabaseNameBox.IsEnabled = editable && canEditDatabaseName;
+        DatabaseNameHint.Text = canEditDatabaseName
             ? "Changing this name keeps the host, credentials and other connection options."
-            : "A safe database name could not be read. Update the connection string.";
+            : ApiDatabaseConfiguration.ReadDatabaseDisplayName(EditorValue) is not null
+                ? "SQLite database root detected. File names cannot be changed with this database-name editor."
+                : "A safe database name could not be read. Update the connection string.";
         CancelButton.IsEnabled = !_busy;
         ReloadButton.IsEnabled = !_busy;
         SaveButton.IsEnabled = editable && (HasChanges || _retryRequired);

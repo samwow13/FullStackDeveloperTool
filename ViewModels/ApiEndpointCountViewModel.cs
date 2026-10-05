@@ -16,12 +16,17 @@ public sealed class ApiEndpointCountViewModel : ObservableObject
     public bool IsBusy => _busy;
     public bool NeedsBranch => _needsBranch;
     public bool CanCount => !_busy && !_needsBranch;
+    public bool NeedsSourceFolder => HasResult && _total == 0;
+    public bool CanChooseSourceFolder => !_busy && !_needsBranch;
+    public bool ShowSourceFolderChoice => CanChooseSourceFolder && HasLoaded;
     public bool HasError => _error is not null && !_needsBranch;
+    public bool HasStatus => HasError || NeedsSourceFolder;
     public bool HasResult => !_busy && !_needsBranch && _error is null && _total.HasValue;
     public bool IsVisible => HasResult || _busy || _needsBranch || HasError;
     public string Value => HasResult ? $"{_total!.Value:N0}" + (_partial ? " · partial" : "") : "—";
     public string ButtonLabel => _busy ? "Counting…" : _total.HasValue ? "Recount" : "Count";
-    public string Status => _busy ? "Counting…" : _needsBranch ? "Select a branch." : _error ?? "";
+    public string Status => _busy ? "Counting…" : _needsBranch ? "Select a branch." : _error ??
+        (NeedsSourceFolder ? "No endpoints found. Choose a controllers or endpoints folder." : "");
     public string Summary => HasResult && _total is { } total
         ? $"{total:N0} API endpoints" + (_partial ? " · partial" : "") : "";
     public string Foreground => _partial || HasError || _needsBranch ? "#FFD27A" : "#CCD7E7";
@@ -84,8 +89,10 @@ public sealed class ApiEndpointCountViewModel : ObservableObject
         _details = inventory is null ? "" :
             $"{inventory.TotalOperationCount:N0} discovered endpoint operations across all HTTP methods.\n" +
             (branch is null ? "" : $"Branch: {branch}\n") +
-            $"{inventory.SourceLabel}\nCounted {DateTimeOffset.Now:g}.\n\n" +
-            ApiEndpointInventory.CountingSemantics +
+            $"{inventory.SourceLabel}\nFolder: {inventory.SourcePath}\nCounted {DateTimeOffset.Now:g}.\n\n" +
+            $"{inventory.ControllerCount:N0} controllers · {inventory.ControllerActionCount:N0} declared action methods\n" +
+            $"{inventory.MinimalEndpointCount:N0} minimal API registrations · {inventory.MinimalHandlerCount:N0} identifiable minimal handlers\n\n" +
+            ApiEndpointInventory.CountingSemantics + "\n\n" + ApiEndpointInventory.MinimalEndpointCountingSemantics +
             (inventory.IsPartial ? "\n\nPartial inventory. Review limitations in API endpoints…" : "");
         Notify();
     }
@@ -96,7 +103,11 @@ public sealed class ApiEndpointCountViewModel : ObservableObject
         Changed(nameof(IsBusy));
         Changed(nameof(NeedsBranch));
         Changed(nameof(CanCount));
+        Changed(nameof(NeedsSourceFolder));
+        Changed(nameof(CanChooseSourceFolder));
+        Changed(nameof(ShowSourceFolderChoice));
         Changed(nameof(HasError));
+        Changed(nameof(HasStatus));
         Changed(nameof(HasResult));
         Changed(nameof(Value));
         Changed(nameof(ButtonLabel));
