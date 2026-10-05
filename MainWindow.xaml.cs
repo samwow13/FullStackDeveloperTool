@@ -47,20 +47,21 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         {
             if (Services.Count == 0) return "No apps configured";
             var databases = Services.Sum(service => service.DatabaseServiceCount);
-            var healthyDatabases = Services.Sum(service => service.HealthyDatabaseServiceCount);
+            var connectedDatabases = Services.Sum(service => service.ConnectedDatabaseServiceCount);
             var running = Services.Count(service => service.IsRunning);
             if (Services.Any(service => service.Profile.IsConsole))
             {
                 var apps = $"{running} running · {Services.Count(service => service.Runner.Snapshot.State == ServiceState.Completed)} completed · {Services.Count} apps";
-                return databases == 0 ? apps : $"{apps} · {healthyDatabases} / {databases} databases online";
+                return databases == 0 ? apps : $"{apps} · {connectedDatabases} / {databases} databases connected";
             }
-            return $"{running + healthyDatabases} / {Services.Count + databases} services online";
+            var webApps = $"{running} / {Services.Count} apps running";
+            return databases == 0 ? webApps : $"{webApps} · {connectedDatabases} / {databases} databases connected";
         }
     }
     public bool CanBatch => !IsEditing && !_addingProjectService && !_savingProjectEdits && !_checkingStartupServices && !_closeRequested && !_batchBusy && !_forceStopBatchBusy && !_closing && Services.Count > 0 && Services.All(x => !x.IsBusy && !x.IsStopping);
     public bool AllServicesRunning => Services.Count > 0 && Services.All(service => service.ShowRunningDot);
-    public bool AllTrackedServicesHealthy => AllServicesRunning &&
-        Services.All(service => service.DatabaseServiceCount == service.HealthyDatabaseServiceCount);
+    public bool AllTrackedServicesReady => AllServicesRunning &&
+        Services.All(service => service.DatabaseServiceCount == service.ConnectedDatabaseServiceCount);
     public bool CanStartBatch => CanBatch && !_closeRequested && Services.Any(service => service.CanStart);
     public string StartAllDescription => AllServicesRunning
         ? "All apps are already running. No start is needed."
@@ -189,14 +190,14 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     private void ServiceDatabaseSummary_PropertyChanged(object? sender, PropertyChangedEventArgs e)
     {
         if (sender is not ServiceViewModel service ||
-            e.PropertyName is not (nameof(ServiceViewModel.DatabaseServiceCount) or nameof(ServiceViewModel.HealthyDatabaseServiceCount))) return;
+            e.PropertyName is not (nameof(ServiceViewModel.DatabaseServiceCount) or nameof(ServiceViewModel.ConnectedDatabaseServiceCount))) return;
         if (Dispatcher.HasShutdownStarted || Dispatcher.HasShutdownFinished) return;
         void RefreshSummary()
         {
             if (!_closed && !_closeRequested && !_closing && Services.Contains(service))
             {
                 Changed(nameof(Summary));
-                Changed(nameof(AllTrackedServicesHealthy));
+                Changed(nameof(AllTrackedServicesReady));
             }
         }
         if (Dispatcher.CheckAccess()) RefreshSummary();
@@ -285,7 +286,6 @@ public partial class MainWindow : Window, INotifyPropertyChanged
                 catch (Exception ex) { if (!_closeRequested && !_closing) Notice = $"Status check: {ex.Message}"; }
                 if (_closeRequested || _closing) return;
                 service.Update();
-                _ = service.RefreshApiDatabaseAsync();
                 _ = service.RefreshFlutterDatabasesAsync();
                 _ = service.RefreshFlutterDatabaseConnectionsAsync();
             }));
@@ -316,7 +316,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     private void NotifyStartAllChanged()
     {
         Changed(nameof(AllServicesRunning));
-        Changed(nameof(AllTrackedServicesHealthy));
+        Changed(nameof(AllTrackedServicesReady));
         Changed(nameof(CanStartBatch));
         Changed(nameof(StartAllDescription));
     }

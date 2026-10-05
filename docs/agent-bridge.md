@@ -78,6 +78,10 @@ CRM instructions require restarting the verified Local API and every configured 
 
 ## Agent change summaries
 
+Git discovery includes the configured project and service folders plus immediate child repositories under the project root. A database source repository at `<project root>\ORKidsDatabase`, alongside the API and frontend folders, needs its own `.git` file or directory but does not need a launcher service registration. Its SQL, stored procedures, and table schema remain ordinary source files. The bounded child scan checks `ORKidsDatabase` explicitly and skips linked child folders or linked `.git` metadata; it does not recursively search descendants or open a database connection.
+
+The Git workspace's **Select which repo**, the **Repo** selector in the **Next commit** settings cog, and `launcher_git_connections` share this discovery. Git preselects the current Next commit repository; returning from Git selects the repository opened there in Next commit. `launcher_record_git_changes` repeats the same discovery and validates the current repository, branch, and active connection before saving a report.
+
 After completing a source update:
 
 1. Call `launcher_projects` and match the repository's configured project/root or service folder. Call `launcher_git_connections` with that `projectId`. Use the returned repository whose `repositoryRoot` matches the checkout you changed. Never substitute another checkout or linked worktree.

@@ -50,7 +50,7 @@ public partial class MainWindow
         var previousRun = service.Runner.ManagedApiRunVersion;
         var initialStopRevision = service.Runner.StopRevision;
         var saved = false;
-        var verified = false;
+        var completed = false;
         string? expectedName = null;
         var failure = "The database configuration could not be saved. Your draft is retained.";
         await RunActionAsync(service, async runner =>
@@ -58,7 +58,7 @@ public partial class MainWindow
             try
             {
                 RequireCurrentService(initialStopRevision);
-                editor.SetStatus("Validating the database connection…");
+                editor.SetStatus("Validating the database connection string…");
                 var change = await Task.Run(() => configuration.Prepare(key, value));
                 expectedName = change.DatabaseName;
                 if (expectedName is null)
@@ -70,7 +70,7 @@ public partial class MainWindow
                 service.Runner.ConfigurationNeedsRestart = true;
                 service.ObserveDatabaseConfiguration(configuration);
                 editor.MarkConfigurationSaved();
-                service.BeginDatabaseChange(expectedName);
+                service.BeginDatabaseChange(expectedName, key);
                 foreach (var other in _runners.Values.SelectMany(list => list).Where(item =>
                              item.Directory.Equals(service.Directory, StringComparison.OrdinalIgnoreCase)))
                 {
@@ -103,14 +103,14 @@ public partial class MainWindow
                 if (runner.Snapshot.State is ServiceState.Error or ServiceState.Conflict ||
                     runner.ManagedApiRunVersion <= previousRun)
                     throw new ApiSecretStoreException(failure);
-                editor.SetStatus("API restarting. Waiting for a successful database health check…");
-                var result = await WaitForChangedDatabaseAsync(service, expectedName, previousRun, restartRevision);
+                editor.SetStatus("API restarting. Waiting for Local database configuration discovery…");
+                var result = await WaitForChangedDatabaseAsync(service, key, expectedName, previousRun, restartRevision);
                 if (result is not null)
                 {
                     failure = result;
                     throw new ApiSecretStoreException(result);
                 }
-                verified = true;
+                completed = true;
                 service.FinishDatabaseChange(true, "");
             }
             catch (ApiSecretStoreException ex)
@@ -127,9 +127,9 @@ public partial class MainWindow
             }
         }, "Applying database change");
 
-        if (verified)
+        if (completed)
         {
-            Notice = $"Database change completed: {expectedName}. API restarted and its read-only database query passed.";
+            Notice = $"Database change completed: {expectedName}. API restarted and the saved Local database configuration was discovered.";
             editor.SetStatus(Notice);
             return true;
         }
@@ -149,17 +149,17 @@ public partial class MainWindow
         bool IsKnownService() => _runners.Values.Any(list => list.Contains(service));
     }
 
-    private async Task<string?> WaitForChangedDatabaseAsync(ServiceViewModel service, string expectedName,
+    private async Task<string?> WaitForChangedDatabaseAsync(ServiceViewModel service, string key, string expectedName,
         long previousRun, int restartRevision)
     {
         var elapsed = Stopwatch.StartNew();
         long? newRun = null;
-        string? observedName = null;
         while (elapsed.Elapsed < TimeSpan.FromSeconds(90))
         {
             if (_closing || _closed || _closeRequested || service.IsStopping ||
-                service.Runner.StopRevision != restartRevision || service.ProductionWarning)
-                return "Configuration saved. Database verification canceled by a service stop or configuration change. The database change is unverified.";
+                service.Runner.StopRevision != restartRevision || service.ProductionWarning ||
+                !_runners.Values.Any(list => list.Contains(service)))
+                return "Configuration saved. Database configuration discovery canceled by a service stop or configuration change. The database change is unverified.";
             await service.Runner.RefreshAsync();
             service.Update();
             var snapshot = service.Runner.Snapshot;
@@ -172,20 +172,22 @@ public partial class MainWindow
                 if (newRun != runVersion)
                     return "Configuration saved. Another API run replaced this restart. Reopen Change DB to verify the current configuration.";
                 if (snapshot.State == ServiceState.Running && snapshot.IsManaged &&
-                    service.Runner.AppliedConfigurationEnvironment == "Local")
+                    service.Runner.AppliedConfigurationEnvironment == "Local" &&
+                    !service.Runner.ConfigurationNeedsRestart)
                 {
-                    await service.RefreshApiDatabaseAsync(force: true);
+                    var rediscovered = await service.RefreshApiDatabaseDiscoveryAsync(force: true);
                     service.Update();
+                    snapshot = service.Runner.Snapshot;
                     if (service.Runner.StopRevision != restartRevision || service.Runner.ManagedApiRunVersion != newRun ||
-                        service.IsStopping || _closing || _closed || _closeRequested) continue;
-                    observedName = service.VerifiedDatabaseName;
-                    if (string.Equals(observedName, expectedName, StringComparison.Ordinal)) return null;
+                        service.IsStopping || _closing || _closed || _closeRequested || service.ProductionWarning ||
+                        !_runners.Values.Any(list => list.Contains(service)) || snapshot.State != ServiceState.Running ||
+                        !snapshot.IsManaged || service.Runner.AppliedConfigurationEnvironment != "Local" ||
+                        service.Runner.ConfigurationNeedsRestart) continue;
+                    if (rediscovered && service.IsDatabaseConfigurationDiscovered(key, expectedName)) return null;
                 }
             }
             await Task.Delay(1000);
         }
-        return observedName is not null
-            ? $"Configuration saved. The API reported database {observedName}, but expected {expectedName}. The database change is unverified; check the selected connection key and retry."
-            : "Configuration saved. The API did not confirm the requested database within 90 seconds. Check its service output and /health/database support, then retry; the database change is unverified.";
+        return "Configuration saved. The API restart and requested Local database configuration discovery did not complete within 90 seconds. Check its service output and saved Local configuration, then retry; the database change is unverified.";
     }
 }

@@ -140,7 +140,7 @@
                     <TextBlock x:Name="LegacyDisclosureText" Visibility="Collapsed" Style="{StaticResource DatabaseHelp}" Margin="0,0,0,12"
                                Text="Saving copies reviewed Local settings into encrypted launcher configuration. Original .NET user-secrets file remains unchanged and plaintext." />
                     <TextBlock Style="{StaticResource DatabaseHelp}"
-                               Text="Save writes encrypted launcher Local configuration, restarts the API, then checks its database health. API source, appsettings and ordinary dotnet configuration stay unchanged. No database migration runs." />
+                               Text="Save writes encrypted launcher Local configuration, restarts the API, then confirms the saved database setting was discovered. API source, appsettings and ordinary dotnet configuration stay unchanged. No database migration runs." />
                 </StackPanel>
             </ScrollViewer>
         </Border>

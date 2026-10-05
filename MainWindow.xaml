@@ -479,9 +479,9 @@
                                        VerticalAlignment="Center" Margin="0,0,10,4"/>
                             <Border Background="#173B34" BorderBrush="{StaticResource AccentBrush}" BorderThickness="1" CornerRadius="7"
                                     Padding="8,3" Margin="0,0,0,4" VerticalAlignment="Center"
-                                    Visibility="{Binding AllTrackedServicesHealthy, Converter={StaticResource BoolToVisibility}}">
+                                    Visibility="{Binding AllTrackedServicesReady, Converter={StaticResource BoolToVisibility}}">
                                 <TextBlock Text="● Running" Foreground="{StaticResource AccentBrush}" FontWeight="SemiBold" FontSize="11"
-                                           ToolTip="All apps are running and tracked databases have verified health." AutomationProperties.Name="All apps running and tracked databases healthy"
+                                           ToolTip="All apps are running and tracked databases are discovered in Local API configuration." AutomationProperties.Name="All apps running and tracked databases connected"
                                            AutomationProperties.LiveSetting="Polite"/>
                             </Border>
                         </WrapPanel>

@@ -16,18 +16,31 @@ public sealed partial class ServiceViewModel
 
     public ObservableCollection<ApiDatabaseServiceViewModel> ApiDatabases { get; } = [];
     public int DatabaseServiceCount => ApiDatabases.Count;
-    public int HealthyDatabaseServiceCount => ApiDatabases.Count(database => database.IsHealthy);
+    public int ConnectedDatabaseServiceCount => ApiDatabases.Count(database => database.IsConnected);
     public bool HasDatabaseCard => ApiDatabases.Count > 0;
+    private bool HasCurrentApiDatabaseDiscovery => _apiDatabaseDiscoveryAvailable && HasApiConfiguration && !ProductionWarning;
 
-    public async Task RefreshApiDatabaseDiscoveryAsync(bool force = false)
+    internal bool IsDatabaseConfigurationDiscovered(string key, string expectedName) =>
+        HasCurrentApiDatabaseDiscovery && _discoveredApiDatabases.Any(database =>
+            database.Key.Equals(key, StringComparison.OrdinalIgnoreCase) &&
+            string.Equals(database.Name, expectedName, StringComparison.Ordinal));
+
+    public async Task<bool> RefreshApiDatabaseDiscoveryAsync(bool force = false)
     {
-        if (!HasApiConfiguration || SelectedConfiguration == "Prod") return;
+        if (!HasApiConfiguration || SelectedConfiguration == "Prod") return false;
+        if (_refreshingApiDatabaseDiscovery)
+        {
+            // A forced caller must wait for its own fresh result rather than treating a
+            // cached observation or an unfinished read as completed rediscovery.
+            if (force) _nextApiDatabaseDiscoveryRefresh = 0;
+            return false;
+        }
         if (force)
         {
             _apiDatabaseDiscoveryRevision++;
             _nextApiDatabaseDiscoveryRefresh = 0;
         }
-        if (_refreshingApiDatabaseDiscovery || Environment.TickCount64 < _nextApiDatabaseDiscoveryRefresh) return;
+        if (Environment.TickCount64 < _nextApiDatabaseDiscoveryRefresh) return false;
         _refreshingApiDatabaseDiscovery = true;
         _nextApiDatabaseDiscoveryRefresh = Environment.TickCount64 + 30_000;
         var revision = _apiDatabaseDiscoveryRevision;
@@ -36,22 +49,26 @@ public sealed partial class ServiceViewModel
         var command = Profile.StartCommand;
         var launchCommand = Profile.ApiConfiguration?.LaunchCommand;
         var url = Profile.Url;
+        var runVersion = Runner.ManagedApiRunVersion;
         try
         {
             var discovered = await Task.Run(() => ReadDatabaseMetadata(
                 ApiDatabaseConfiguration.LoadForDiscovery(Profile, folder)));
-            if (!IsCurrent()) return;
+            if (!IsCurrent()) return false;
             _discoveredApiDatabases = discovered;
             _apiDatabaseDiscoveryAvailable = true;
+            TryCompleteDatabaseChangeFromDiscovery(runVersion);
             NotifyDatabaseCard();
+            return true;
         }
         catch (Exception ex) when (ex is not OutOfMemoryException)
         {
-            if (!IsCurrent()) return;
+            if (!IsCurrent()) return false;
             // Keep previous explicit discoveries visible, but do not imply that unreadable
             // configuration or an unresolved legacy store is still the effective source.
             _apiDatabaseDiscoveryAvailable = false;
             NotifyDatabaseCard();
+            return false;
         }
         finally { _refreshingApiDatabaseDiscovery = false; }
 
@@ -78,17 +95,9 @@ public sealed partial class ServiceViewModel
     {
         var observations = _discoveredApiDatabases.Select(database =>
             (Identity: database.Key, database.Name, Source: $"{database.Key} · {database.Source}")).ToList();
-        var verifiedName = LastVerifiedDatabaseName;
-        var matches = observations.Where(database => database.Name is not null &&
-            string.Equals(database.Name, verifiedName, StringComparison.Ordinal)).ToArray();
-        string? verifiedIdentity = matches.Length == 1 && !Runner.ConfigurationNeedsRestart ? matches[0].Identity : null;
-        if (verifiedName is not null && matches.Length != 1)
-        {
-            verifiedIdentity = "verified-query";
-            observations.Add((verifiedIdentity, verifiedName, "API-reported live query"));
-        }
-        if (_databaseChangeCardName is { } changingName && !observations.Any(database => database.Name == changingName))
-            observations.Add(("database-change", changingName, "Local database change"));
+        if (_databaseChangeCardName is { } changingName && _databaseChangeKey is { } changeKey &&
+            !observations.Any(database => database.Identity.Equals(changeKey, StringComparison.OrdinalIgnoreCase)))
+            observations.Add((changeKey, changingName, "Local database change"));
 
         var identities = observations.Select(database => database.Identity).ToHashSet(StringComparer.OrdinalIgnoreCase);
         for (var index = ApiDatabases.Count - 1; index >= 0; index--)
@@ -103,24 +112,25 @@ public sealed partial class ServiceViewModel
                 ApiDatabases.Add(database);
             }
             var changing = _databaseChangeStatus is not null &&
-                (observation.Name == _databaseChangeCardName || observation.Name == _databaseChangeExpectedName);
-            var healthy = !changing && observation.Identity == verifiedIdentity && IsVerifiedDatabaseHealthy;
-            var status = changing ? DatabaseCardStatus : healthy ? "Connected · Healthy"
-                : !_apiDatabaseDiscoveryAvailable && observation.Identity != "verified-query"
-                    ? "Unavailable · configuration unreadable"
-                : observation.Identity == "verified-query" ? DatabaseCardStatus
+                observation.Identity.Equals(_databaseChangeKey, StringComparison.OrdinalIgnoreCase);
+            var connected = !changing && HasCurrentApiDatabaseDiscovery && observation.Name is not null && !Runner.ConfigurationNeedsRestart;
+            var status = changing ? DatabaseCardStatus
+                : !HasCurrentApiDatabaseDiscovery ? _apiDatabaseDiscoveryAvailable
+                    ? "Unavailable · Local configuration inactive" : "Unavailable · configuration unreadable"
+                : observation.Name is null ? "Unavailable · database name unreadable"
                 : Runner.ConfigurationNeedsRestart ? "Detected · restart required"
-                : "Detected · health unverified";
-            var details = changing || observation.Identity == "verified-query" || healthy ? DatabaseCardDetails
+                : "Connected";
+            var details = changing ? DatabaseCardDetails
                 : $"Found in {observation.Source} for {Name}'s Local configuration. " +
                   (observation.Name is null ? "A safe database root name could not be read. " : "") +
                   (!_apiDatabaseDiscoveryAvailable ? "Latest configuration discovery is unavailable; previous discovery retained. " : "") +
+                  (ProductionWarning ? "Local database configuration is inactive while Production is selected or running. " : "") +
                   (Runner.ConfigurationNeedsRestart ? $"Restart {Name} to apply its saved configuration. " : "") +
-                  "Configuration discovery does not verify an active database connection or query.";
-            database.SetObservation(observation.Name ?? "Database", observation.Source, status, details, healthy);
+                  "Connected means the database was discovered in Local API configuration. No database health request is required.";
+            database.SetObservation(observation.Name ?? "Database", observation.Source, status, details, connected);
         }
         NotifyIfChanged(DatabaseServiceCount, nameof(DatabaseServiceCount));
-        NotifyIfChanged(HealthyDatabaseServiceCount, nameof(HealthyDatabaseServiceCount));
+        NotifyIfChanged(ConnectedDatabaseServiceCount, nameof(ConnectedDatabaseServiceCount));
         NotifyIfChanged(HasDatabaseCard, nameof(HasDatabaseCard));
     }
 }
@@ -132,22 +142,22 @@ public sealed class ApiDatabaseServiceViewModel(ServiceViewModel service, string
     public ServiceViewModel Service { get; } = service;
     public string Name { get; private set; } = "Database";
     public string SourceLabel => $"Database · {Service.Name}";
-    public string Status { get; private set; } = "Detected · health unverified";
-    public string StatusColor => IsHealthy ? "#81D5AE" : "#FFD27A";
+    public string Status { get; private set; } = "Reading configuration…";
+    public string StatusColor => IsConnected ? "#81D5AE" : "#FFD27A";
     public string Details { get; private set; } = "";
-    public bool IsHealthy { get; private set; }
+    public bool IsConnected { get; private set; }
     public string ConnectionSource { get; private set; } = "";
 
-    internal void SetObservation(string name, string source, string status, string details, bool healthy)
+    internal void SetObservation(string name, string source, string status, string details, bool connected)
     {
         if (Name != name) { Name = name; Changed(nameof(Name)); }
         if (ConnectionSource != source) { ConnectionSource = source; Changed(nameof(ConnectionSource)); }
         if (Status != status) { Status = status; Changed(nameof(Status)); }
         if (Details != details) { Details = details; Changed(nameof(Details)); }
-        if (IsHealthy != healthy)
+        if (IsConnected != connected)
         {
-            IsHealthy = healthy;
-            Changed(nameof(IsHealthy));
+            IsConnected = connected;
+            Changed(nameof(IsConnected));
             Changed(nameof(StatusColor));
         }
         if (_sourceLabel != SourceLabel) { _sourceLabel = SourceLabel; Changed(nameof(SourceLabel)); }

@@ -34,6 +34,7 @@ public partial class MainWindow
             projectId = discovery.Project.Id,
             observedUtc = DateTime.UtcNow,
             authentication = "not_checked",
+            warning = discovery.Warning,
             folders = discovery.Folders,
             repositories = discovery.Repositories
         };
@@ -88,39 +89,22 @@ public partial class MainWindow
     }
 
     private async Task<AgentGitDiscovery> DiscoverAgentGitAsync(ProjectProfile project,
-        string? requestedRepositoryId, CancellationToken token, bool includeImmediateRepositories = false)
+        string? requestedRepositoryId, CancellationToken token)
     {
         var folders = AgentGitFolders(project);
         if (folders.Length > 64)
             throw new InvalidOperationException("This project has too many configured Git folders for one bridge request. Use the WPF Git workspace.");
         using var limiter = new SemaphoreSlim(4);
-        AgentGitFolder[] metadata;
-        string? warning = null;
-        if (includeImmediateRepositories)
-        {
-            var discovered = await GitRepositoryDiscovery.DiscoverAsync(folders.Select((folder, index) =>
-                new GitRepositoryDiscoveryFolder(index == 0 ? "Project root" : Path.GetFileName(folder), folder,
-                    ScanImmediateChildren: index == 0)).ToArray(), token);
-            metadata = discovered.Folders.Select(folder => new AgentGitFolder(folder.Directory,
-                folder.IsRepository ? folder.Directory : null, folder.State.ToString())).ToArray();
-            warning = discovered.Warning;
-        }
-        else metadata = await Task.WhenAll(folders.Select(async folder =>
-        {
-            await limiter.WaitAsync(token);
-            try
-            {
-                // Share the dashboard's bounded per-folder metadata reads so a disconnected
-                // filesystem cannot accumulate new uncancellable probes on repeated requests.
-                var snapshot = await ReadBranchFolderAsync(folder).WaitAsync(token);
-                return new AgentGitFolder(folder, snapshot.RepositoryPath, snapshot.State.ToString());
-            }
-            catch (TimeoutException)
-            {
-                return new AgentGitFolder(folder, null, "Unavailable");
-            }
-            finally { limiter.Release(); }
-        }));
+        // Use the same bounded metadata discovery as the Git workspace and Next commit.
+        // Non-service checkouts such as ORKidsDatabase must also remain reportable through
+        // the bridge, including a fresh discovery before saving a change summary.
+        var discovered = await GitRepositoryDiscovery.DiscoverAsync(folders.Select((folder, index) =>
+            new GitRepositoryDiscoveryFolder(index == 0 ? "Project root" : Path.GetFileName(folder), folder,
+                ScanImmediateChildren: index == 0)).ToArray(), token);
+        // Preserve the original configured-folder mapping for bridge callers and the final
+        // report recheck, even when several source folders resolve to the same checkout.
+        var metadata = discovered.ResolvedFolders.Select(folder => new AgentGitFolder(folder.Directory,
+            folder.Snapshot.RepositoryPath, folder.Snapshot.State.ToString())).ToArray();
         var groups = metadata.Where(item => item.RepositoryRoot is not null)
             .GroupBy(item => item.RepositoryRoot!, StringComparer.OrdinalIgnoreCase)
             .Where(group => requestedRepositoryId is null || AgentGitRepositoryId(group.Key) == requestedRepositoryId)
@@ -131,7 +115,7 @@ public partial class MainWindow
             try { return await ReadAgentGitRepositoryAsync(group.Key, group.Select(item => item.Directory).ToArray(), token); }
             finally { limiter.Release(); }
         }));
-        var discovery = new AgentGitDiscovery(project, folders, metadata, repositories) { Warning = warning };
+        var discovery = new AgentGitDiscovery(project, folders, metadata, repositories) { Warning = discovered.Warning };
         EnsureAgentGitProjectCurrent(discovery);
         return discovery;
     }

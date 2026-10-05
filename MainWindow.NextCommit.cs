@@ -106,8 +106,7 @@ public partial class MainWindow
         var generation = _nextCommitProjectGeneration;
         try
         {
-            var discovery = await DiscoverAgentGitAsync(project, null, _nextCommitLifetime.Token,
-                includeImmediateRepositories: true);
+            var discovery = await DiscoverAgentGitAsync(project, null, _nextCommitLifetime.Token);
             var results = await Task.WhenAll(discovery.Repositories.Select(async repository =>
             {
                 if (!repository.CanRecordChanges || repository.ActiveConnectionId is null || repository.Branch is null)

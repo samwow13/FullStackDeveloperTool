@@ -21,19 +21,11 @@ public sealed partial class ServiceViewModel(ServiceRunner runner) : ObservableO
     private bool _hasDotnetProject;
     private bool _refreshingApiProject;
     private long _nextApiProjectRefresh;
-    private bool _refreshingApiDatabase;
-    private DateTimeOffset _nextApiDatabaseProbeUtc;
-    private DateTimeOffset _liveDatabaseCheckedAtUtc;
-    private string? _liveDatabaseName;
-    private string? _liveDatabaseHealthUri;
-    private long _liveDatabaseRunVersion;
-    private string? _verifiedDatabaseName;
-    private long _verifiedDatabaseRunVersion;
-    private DateTimeOffset _verifiedDatabaseCheckedAtUtc;
     private string? _databaseChangeCardName;
     private string? _databaseChangeStatus;
     private string? _databaseChangeDetails;
     private string? _databaseChangeExpectedName;
+    private string? _databaseChangeKey;
     private long _databaseChangePreviousRun;
     private bool _isBusy;
     private bool _isStopping;
@@ -157,39 +149,29 @@ public sealed partial class ServiceViewModel(ServiceRunner runner) : ObservableO
     public bool ShowApiDatabaseLabel => !(IsConsoleApp || IsCommandApi) && (HasApiConfiguration ||
         Profile.Kind.Equals(".NET", StringComparison.OrdinalIgnoreCase) ||
         Profile.Kind.Equals("API", StringComparison.OrdinalIgnoreCase));
-    public string ApiDatabaseLabel => LiveDatabaseName is { } liveName
-        ? $"DB {liveName} · live query"
-        : Runner.AppliedDatabaseIdentifier is { } configuredName
-            ? $"DB {configuredName} · launch config" : "DB Unknown";
-    public string ApiDatabaseDetails => LiveDatabaseName is not null
-        ? $"Read-only /health/database request succeeded at {_liveDatabaseCheckedAtUtc.ToLocalTime():HH:mm:ss}. The API reported a successful user-table query and its database name."
-        : Runner.AppliedDatabaseIdentifier is not null
-            ? $"Name from applied {Runner.AppliedConfigurationEnvironment} launcher connection overrides. Active database connection not verified."
-            : "Launcher cannot identify the running API database from this service. External processes and custom configuration providers are unverified.";
-    // Verification belongs to one API run. Discovered configuration remains separately
-    // tracked across stops and restarts without being represented as a live query.
-    public string? VerifiedDatabaseName => LiveDatabaseName;
-    public string? LastVerifiedDatabaseName => _verifiedDatabaseRunVersion == Runner.ManagedApiRunVersion
-        ? _verifiedDatabaseName : null;
-    public bool HasVerifiedDatabaseCard => LastVerifiedDatabaseName is not null || _databaseChangeCardName is not null;
+    public string ApiDatabaseLabel => DiscoveredDatabaseName is { } name
+        ? $"DB {name} · configuration" : "DB Unknown";
+    public string ApiDatabaseDetails => HasCurrentApiDatabaseDiscovery
+        ? "Database discovered from Local API configuration."
+        : "Local API database configuration has not been discovered.";
+    private string? DiscoveredDatabaseName => HasCurrentApiDatabaseDiscovery
+        ? _discoveredApiDatabases.OrderBy(database => ApiDatabaseIdentifier.ConnectionKeyPriority(database.Key))
+            .Select(database => database.Name).FirstOrDefault(name => name is not null) : null;
     public bool ShowChangeDatabaseRecovery => HasApiConfiguration && !HasDatabaseCard;
-    public bool IsVerifiedDatabaseHealthy => VerifiedDatabaseName is { } name && LastVerifiedDatabaseName == name;
-    public string DatabaseCardName => LastVerifiedDatabaseName ?? _databaseChangeCardName ?? "Database";
-    public string DatabaseCardStatus => _databaseChangeStatus ?? (IsVerifiedDatabaseHealthy ? "Connected · Healthy"
-        : _snapshot.State == ServiceState.Running ? "Unavailable · health unverified"
-        : "Unavailable · API not running");
-    public string DatabaseCardStatusColor => _databaseChangeStatus is null && IsVerifiedDatabaseHealthy ? "#81D5AE" : "#FFD27A";
-    public string DatabaseCardDetails => _databaseChangeDetails ?? (IsVerifiedDatabaseHealthy
-        ? $"Read-only /health/database check passed at {_liveDatabaseCheckedAtUtc.ToLocalTime():HH:mm:ss}. The API queried its user table."
-        : $"Last verified through {Name} at {_verifiedDatabaseCheckedAtUtc.ToLocalTime():HH:mm:ss}. No current successful database health check.");
+    public string DatabaseCardName => _databaseChangeCardName ?? DiscoveredDatabaseName ?? "Database";
+    public string DatabaseCardStatus => _databaseChangeStatus ?? (HasCurrentApiDatabaseDiscovery ? "Connected"
+        : "Unavailable · configuration unreadable");
+    public string DatabaseCardDetails => _databaseChangeDetails ?? "Database discovered from Local API configuration.";
 
-    internal void BeginDatabaseChange(string expectedName)
+    internal void BeginDatabaseChange(string expectedName, string key)
     {
-        _databaseChangeCardName = LastVerifiedDatabaseName ?? expectedName;
+        _databaseChangeCardName = ApiDatabases.FirstOrDefault(database =>
+            database.Identity.Equals(key, StringComparison.OrdinalIgnoreCase))?.Name ?? expectedName;
         _databaseChangeExpectedName = expectedName;
+        _databaseChangeKey = key;
         _databaseChangePreviousRun = Runner.ManagedApiRunVersion;
         _databaseChangeStatus = "Changing DB…";
-        _databaseChangeDetails = $"Configuration saved. Restarting {Name}, then checking its database. The title updates after a successful API database query.";
+        _databaseChangeDetails = $"Configuration saved. Restarting {Name}, then rediscovering its database configuration.";
         NotifyDatabaseCard();
     }
 
@@ -198,107 +180,35 @@ public sealed partial class ServiceViewModel(ServiceRunner runner) : ObservableO
         _databaseChangeCardName = verified ? null : _databaseChangeCardName ?? DatabaseCardName;
         _databaseChangeStatus = verified ? null : "Change not verified";
         _databaseChangeDetails = verified ? null : detail;
-        if (verified) _databaseChangeExpectedName = null;
-        NotifyDatabaseCard();
-    }
-    private string? LiveDatabaseName => _snapshot.State == ServiceState.Running &&
-        Runner.AppliedConfigurationEnvironment == "Local" &&
-        Runner.ManagedApiRunVersion == _liveDatabaseRunVersion &&
-        DateTimeOffset.UtcNow - _liveDatabaseCheckedAtUtc <= TimeSpan.FromSeconds(40) &&
-        ApiDatabaseHealthProbe.HealthUriFor(_snapshot.ActiveUrl)?.AbsoluteUri == _liveDatabaseHealthUri
-            ? _liveDatabaseName : null;
-
-    /// <summary>Probe only an observed launcher-managed Local API; never affect its service status.</summary>
-    public async Task RefreshApiDatabaseAsync(bool force = false)
-    {
-        var snapshot = Runner.Snapshot;
-        ClearPreviousApiRunDatabaseCard();
-        var healthUri = snapshot.State == ServiceState.Running && Runner.AppliedConfigurationEnvironment == "Local"
-            ? ApiDatabaseHealthProbe.HealthUriFor(snapshot.ActiveUrl) : null;
-        var runVersion = Runner.ManagedApiRunVersion;
-        if (healthUri is null)
+        if (verified)
         {
-            ClearLiveDatabase();
-            if (Runner.AppliedConfigurationEnvironment == "Prod") ClearVerifiedDatabaseCard();
-            _nextApiDatabaseProbeUtc = default;
-            return;
+            _databaseChangeExpectedName = null;
+            _databaseChangeKey = null;
         }
-        var uriText = healthUri.AbsoluteUri;
-        if (_liveDatabaseRunVersion != runVersion || _liveDatabaseHealthUri != uriText)
-        {
-            ClearLiveDatabase();
-            _nextApiDatabaseProbeUtc = default;
-        }
-        if (_refreshingApiDatabase || (!force && DateTimeOffset.UtcNow < _nextApiDatabaseProbeUtc)) return;
-        _refreshingApiDatabase = true;
-        _nextApiDatabaseProbeUtc = DateTimeOffset.UtcNow.AddSeconds(30);
-        try
-        {
-            var name = await ApiDatabaseHealthProbe.ReadVerifiedNameAsync(healthUri);
-            var current = Runner.Snapshot;
-            if (current.State != ServiceState.Running || Runner.AppliedConfigurationEnvironment != "Local" ||
-                Runner.ManagedApiRunVersion != runVersion ||
-                ApiDatabaseHealthProbe.HealthUriFor(current.ActiveUrl)?.AbsoluteUri != uriText) return;
-            _liveDatabaseName = name;
-            _liveDatabaseHealthUri = uriText;
-            _liveDatabaseRunVersion = runVersion;
-            _liveDatabaseCheckedAtUtc = name is null ? default : DateTimeOffset.UtcNow;
-            if (name is not null)
-            {
-                _verifiedDatabaseName = name;
-                _verifiedDatabaseRunVersion = runVersion;
-                _verifiedDatabaseCheckedAtUtc = _liveDatabaseCheckedAtUtc;
-                if (_databaseChangeExpectedName is { } expected && runVersion > _databaseChangePreviousRun &&
-                    !Runner.ConfigurationNeedsRestart && string.Equals(name, expected, StringComparison.Ordinal))
-                    FinishDatabaseChange(true, "");
-            }
-            NotifyIfChanged(ApiDatabaseLabel, nameof(ApiDatabaseLabel));
-            NotifyIfChanged(ApiDatabaseDetails, nameof(ApiDatabaseDetails));
-            NotifyDatabaseCard();
-        }
-        finally { _refreshingApiDatabase = false; }
-    }
-
-    private void ClearLiveDatabase()
-    {
-        if (_liveDatabaseName is null && _liveDatabaseHealthUri is null) return;
-        _liveDatabaseName = null;
-        _liveDatabaseHealthUri = null;
-        _liveDatabaseCheckedAtUtc = default;
-        _liveDatabaseRunVersion = 0;
-        NotifyIfChanged(ApiDatabaseLabel, nameof(ApiDatabaseLabel));
-        NotifyIfChanged(ApiDatabaseDetails, nameof(ApiDatabaseDetails));
         NotifyDatabaseCard();
     }
 
-    private void ClearPreviousApiRunDatabaseCard()
+    private void TryCompleteDatabaseChangeFromDiscovery(long discoveryRunVersion)
     {
-        if (_verifiedDatabaseName is not null && _verifiedDatabaseRunVersion != Runner.ManagedApiRunVersion)
-            ClearVerifiedDatabaseCard();
-    }
-
-    private void ClearVerifiedDatabaseCard()
-    {
-        if (_verifiedDatabaseName is null) return;
-        _verifiedDatabaseName = null;
-        _verifiedDatabaseRunVersion = 0;
-        _verifiedDatabaseCheckedAtUtc = default;
-        NotifyDatabaseCard();
+        if (_databaseChangeExpectedName is { } expectedName && _databaseChangeKey is { } key &&
+            discoveryRunVersion == Runner.ManagedApiRunVersion && discoveryRunVersion > _databaseChangePreviousRun &&
+            Runner.Snapshot is { State: ServiceState.Running, IsManaged: true } &&
+            Runner.AppliedConfigurationEnvironment == "Local" && !Runner.ConfigurationNeedsRestart &&
+            IsDatabaseConfigurationDiscovered(key, expectedName))
+            FinishDatabaseChange(true, "");
     }
 
     private void NotifyDatabaseCard()
     {
         UpdateApiDatabaseServices();
-        NotifyIfChanged(VerifiedDatabaseName, nameof(VerifiedDatabaseName));
-        NotifyIfChanged(LastVerifiedDatabaseName, nameof(LastVerifiedDatabaseName));
-        NotifyIfChanged(HasVerifiedDatabaseCard, nameof(HasVerifiedDatabaseCard));
+        NotifyIfChanged(ApiDatabaseLabel, nameof(ApiDatabaseLabel));
+        NotifyIfChanged(ApiDatabaseDetails, nameof(ApiDatabaseDetails));
         NotifyIfChanged(ShowChangeDatabaseRecovery, nameof(ShowChangeDatabaseRecovery));
-        NotifyIfChanged(IsVerifiedDatabaseHealthy, nameof(IsVerifiedDatabaseHealthy));
         NotifyIfChanged(DatabaseCardName, nameof(DatabaseCardName));
         NotifyIfChanged(DatabaseCardStatus, nameof(DatabaseCardStatus));
-        NotifyIfChanged(DatabaseCardStatusColor, nameof(DatabaseCardStatusColor));
         NotifyIfChanged(DatabaseCardDetails, nameof(DatabaseCardDetails));
     }
+
     // Bindings must not touch the filesystem: project folders may live on OneDrive or a slow drive.
     // Periodic background discovery still notices project files created/removed outside the launcher.
     public async Task RefreshApiProjectAvailabilityAsync()
@@ -468,7 +378,6 @@ public sealed partial class ServiceViewModel(ServiceRunner runner) : ObservableO
     public void Update()
     {
         _snapshot = Runner.Snapshot;
-        ClearPreviousApiRunDatabaseCard();
         UpdateFlutterDatabaseState();
         // The same VM appears in the sidebar and the service card. Re-notifying every property
         // for an unchanged poll unnecessarily invalidates both visual trees and their layout.

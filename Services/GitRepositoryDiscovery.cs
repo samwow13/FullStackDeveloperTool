@@ -10,14 +10,20 @@ public sealed record GitRepositoryChoice(string Label, string Directory, bool Is
     public string Display => Label;
 }
 
+public sealed record GitRepositoryResolvedFolder(string Directory, GitBranchSnapshot Snapshot);
+
 public sealed record GitRepositoryDiscoveryResult(
     IReadOnlyList<GitRepositoryChoice> Folders,
     IReadOnlyList<GitRepositoryChoice> Repositories,
-    string? Warning);
+    string? Warning)
+{
+    public IReadOnlyList<GitRepositoryResolvedFolder> ResolvedFolders { get; init; } = [];
+}
 
 /// <summary>
 /// Resolves configured folders to their nearest checkout using local metadata only. An explicit
 /// project-root request also checks immediate child folders for .git markers, never descendants.
+/// The conventional ORKidsDatabase child is checked before the bounded general folder scan.
 /// No Git commands, repository configuration, credentials or source files are read.
 /// </summary>
 public static class GitRepositoryDiscovery
@@ -84,7 +90,10 @@ public static class GitRepositoryDiscovery
                 warnings.Add($"{read.Folder.Label}: {read.Folder.Directory}\n{read.Snapshot.Detail}");
 
             return new GitRepositoryDiscoveryResult(choices, choices.Where(choice => choice.IsRepository).ToArray(),
-                warnings.Count == 0 ? null : string.Join(Environment.NewLine + Environment.NewLine, warnings.Distinct()));
+                warnings.Count == 0 ? null : string.Join(Environment.NewLine + Environment.NewLine, warnings.Distinct()))
+            {
+                ResolvedFolders = reads.Select(read => new GitRepositoryResolvedFolder(read.Folder.Directory, read.Snapshot)).ToArray()
+            };
         }, token);
     }
 
@@ -140,34 +149,20 @@ public static class GitRepositoryDiscovery
             // A configured junction can still be read normally, but discovery must not traverse it.
             if (File.GetAttributes(directory).HasFlag(FileAttributes.ReparsePoint))
                 return new([], [$"Child repository discovery skipped this linked project folder.\nFolder: {directory}"]);
-            var count = 0;
+            // Reserve one probe for the database checkout so unrelated folders cannot exhaust
+            // the scan budget before this non-service repository is considered.
+            var databaseDirectory = Path.Combine(directory, "ORKidsDatabase");
+            var count = AddChildRepository(databaseDirectory, children, warnings) ? 1 : 0;
             foreach (var child in Directory.EnumerateDirectories(directory))
             {
                 if (string.Equals(Path.GetFileName(child), ".git", StringComparison.OrdinalIgnoreCase)) continue;
+                if (string.Equals(child, databaseDirectory, StringComparison.OrdinalIgnoreCase)) continue;
                 if (++count > MaximumChildFolders)
                 {
                     warnings.Add($"Child repository discovery reached its limit of {MaximumChildFolders} folders.\nFolder: {directory}");
                     break;
                 }
-                try
-                {
-                    if (File.GetAttributes(child).HasFlag(FileAttributes.ReparsePoint))
-                    {
-                        warnings.Add($"Child repository discovery skipped this linked folder.\nFolder: {child}");
-                        continue;
-                    }
-                    if (File.GetAttributes(Path.Combine(child, ".git")).HasFlag(FileAttributes.ReparsePoint))
-                    {
-                        warnings.Add($"Child repository discovery skipped linked Git metadata.\nFolder: {child}");
-                        continue;
-                    }
-                    children.Add(NormalizeDirectory(child));
-                }
-                catch (Exception exception) when (exception is FileNotFoundException or DirectoryNotFoundException) { }
-                catch (Exception exception) when (IsFolderReadError(exception))
-                {
-                    warnings.Add($"Child repository discovery could not read this folder.\nFolder: {child}");
-                }
+                AddChildRepository(child, children, warnings);
             }
         }
         catch (Exception exception) when (IsFolderReadError(exception))
@@ -175,6 +170,33 @@ public static class GitRepositoryDiscovery
             warnings.Add($"Child repository discovery could not read this folder.\nFolder: {directory}");
         }
         return new(children.Order(StringComparer.OrdinalIgnoreCase).ToArray(), warnings);
+    }
+
+    private static bool AddChildRepository(string child, List<string> children, List<string> warnings)
+    {
+        var folderExists = false;
+        try
+        {
+            var attributes = File.GetAttributes(child);
+            folderExists = true;
+            if (attributes.HasFlag(FileAttributes.ReparsePoint))
+            {
+                warnings.Add($"Child repository discovery skipped this linked folder.\nFolder: {child}");
+                return true;
+            }
+            if (File.GetAttributes(Path.Combine(child, ".git")).HasFlag(FileAttributes.ReparsePoint))
+            {
+                warnings.Add($"Child repository discovery skipped linked Git metadata.\nFolder: {child}");
+                return true;
+            }
+            children.Add(NormalizeDirectory(child));
+        }
+        catch (Exception exception) when (exception is FileNotFoundException or DirectoryNotFoundException) { }
+        catch (Exception exception) when (IsFolderReadError(exception))
+        {
+            warnings.Add($"Child repository discovery could not read this folder.\nFolder: {child}");
+        }
+        return folderExists;
     }
 
     private static string NormalizeDirectory(string directory)
