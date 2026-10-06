@@ -6,8 +6,9 @@ public partial class App : Application
 {
     private bool _reportingUnexpectedError;
     private bool _startupErrorShown;
+    private Services.DashboardInstanceLease? _dashboardInstance;
 
-    protected override void OnStartup(StartupEventArgs e)
+    protected override async void OnStartup(StartupEventArgs e)
     {
         DispatcherUnhandledException += (_, args) =>
         {
@@ -68,11 +69,37 @@ public partial class App : Application
         }
         else
         {
-            MainWindow = new MainWindow();
-            ((MainWindow)MainWindow).StartAgentBridge();
-            MainWindow.Show();
-            RestoreQueueOwnerAfterStartup();
+            // Do not create runners or load recovery data until the previous
+            // dashboard has retained its service handles and actually exited.
+            ShutdownMode = ShutdownMode.OnExplicitShutdown;
+            try
+            {
+                _dashboardInstance = await Services.DashboardInstanceLease.AcquireAsync(
+                    new Services.SettingsStore().SettingsPath);
+                MainWindow = new MainWindow();
+                ((MainWindow)MainWindow).StartAgentBridge();
+                MainWindow.Show();
+                _dashboardInstance.CompleteStartup();
+                ShutdownMode = ShutdownMode.OnMainWindowClose;
+                RestoreQueueOwnerAfterStartup();
+            }
+            catch (Exception ex)
+            {
+                _dashboardInstance?.Dispose();
+                _dashboardInstance = null;
+                MessageBox.Show("The new launcher could not take over. Running apps were not stopped.\n\n" +
+                    Services.SensitiveDataProtection.Redact(ex.Message),
+                    "Launcher replacement incomplete", MessageBoxButton.OK, MessageBoxImage.Warning);
+                Shutdown(1);
+            }
         }
+    }
+
+    protected override void OnExit(ExitEventArgs e)
+    {
+        _dashboardInstance?.Dispose();
+        _dashboardInstance = null;
+        base.OnExit(e);
     }
 
     private async void RestoreQueueOwnerAfterStartup()

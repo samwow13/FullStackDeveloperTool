@@ -28,6 +28,8 @@ public partial class ProjectTasksWindow : Window
     public void ShowProject(ProjectProfile? project, string folder)
     {
         _model.ShowProject(project, folder);
+        Title = project == null ? "Project notes & queue — Full Stack Launcher"
+            : $"{project.Name} · Notes & queue — Full Stack Launcher";
         _ = RefreshOwnerStatusAsync();
     }
 

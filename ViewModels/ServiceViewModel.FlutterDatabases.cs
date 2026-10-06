@@ -39,7 +39,6 @@ public sealed partial class ServiceViewModel
             DateTimeOffset.UtcNow - _flutterConnectionCheckedAt > TimeSpan.FromSeconds(30) ||
             !_flutterConnectionProcesses.SequenceEqual(CurrentFlutterAppProcesses()))
             foreach (var database in FlutterDatabases) database.SetConnected(false);
-        foreach (var database in FlutterDatabases) database.UpdateAppState(Name, OverviewState);
     }
 
     private ProcessIdentity[] CurrentFlutterAppProcesses() => Runner.FlutterAppProcessIdentities
@@ -76,7 +75,6 @@ public sealed partial class ServiceViewModel
                 }
                 database.SetAvailable(true);
                 database.SetConnected(true);
-                database.UpdateAppState(Name, OverviewState);
             }
         }
         catch (OperationCanceledException) when (_flutterDatabaseLifetime.IsCancellationRequested) { }
@@ -125,7 +123,6 @@ public sealed partial class ServiceViewModel
                     FlutterDatabases.Add(database);
                 }
                 else database.SetObservation(observation);
-                database.UpdateAppState(Name, OverviewState);
             }
         }
         catch (OperationCanceledException) when (_flutterDatabaseLifetime.IsCancellationRequested) { }
@@ -144,25 +141,20 @@ public sealed class FlutterDatabaseViewModel(FlutterSqliteObservation observatio
     private FlutterSqliteObservation _observation = observation;
     private bool _available = true;
     private bool _connected;
-    private string _appName = "Flutter app";
-    private string _appState = "Checking";
 
     public string Path => _observation.Path;
     public string Name => _observation.Name;
-    public string SourceLabel => $"SQLite · discovered through {_appName}";
     public string Status => !_available ? "Unavailable · file not verified" : _connected ? "In use · SQLite" : "Detected · SQLite";
     public string StatusColor => _available ? "#81D5AE" : "#FFD27A";
-    public string Details => $"{Path}\n{(_available ? "SQLite file header verified with read-only file access." : "SQLite file is missing, unreadable, or no longer has a valid header.")} " +
-        $"{_observation.Evidence}\n{_appName}: {_appState}. " +
-        (_connected ? "Open SQLite file observed in the app process. App queries are not verified."
-            : "No current app connection observation. App queries are not verified.");
+    public bool HasCardDetails => !_available;
+    public string CardDetails => !_available
+        ? $"{Path}\nSQLite file is missing, unreadable, or no longer has a valid header." : "";
 
     internal void SetConnected(bool connected)
     {
         if (_connected == connected) return;
         _connected = connected;
         Changed(nameof(Status));
-        Changed(nameof(Details));
     }
 
     internal void SetObservation(FlutterSqliteObservation value)
@@ -172,7 +164,7 @@ public sealed class FlutterDatabaseViewModel(FlutterSqliteObservation observatio
         SetAvailable(true);
         if (!changed) return;
         Changed(nameof(Name));
-        Changed(nameof(Details));
+        Changed(nameof(CardDetails));
     }
 
     internal void SetAvailable(bool available)
@@ -182,15 +174,7 @@ public sealed class FlutterDatabaseViewModel(FlutterSqliteObservation observatio
         if (!available) _connected = false;
         Changed(nameof(Status));
         Changed(nameof(StatusColor));
-        Changed(nameof(Details));
-    }
-
-    internal void UpdateAppState(string name, string state)
-    {
-        if (_appName == name && _appState == state) return;
-        _appName = name;
-        _appState = state;
-        Changed(nameof(SourceLabel));
-        Changed(nameof(Details));
+        Changed(nameof(HasCardDetails));
+        Changed(nameof(CardDetails));
     }
 }

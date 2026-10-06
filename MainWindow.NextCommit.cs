@@ -23,8 +23,9 @@ public partial class MainWindow
     private int _nextCommitUnviewedCount;
     private NextCommitRepository? _selectedNextCommitRepository;
     private CommitMessagePresentation _nextCommitPresentation = new("", [], null);
-    private readonly HashSet<string> _nextCommitAcknowledgedIds = [];
+    private readonly HashSet<(string Root, string Branch, string Remote, string Connection, string Entry)> _nextCommitAcknowledgedIds = [];
     private readonly Dictionary<string, (AgentGitSummaryBatch? Batch, string? Error)> _nextCommitBatches = [];
+    private readonly Dictionary<string, string> _nextCommitRepositorySelections = [];
 
     public ObservableCollection<NextCommitRepository> NextCommitRepositories { get; } = [];
     public bool HasNextCommitRepositoryChoices => NextCommitRepositories.Count > 1;
@@ -35,6 +36,8 @@ public partial class MainWindow
         {
             if (ReferenceEquals(_selectedNextCommitRepository, value)) return;
             _selectedNextCommitRepository = value;
+            if (value is not null && SelectedProject is { } project && NextCommitRepositories.Contains(value))
+                _nextCommitRepositorySelections[project.Id] = value.RepositoryId;
             Changed(nameof(SelectedNextCommitRepository));
             PresentNextCommit();
         }
@@ -147,14 +150,16 @@ public partial class MainWindow
             _dashboardGitScopePending = false;
             var repositoryNames = GitRepositoryDisplayNames.Create(_store.ResolveRoot(project),
                 results.Select(result => result.Repository.RepositoryRoot));
-            var choices = results.Select(result => new NextCommitRepository(result.Repository.RepositoryId,
-                result.Repository.RepositoryRoot, result.Repository.Branch, result.Repository.ActiveConnectionId,
-                result.Batch?.RemoteName ?? result.Repository.Connections.FirstOrDefault(connection => connection.IsActive)?.RemoteName,
-                repositoryNames[result.Repository.RepositoryRoot])).ToArray();
-            var oldId = SelectedNextCommitRepository?.RepositoryId;
+            var oldId = SelectedNextCommitRepository?.RepositoryId
+                ?? _nextCommitRepositorySelections.GetValueOrDefault(project.Id);
             _nextCommitBatches.Clear();
             foreach (var result in results)
                 _nextCommitBatches[result.Repository.RepositoryId] = (ApplyNextCommitAcknowledgments(result.Batch), result.Error);
+            var choices = results.Select(result => new NextCommitRepository(result.Repository.RepositoryId,
+                result.Repository.RepositoryRoot, result.Repository.Branch, result.Repository.ActiveConnectionId,
+                result.Batch?.RemoteName ?? result.Repository.Connections.FirstOrDefault(connection => connection.IsActive)?.RemoteName,
+                repositoryNames[result.Repository.RepositoryRoot],
+                _nextCommitBatches[result.Repository.RepositoryId].Batch?.Entries.Count)).ToArray();
             if (!NextCommitRepositories.SequenceEqual(choices))
             {
                 // Rebuilding picker items may temporarily clear selection. Keep the
@@ -266,7 +271,7 @@ public partial class MainWindow
             await AgentGitChangeStore.MarkViewedAsync(captured, _nextCommitLifetime.Token);
             if (generation == _nextCommitProjectGeneration)
             {
-                foreach (var entry in captured.Entries) _nextCommitAcknowledgedIds.Add(entry.Id);
+                foreach (var entry in captured.Entries) _nextCommitAcknowledgedIds.Add(NextCommitAcknowledgmentKey(captured, entry.Id));
                 // Apply the acknowledgment only after its durable save, preserving later arrivals.
                 if (_nextCommitBatches.TryGetValue(selected.RepositoryId, out var latest)
                     && latest.Batch is { } latestBatch && SameNextCommitScope(captured, latestBatch))
@@ -277,7 +282,14 @@ public partial class MainWindow
             await RefreshNextCommitAsync(force: true);
         }
         catch (OperationCanceledException) when (_nextCommitLifetime.IsCancellationRequested) { }
-        catch (Exception) { Notice = "Read status could not be saved. Unread marks and pending AI updates were preserved; click the message to retry."; }
+        catch (Exception)
+        {
+            if (generation == _nextCommitProjectGeneration && SelectedNextCommitRepository is { } latestSelection
+                && _nextCommitBatches.TryGetValue(latestSelection.RepositoryId, out var latest)
+                && latest.Batch is { } latestBatch && SameNextCommitScope(captured, latestBatch)
+                && !_closeRequested && !_closing && !_closed)
+                Notice = "Read status could not be saved. Unread marks and pending AI updates were preserved; click the message to retry.";
+        }
         finally { _markingNextCommitViewed = false; }
     }
 
@@ -285,8 +297,11 @@ public partial class MainWindow
         _nextCommitBatches.Values.Sum(result => result.Batch?.Entries.Count(entry => entry.ViewedAt is null) ?? 0);
 
     private AgentGitSummaryBatch? ApplyNextCommitAcknowledgments(AgentGitSummaryBatch? batch) => batch is null ? null
-        : batch with { Entries = batch.Entries.Select(entry => entry.ViewedAt is null && _nextCommitAcknowledgedIds.Contains(entry.Id)
+        : batch with { Entries = batch.Entries.Select(entry => entry.ViewedAt is null && _nextCommitAcknowledgedIds.Contains(NextCommitAcknowledgmentKey(batch, entry.Id))
             ? entry with { ViewedAt = DateTimeOffset.UtcNow } : entry).ToArray() };
+
+    private static (string, string, string, string, string) NextCommitAcknowledgmentKey(AgentGitSummaryBatch batch, string entryId) =>
+        (GitConnectionService.NormalizeRoot(batch.RepositoryRoot).ToUpperInvariant(), batch.Branch, batch.RemoteName, batch.ConnectionId, entryId);
 
     private static bool SameNextCommitScope(AgentGitSummaryBatch left, AgentGitSummaryBatch right) =>
         string.Equals(left.RepositoryRoot, right.RepositoryRoot, StringComparison.OrdinalIgnoreCase)
@@ -318,9 +333,10 @@ public partial class MainWindow
     }
 
     public sealed record NextCommitRepository(string RepositoryId, string RepositoryRoot, string? Branch, string? ConnectionId, string? RemoteName,
-        string? Label = null)
+        string? Label = null, int? PendingUpdateCount = null)
     {
-        public string DisplayName => Label ?? System.IO.Path.GetFileName(RepositoryRoot);
+        public string DisplayName => $"{Label ?? System.IO.Path.GetFileName(RepositoryRoot)} · {Branch ?? "branch unavailable"}"
+            + (PendingUpdateCount is > 0 ? $" · {PendingUpdateCount:N0} pending" : "");
     }
 
 }

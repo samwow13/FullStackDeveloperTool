@@ -30,6 +30,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     private bool _layoutReady;
     private bool _checkingStartupServices = true;
     private readonly CancellationTokenSource _flutterDatabaseLifetime = new();
+    private readonly CancellationTokenSource _developerToolLifetime = new();
     private ProjectTasks.ProjectTasksWindow? _projectTasksWindow;
     private string _notice = "Ready. Select a service to get started.";
     private string _lastChecked = "Checking status…";
@@ -80,6 +81,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     public bool ProjectsVisible { get => _settings.Layout.ProjectsVisible; set => SetSectionVisibility(nameof(ProjectsVisible), value); }
     public bool ToolsVisible { get => _settings.Layout.ToolsVisible; set => SetSectionVisibility(nameof(ToolsVisible), value); }
     public bool ServicesVisible { get => _settings.Layout.ServicesVisible; set => SetSectionVisibility(nameof(ServicesVisible), value); }
+    public bool CodexCrewVisible { get => _settings.Layout.CodexCrewVisible; set => SetSectionVisibility(nameof(CodexCrewVisible), value); }
     public bool NextCommitVisible { get => _settings.Layout.NextCommitVisible; set => SetSectionVisibility(nameof(NextCommitVisible), value); }
     public event PropertyChangedEventHandler? PropertyChanged;
     private void Changed(string name) => PropertyChanged?.Invoke(this, new(name));
@@ -125,6 +127,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         Closed += (_, _) => _sourceLineCountLifetime.Cancel();
         Closed += (_, _) => _frontendBrowserLifetime.Cancel();
         Closed += (_, _) => _flutterDatabaseLifetime.Cancel();
+        Closed += (_, _) => _developerToolLifetime.Cancel();
         InitializeFrontendBrowserAccess();
         SourceInitialized += (_, _) =>
         {
@@ -300,15 +303,14 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     private void UpdateActions()
     {
         foreach (var service in _runners.Values.SelectMany(project => project))
-            service.AreCommandsBlocked = _addingProjectService || _checkingStartupServices || _closeRequested || _closing || _forceStopBatchBusy;
+            service.AreCommandsBlocked = _addingProjectService || _savingProjectEdits || _checkingStartupServices || _closeRequested || _closing || _forceStopBatchBusy;
         RefreshLinkedPortAvailability();
         RefreshServiceConsoleWindows();
         RefreshApiEndpointWindows();
         Changed(nameof(Summary)); Changed(nameof(CanBatch)); Changed(nameof(CanStopBatch)); Changed(nameof(CanEdit));
         Changed(nameof(CanChangeProject)); Changed(nameof(CanEditDetails)); Changed(nameof(CanSaveProjectEdits));
         Changed(nameof(CanRemoveProject)); Changed(nameof(CanCancelProjectEdits));
-        Changed(nameof(CanAddConsoleApp));
-        Changed(nameof(CanAddApi));
+        Changed(nameof(CanAddService));
         Changed(nameof(ProductionNotice)); Changed(nameof(HasProductionNotice));
         NotifyStartAllChanged();
         UpdateArchiveActions();
@@ -521,17 +523,51 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     {
         if ((sender as FrameworkElement)?.DataContext is not DeveloperToolViewModel tool || tool.IsOpening || _closing) return;
         tool.IsOpening = true;
+        DeveloperToolTarget? resolvedTarget = null;
         try
         {
             // Resolve again so moving/reinstalling a tool while the launcher is open is supported.
             var target = await Task.Run(() => DeveloperToolLauncher.Resolve(tool.Profile, _store.BaseDirectory));
+            if (_closing) return;
+            resolvedTarget = target;
             tool.SetTarget(target);
-            DeveloperToolLauncher.Open(target);
-            Notice = $"Opened {tool.Name}.";
+            if (tool.Profile.CredentialProfileId is { } profileId)
+            {
+                if (target.IsWebsite)
+                {
+                    var result = await ProjectTasks.BrowserPageCaptureBroker.FillWebsiteLoginAsync(target.FileName, profileId,
+                        tool.Profile.WebsiteUsernameSelector, tool.Profile.WebsitePasswordSelector, _developerToolLifetime.Token,
+                        browser: target.Browser);
+                    if (_closing) return;
+                    Notice = result.Status;
+                    if (!result.Filled) MessageBox.Show(this, result.Status, $"Open {tool.Name}", MessageBoxButton.OK, MessageBoxImage.Information);
+                }
+                else
+                {
+                    await Task.Run(() =>
+                    {
+                        using var credential = ToolCredentialStore.Read(profileId);
+                        _developerToolLifetime.Token.ThrowIfCancellationRequested();
+                        AlternateUserToolLauncher.Open(target.FileName, credential);
+                    });
+                    if (!_closing) Notice = $"Started {tool.Name} as the selected Windows user.";
+                }
+            }
+            else
+            {
+                await Task.Run(() =>
+                {
+                    _developerToolLifetime.Token.ThrowIfCancellationRequested();
+                    DeveloperToolLauncher.Open(target);
+                });
+                if (_closing) return;
+                Notice = $"Opened {tool.Name}.";
+            }
         }
         catch (Exception ex)
         {
-            tool.SetTarget(null, ex.Message);
+            if (_closing || _developerToolLifetime.IsCancellationRequested) return;
+            tool.SetTarget(resolvedTarget, ex.Message);
             Notice = $"Could not open {tool.Name}: {ex.Message}";
             MessageBox.Show(this, ex.Message, $"Open {tool.Name}", MessageBoxButton.OK, MessageBoxImage.Warning);
         }
@@ -610,16 +646,19 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         if (setup.ShowDialog() != true) return;
         var result = setup.Result;
         AngularDevProxyConfiguration proxyChanges;
+        SetSavingProjectEdits(true);
         try
         {
             proxyChanges = AngularDevProxyConfiguration.Prepare(new ProjectProfile
             {
                 Id = result.Id, Name = result.Name, RootPath = result.RootPath
             }, result, _store);
+            await RequireStoppedProxyFileServicesAsync(proxyChanges, result);
             _settings.Projects.Add(result);
             proxyChanges.SaveWithSettings(() => _store.Save(_settings));
         }
         catch (Exception ex) { _settings.Projects.Remove(result); ShowSaveError(ex); return; }
+        finally { SetSavingProjectEdits(false); }
         Projects.Add(result);
         ProjectItems.Add(new(result, GetRunners(result)));
         _showArchivedProjects = false;
@@ -707,6 +746,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
             if (index < 0) throw new InvalidOperationException("The selected project was removed while its settings were open.");
             candidateSettings.Projects[index] = result;
             var proxyChanges = AngularDevProxyConfiguration.Prepare(selected, result, _store);
+            await RequireStoppedProxyFileServicesAsync(proxyChanges, result);
             proxyChanges.SaveWithSettings(() => _store.Save(candidateSettings));
             settingsSaved = true;
 
@@ -782,7 +822,8 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         var current = property switch
         {
             nameof(ProjectsVisible) => ProjectsVisible, nameof(ToolsVisible) => ToolsVisible,
-            nameof(ServicesVisible) => ServicesVisible, nameof(NextCommitVisible) => NextCommitVisible, _ => visible
+            nameof(ServicesVisible) => ServicesVisible, nameof(CodexCrewVisible) => CodexCrewVisible,
+            nameof(NextCommitVisible) => NextCommitVisible, _ => visible
         };
         if (current == visible) return;
         switch (property)
@@ -790,6 +831,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
             case nameof(ProjectsVisible): _settings.Layout.ProjectsVisible = visible; break;
             case nameof(ToolsVisible): _settings.Layout.ToolsVisible = visible; break;
             case nameof(ServicesVisible): _settings.Layout.ServicesVisible = visible; break;
+            case nameof(CodexCrewVisible): _settings.Layout.CodexCrewVisible = visible; break;
             case nameof(NextCommitVisible): _settings.Layout.NextCommitVisible = visible; break;
         }
         ApplyLayout();
@@ -813,6 +855,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         ServicesPanel.Visibility = Display(ServicesVisible);
         BatchControlsPanel.Visibility = Display(ServicesVisible || IsEditing);
         EmptyWorkspace.Visibility = Display(!ServicesVisible);
+        CodexCrewPanel.Visibility = Display(CodexCrewVisible);
         NextCommitPanel.Visibility = Display(NextCommitVisible);
         NextCommitSplitter.Visibility = Display(NextCommitVisible);
         NextCommitColumn.MinWidth = NextCommitVisible ? 280 : 0;

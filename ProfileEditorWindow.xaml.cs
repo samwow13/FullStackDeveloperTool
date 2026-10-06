@@ -16,6 +16,8 @@ public partial class ProfileEditorWindow : Window
     private readonly string _settingsDirectory;
     private readonly IReadOnlyList<ProjectProfile> _savedProjects;
     private readonly ObservableCollection<ServiceProfile> _services;
+    private readonly string _originalProjectName;
+    private readonly bool _isSetupReview;
     private bool _updatingApiTargetOptions;
     public ProjectProfile Result { get; private set; }
     public ProjectProfile Draft
@@ -36,6 +38,8 @@ public partial class ProfileEditorWindow : Window
         InitializeComponent();
         _settingsDirectory = Path.GetFullPath(settingsDirectory);
         _savedProjects = savedProjects ?? [];
+        _originalProjectName = profile.Name.Trim();
+        _isSetupReview = isSetupReview;
         Result = Clone(profile);
         _services = new ObservableCollection<ServiceProfile>(Result.Services);
         ProjectNameBox.Text = Result.Name;
@@ -300,6 +304,13 @@ public partial class ProfileEditorWindow : Window
         ConsoleTypeBox.GetBindingExpression(ComboBox.TextProperty)?.UpdateSource();
         ApiTypeBox.GetBindingExpression(ComboBox.TextProperty)?.UpdateSource();
         var candidate = Draft;
+        if ((_isSetupReview || !string.Equals(candidate.Name, _originalProjectName, StringComparison.OrdinalIgnoreCase)) &&
+            SettingsStore.FindProjectNameConflict(_savedProjects, candidate.Name, candidate.Id) is { } nameConflict)
+        {
+            ShowValidation($"Project name '{nameConflict.Name}' is already used. Choose a different project name.");
+            ProjectNameBox.Focus();
+            return;
+        }
         foreach (var service in candidate.Services)
         {
             service.Name = service.Name.Trim();
@@ -332,15 +343,6 @@ public partial class ProfileEditorWindow : Window
                 var folder = Path.GetFullPath(service.WorkingDirectory, root);
                 if (!Directory.Exists(folder))
                     throw new ArgumentException($"The working folder for '{service.Name}' does not exist:\n{folder}");
-                var conflicts = SettingsStore.FindServiceFolderConflicts(
-                    _savedProjects, _settingsDirectory, folder, candidate.Id);
-                if (conflicts.Count > 0)
-                {
-                    var conflict = conflicts[0];
-                    throw new ArgumentException($"The working folder for '{service.Name}' overlaps " +
-                        $"saved '{conflict.Project.Name}' / '{conflict.Service.Name}'. " +
-                        "Choose a different folder or open that saved project.");
-                }
             }
             Result = candidate;
             DialogResult = true;

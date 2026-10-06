@@ -102,6 +102,10 @@ public partial class MainWindow
     {
         if (_closing || _closed || _closeRequested)
             return AgentBridgeResponse.Failure("Launcher dashboard is closing. Reconnect after it opens again.");
+        if (request.Action == "replace_dashboard")
+            return await CloseDashboardAsync(automaticReplacement: true, cancellationToken)
+                ? AgentBridgeResponse.Success(new { status = "closed" })
+                : AgentBridgeResponse.Failure(Notice);
         SubscribeAgentActivity();
         try
         {
@@ -120,6 +124,8 @@ public partial class MainWindow
                 "services" => AgentBridgeResponse.Success(ListAgentServices(request.ProjectId)),
                 "git_connections" => AgentBridgeResponse.Success(await ListAgentGitConnectionsAsync(request, cancellationToken)),
                 "record_git_changes" => AgentBridgeResponse.Success(await RecordAgentGitChangesAsync(request, cancellationToken)),
+                "project_notes" => AgentBridgeResponse.Success(await ListAgentProjectNotesAsync(request, cancellationToken)),
+                "save_follow_up_note" => AgentBridgeResponse.Success(await SaveAgentFollowUpNoteAsync(request, cancellationToken)),
                 "service_status" => AgentBridgeResponse.Success(await AgentServiceStatusAsync(request)),
                 "recent_activity" => AgentBridgeResponse.Success(AgentRecentActivity(request)),
                 "reservation_status" => AgentBridgeResponse.Success(_agentCoordination.ReservationStatus(RequireProject(request.ProjectId).Id)),

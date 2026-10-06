@@ -10,20 +10,15 @@ namespace FullStackLauncher;
 public partial class MainWindow
 {
     private bool _addingProjectService;
-    public bool CanAddConsoleApp => CanEdit && !IsEditing && !_checkingStartupServices;
-    public bool CanAddApi => CanAddConsoleApp;
+    public bool CanAddService => CanEdit && !IsEditing && !_checkingStartupServices;
 
-    private async void AddConsoleApp_Click(object sender, RoutedEventArgs e) =>
-        await AddProjectServiceAsync(isApi: false);
+    private async void AddService_Click(object sender, RoutedEventArgs e) =>
+        await AddProjectServiceAsync();
 
-    private async void AddApi_Click(object sender, RoutedEventArgs e) =>
-        await AddProjectServiceAsync(isApi: true);
-
-    private async Task AddProjectServiceAsync(bool isApi)
+    private async Task AddProjectServiceAsync()
     {
-        if (!CanAddConsoleApp || SelectedProject is not { } selected) return;
-        var serviceType = isApi ? "API" : "Console app";
-        var startAction = isApi ? "Start" : "Run";
+        if (!CanAddService || SelectedProject is not { } selected) return;
+        var serviceType = "Service";
         _addingProjectService = true;
         UpdateActions();
         ServiceProfile? savedService = null;
@@ -31,11 +26,16 @@ public partial class MainWindow
         {
             var picker = new OpenFolderDialog
             {
-                Title = isApi ? "Choose the API folder" : "Choose the app folder", Multiselect = false
+                Title = "Choose the service folder", Multiselect = false
             };
             var projectRoot = _store.ResolveRoot(selected);
             if (Directory.Exists(projectRoot)) picker.InitialDirectory = projectRoot;
             if (picker.ShowDialog(this) != true) return;
+
+            var typePicker = new ServiceTypeWindow(picker.FolderName) { Owner = this };
+            if (typePicker.ShowDialog() != true || typePicker.IsApi is not { } isApi) return;
+            serviceType = isApi ? "API" : "Console app";
+            var startAction = isApi ? "Start" : "Run";
 
             Notice = "Detecting app type…";
             ServiceCommandDetection detection;

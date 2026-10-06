@@ -16,6 +16,7 @@ public sealed class WorkspaceLayout
     public bool ToolsVisible { get; set; } = true;
     public bool ServicesVisible { get; set; } = true;
     public bool NextCommitVisible { get; set; }
+    public bool CodexCrewVisible { get; set; } = true;
     // Zero lets the Codex crew choose a comfortable card count for the available width.
     public int CodexCrewVisibleAgents { get; set; }
     public bool ConsoleVisible { get; set; } = true;
@@ -31,6 +32,22 @@ public sealed class DeveloperTool
     // PgAdmin discovers the desktop installation. Application and Website use Target.
     public string Kind { get; set; } = "Application";
     public string Target { get; set; } = "";
+    // Only profile references and form selectors are saved here; credentials stay in Windows Credential Manager.
+    [System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
+    public string? CredentialProfileId { get; set; }
+    [System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
+    public string? WebsiteUsernameSelector { get; set; }
+    [System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
+    public string? WebsitePasswordSelector { get; set; }
+    [System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
+    public string? WebsiteBrowser { get; set; }
+    public DeveloperTool Clone() => new()
+    {
+        Id = Id, Name = Name, Kind = Kind, Target = Target,
+        CredentialProfileId = CredentialProfileId,
+        WebsiteUsernameSelector = WebsiteUsernameSelector, WebsitePasswordSelector = WebsitePasswordSelector,
+        WebsiteBrowser = WebsiteBrowser
+    };
     public static DeveloperTool PgAdmin() => new() { Id = "pgadmin-4", Name = "pgAdmin 4", Kind = "PgAdmin" };
 }
 

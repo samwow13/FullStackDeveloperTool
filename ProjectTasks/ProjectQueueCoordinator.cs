@@ -12,6 +12,8 @@ namespace FullStackLauncher.ProjectTasks;
 public sealed class ProjectQueueCoordinator
 {
     private static readonly TimeSpan IdlePollInterval = TimeSpan.FromSeconds(3);
+    private const string DashboardRequiredMessage =
+        "Waiting for Long Running Task. Keep the main dashboard open and turn on Long Running Task to start enabled queue items. Started tasks continue.";
     private static readonly string GlobalMarkerPath = Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
         "FullStackLauncher", "project-queue-execution.json");
@@ -52,7 +54,7 @@ public sealed class ProjectQueueCoordinator
             if (_started) throw new InvalidOperationException("The queue coordinator is already running.");
             _started = true;
             var data = LoadWritable();
-            var needsMigration = _store.LoadedSourceVersion < 6;
+            var needsMigration = _store.LoadedSourceVersion < 8;
             if (ProjectTaskRecovery.HoldUnfinishedQueueAttempts(data, DateTimeOffset.UtcNow) > 0 || needsMigration)
                 _store.Save(data);
             await InspectHeldAttemptsAsync(cancellationToken).ConfigureAwait(false);
@@ -542,6 +544,11 @@ public sealed class ProjectQueueCoordinator
             _ownerStatus = "An unresolved queue attempt needs explicit review before further dispatch.";
             return null;
         }
+        if (!QueueDashboardPermit.IsEnabled(_settingsStore.SettingsPath))
+        {
+            _ownerStatus = DashboardRequiredMessage;
+            return null;
+        }
         _ownerStatus = "Queue owner is ready.";
 
         ProjectQueueConfiguration? chosenQueue = null;
@@ -591,6 +598,11 @@ public sealed class ProjectQueueCoordinator
                 queue.ExternalPredecessorSatisfiedAt = DateTimeOffset.UtcNow;
                 queue.StatusMessage = "Selected predecessor's exact turn completed. This is observed lifecycle status, not proof of task success.";
                 _store.Save(data);
+            }
+            if (ProjectQueueDelay.IsWaiting(data, queue, DateTimeOffset.UtcNow))
+            {
+                _handoffPending = true; // Keep the owner awake across a delayed handoff.
+                continue; // Other project queues can use the execution slot during this wait.
             }
             chosenQueue = queue;
             chosenItem = item;
@@ -661,6 +673,15 @@ public sealed class ProjectQueueCoordinator
                 PredecessorHandoff = FindPredecessorHandoff(data, choice.item)
             };
             var receipt = new ProjectTaskExecutionReceipt { Snapshot = snapshot };
+            // Recheck after predecessor inspection and project validation. Closing
+            // or disabling the dashboard never changes pending intent or receipts.
+            if (!QueueDashboardPermit.IsEnabled(_settingsStore.SettingsPath))
+            {
+                _waitingOnActivePredecessor = false;
+                _handoffPending = false;
+                _ownerStatus = DashboardRequiredMessage;
+                return null;
+            }
             choice.item.State = ProjectQueueItemState.Starting;
             choice.item.LastAttemptId = receipt.AttemptId;
             choice.queue.StatusMessage = $"Starting task: {snapshot.Name}";
@@ -1014,7 +1035,14 @@ public sealed class ProjectQueueCoordinator
     {
         var queue = projectId is null ? null : data.Queues.FirstOrDefault(candidate => candidate.ProjectId == projectId);
         var activeMatches = _active is not null && (projectId is null || _active.ProjectId == projectId);
+        var dashboardPermitsStarts = QueueDashboardPermit.IsEnabled(_settingsStore.SettingsPath);
         var message = queue?.StatusMessage;
+        if (!activeMatches && queue is not null && ProjectQueueDelay.IsWaiting(data, queue, DateTimeOffset.UtcNow))
+            message = ProjectQueueDelay.WaitingMessage(data, queue, DateTimeOffset.UtcNow);
+        if (!activeMatches && data.PauseAllQueues) message = "All queues paused.";
+        else if (!activeMatches && !dashboardPermitsStarts &&
+            (queue is { Enabled: true } || projectId is null && data.Queues.Any(candidate => candidate.Enabled)))
+            message = DashboardRequiredMessage;
         if (_ownerStatus.Contains("global execution hold", StringComparison.Ordinal) ||
             _ownerStatus.Contains("unresolved queue attempt", StringComparison.Ordinal))
             message = _ownerStatus;
@@ -1023,7 +1051,8 @@ public sealed class ProjectQueueCoordinator
                 queue is { Enabled: false } ? "Queue paused." :
                 queue is { Enabled: true } ? "Queue enabled." : _ownerStatus;
         return new(_ready.Task.IsCompletedSuccessfully, data.PauseAllQueues, queue?.Enabled ?? false,
-            _active is not null || _handoffPending || _waitingOnActivePredecessor && !data.PauseAllQueues,
+            _active is not null || (_handoffPending || _waitingOnActivePredecessor) &&
+                !data.PauseAllQueues && dashboardPermitsStarts,
             activeMatches, _active?.ProjectId, _active?.AttemptId, message);
     }
 

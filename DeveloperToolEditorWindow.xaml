@@ -1,0 +1,119 @@
+<Window x:Class="FullStackLauncher.DeveloperToolEditorWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="Edit tool" Icon="pack://application:,,,/Assets/launcher.ico"
+        Width="540" SizeToContent="Height" ResizeMode="NoResize"
+        WindowStartupLocation="CenterOwner" ShowInTaskbar="False"
+        Background="{DynamicResource BackgroundBrush}" Foreground="{DynamicResource TextBrush}"
+        FontFamily="Segoe UI" FontSize="13" UseLayoutRounding="True">
+    <Window.Resources>
+        <Style x:Key="ToolEditorLabel" TargetType="Label">
+            <Setter Property="Foreground" Value="{DynamicResource MutedBrush}" />
+            <Setter Property="FontSize" Value="12" />
+            <Setter Property="Padding" Value="0" />
+            <Setter Property="Margin" Value="0,14,0,6" />
+        </Style>
+        <Style x:Key="ToolEditorCheckBox" TargetType="CheckBox">
+            <Setter Property="Foreground" Value="{DynamicResource TextBrush}" />
+            <Setter Property="Cursor" Value="Hand" />
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="CheckBox">
+                        <StackPanel Orientation="Horizontal">
+                            <Border x:Name="Box" Width="17" Height="17" VerticalAlignment="Center"
+                                    Background="{DynamicResource SurfaceBrush}" BorderBrush="{DynamicResource BorderBrush}"
+                                    BorderThickness="1" CornerRadius="3">
+                                <TextBlock x:Name="Check" Text="✓" Visibility="Collapsed" FontSize="12"
+                                           Foreground="#0C2925" HorizontalAlignment="Center" VerticalAlignment="Center" />
+                            </Border>
+                            <ContentPresenter Margin="8,0,0,0" VerticalAlignment="Center" RecognizesAccessKey="True"
+                                              TextElement.Foreground="{TemplateBinding Foreground}" />
+                        </StackPanel>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsChecked" Value="True">
+                                <Setter TargetName="Box" Property="Background" Value="{DynamicResource AccentBrush}" />
+                                <Setter TargetName="Box" Property="BorderBrush" Value="{DynamicResource AccentBrush}" />
+                                <Setter TargetName="Check" Property="Visibility" Value="Visible" />
+                            </Trigger>
+                            <Trigger Property="IsKeyboardFocused" Value="True">
+                                <Setter TargetName="Box" Property="BorderBrush" Value="White" />
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+    </Window.Resources>
+    <Grid Margin="20">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="*" />
+            <RowDefinition Height="Auto" />
+        </Grid.RowDefinitions>
+        <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
+            <Border Background="{DynamicResource CardBrush}" BorderBrush="{DynamicResource BorderBrush}"
+                    BorderThickness="1" CornerRadius="10" Padding="16">
+                <StackPanel>
+                    <Label Content="_Name" Target="{Binding ElementName=NameInput}"
+                           Style="{StaticResource ToolEditorLabel}" Margin="0,0,0,6" />
+                    <TextBox x:Name="NameInput" MinHeight="36" TextChanged="Field_TextChanged"
+                             AutomationProperties.Name="Tool name" />
+                    <Label x:Name="TargetLabel" Content="_Executable path" Target="{Binding ElementName=TargetInput}"
+                           Style="{StaticResource ToolEditorLabel}" />
+                    <DockPanel>
+                        <Button x:Name="BrowseTargetButton" DockPanel.Dock="Right" Content="_Browse…"
+                                Click="BrowseTarget_Click" Margin="8,0,0,0" Padding="12,7"
+                                AutomationProperties.Name="Browse for desktop app executable" />
+                        <Button x:Name="InstalledAppsButton" DockPanel.Dock="Right" Content="_Installed apps…"
+                                Click="InstalledApps_Click" Margin="8,0,0,0" Padding="10,7"
+                                AutomationProperties.Name="Choose installed desktop app"
+                                ToolTip="Search installed desktop apps and use their executable." />
+                        <TextBox x:Name="TargetInput" MinHeight="36" TextChanged="Field_TextChanged"
+                                 AutomationProperties.Name="Application executable path" />
+                    </DockPanel>
+                    <CheckBox x:Name="AutomaticPgAdmin" Content="_Find pgAdmin automatically"
+                              Style="{StaticResource ToolEditorCheckBox}" Margin="0,12,0,0" Visibility="Collapsed"
+                              Checked="AutomaticPgAdmin_Changed" Unchecked="AutomaticPgAdmin_Changed"
+                              ToolTip="Find the installed pgAdmin 4 desktop app when opened. No executable path is required."
+                              AutomationProperties.Name="Find pgAdmin automatically" />
+                    <StackPanel x:Name="WebsiteBrowserOptions" Visibility="Collapsed">
+                        <Label Content="_Browser" Target="{Binding ElementName=BrowserSelector}" Style="{StaticResource ToolEditorLabel}" />
+                        <ComboBox x:Name="BrowserSelector" DisplayMemberPath="Name" MinHeight="36"
+                                  SelectionChanged="BrowserSelector_SelectionChanged" AutomationProperties.Name="Website browser"
+                                  ToolTip="Choose installed Chrome or Edge. Automatic uses your default browser for normal links, or the single paired browser for login filling." />
+                    </StackPanel>
+                    <Label Content="_Credentials" Target="{Binding ElementName=CredentialSelector}" Style="{StaticResource ToolEditorLabel}"/>
+                    <DockPanel>
+                        <Button x:Name="ManageCredentialsButton" DockPanel.Dock="Right" Content="Manage…" Click="ManageCredentials_Click" Margin="8,0,0,0" Padding="12,7"
+                                ToolTip="Save reusable credentials in Windows Credential Manager." AutomationProperties.Name="Manage saved credential profiles"/>
+                        <ComboBox x:Name="CredentialSelector" DisplayMemberPath="Name" SelectionChanged="CredentialSelector_SelectionChanged" MinHeight="36"
+                                  AutomationProperties.Name="Credential profile" ToolTip="Desktop apps run as the selected Windows user. Website profiles fill login fields on their saved origin."/>
+                    </DockPanel>
+                    <StackPanel x:Name="WebsiteLoginOptions" Visibility="Collapsed" Margin="0,10,0,0">
+                        <Button Content="Browser setup…" Click="BrowserSetup_Click" Padding="10,6" HorizontalAlignment="Left"
+                                ToolTip="Install or reload and pair the Chrome or Edge extension for login filling." AutomationProperties.Name="Set up browser login filling"/>
+                        <Expander Header="Login fields (optional)" Foreground="{DynamicResource TextBrush}" Margin="0,10,0,0">
+                            <StackPanel Margin="0,6,0,0">
+                                <Label Content="Username field selector" Style="{StaticResource ToolEditorLabel}"/>
+                                <TextBox x:Name="UsernameSelectorInput" MaxLength="1024" TextChanged="Field_TextChanged" AutomationProperties.Name="Username field CSS selector"
+                                         ToolTip="Leave blank to detect the login form. Enter a CSS selector when the page has multiple fields."/>
+                                <Label Content="Password field selector" Style="{StaticResource ToolEditorLabel}"/>
+                                <TextBox x:Name="PasswordSelectorInput" MaxLength="1024" TextChanged="Field_TextChanged" AutomationProperties.Name="Password field CSS selector"
+                                         ToolTip="Leave blank to detect one visible password field. Launcher fills fields without clicking Sign in; website handlers may react automatically."/>
+                            </StackPanel>
+                        </Expander>
+                    </StackPanel>
+                    <Border x:Name="ValidationPanel" Visibility="Collapsed" Background="#38272F"
+                            BorderBrush="#66404C" BorderThickness="1" CornerRadius="7" Padding="10" Margin="0,14,0,0">
+                        <TextBlock x:Name="ValidationText" TextWrapping="Wrap" Foreground="#FFACA9" FontSize="12"
+                                   AutomationProperties.Name="Tool validation error" AutomationProperties.LiveSetting="Assertive" />
+                    </Border>
+                </StackPanel>
+            </Border>
+        </ScrollViewer>
+        <StackPanel Grid.Row="1" Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,16,0,0">
+            <Button Content="Cancel" IsCancel="True" MinWidth="86" Margin="0,0,8,0" />
+            <Button x:Name="SaveButton" Content="_Save" IsDefault="True" Click="Save_Click"
+                    Style="{StaticResource PrimaryButton}" MinWidth="96" />
+        </StackPanel>
+    </Grid>
+</Window>

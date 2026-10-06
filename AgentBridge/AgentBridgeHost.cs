@@ -62,11 +62,20 @@ internal sealed class AgentBridgeHost : IDisposable
                 timeout.CancelAfter(TimeSpan.FromSeconds(33));
                 var line = await reader.ReadLineAsync(timeout.Token);
                 AgentBridgeResponse response;
-                if (line is null || line.Length > 65_536)
+                if (line is null || line.Length > AgentBridgeProtocol.MaximumRequestCharacters)
                     response = AgentBridgeResponse.Failure("Bridge request is too large or incomplete.");
                 else
                 {
                     var request = JsonSerializer.Deserialize<AgentBridgeRequest>(line, AgentBridgeProtocol.Json);
+                    if (request?.Action == "replace_dashboard")
+                    {
+                        // Cancel before the replacement client's overall startup deadline,
+                        // including time it spent waiting for another launch to finish.
+                        var now = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+                        var deadline = request.HandoffDeadlineUnixMilliseconds ?? now;
+                        if (deadline <= now + 2000) timeout.Cancel();
+                        else timeout.CancelAfter(TimeSpan.FromMilliseconds(Math.Min(178000, deadline - now - 2000)));
+                    }
                     response = request is null
                         ? AgentBridgeResponse.Failure("Bridge request is invalid.")
                         : await _handler(request, timeout.Token);

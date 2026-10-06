@@ -7,7 +7,7 @@ public sealed partial class ServiceViewModel
 {
     // Only credential-free metadata survives discovery. Connection strings remain in the
     // configuration helper or explicit editor and never become binding values.
-    private sealed record DiscoveredApiDatabase(string Key, string? Name, string Source);
+    private sealed record DiscoveredApiDatabase(string Key, string? Name);
     private IReadOnlyList<DiscoveredApiDatabase> _discoveredApiDatabases = [];
     private bool _refreshingApiDatabaseDiscovery;
     private bool _apiDatabaseDiscoveryAvailable;
@@ -89,15 +89,15 @@ public sealed partial class ServiceViewModel
 
     private static IReadOnlyList<DiscoveredApiDatabase> ReadDatabaseMetadata(ApiDatabaseConfiguration configuration) =>
         configuration.Connections.Select(connection => new DiscoveredApiDatabase(
-            connection.Key, connection.DatabaseDisplayName, connection.Source)).ToArray();
+            connection.Key, connection.DatabaseDisplayName)).ToArray();
 
     private void UpdateApiDatabaseServices()
     {
         var observations = _discoveredApiDatabases.Select(database =>
-            (Identity: database.Key, database.Name, Source: $"{database.Key} · {database.Source}")).ToList();
+            (Identity: database.Key, database.Name)).ToList();
         if (_databaseChangeCardName is { } changingName && _databaseChangeKey is { } changeKey &&
             !observations.Any(database => database.Identity.Equals(changeKey, StringComparison.OrdinalIgnoreCase)))
-            observations.Add((changeKey, changingName, "Local database change"));
+            observations.Add((changeKey, changingName));
 
         var identities = observations.Select(database => database.Identity).ToHashSet(StringComparer.OrdinalIgnoreCase);
         for (var index = ApiDatabases.Count - 1; index >= 0; index--)
@@ -120,14 +120,12 @@ public sealed partial class ServiceViewModel
                 : observation.Name is null ? "Unavailable · database name unreadable"
                 : Runner.ConfigurationNeedsRestart ? "Detected · restart required"
                 : "Connected";
-            var details = changing ? DatabaseCardDetails
-                : $"Found in {observation.Source} for {Name}'s Local configuration. " +
-                  (observation.Name is null ? "A safe database root name could not be read. " : "") +
+            var cardDetails = changing ? DatabaseCardDetails
+                : (observation.Name is null ? "A safe database root name could not be read. " : "") +
                   (!_apiDatabaseDiscoveryAvailable ? "Latest configuration discovery is unavailable; previous discovery retained. " : "") +
                   (ProductionWarning ? "Local database configuration is inactive while Production is selected or running. " : "") +
-                  (Runner.ConfigurationNeedsRestart ? $"Restart {Name} to apply its saved configuration. " : "") +
-                  "Connected means the database was discovered in Local API configuration. No database health request is required.";
-            database.SetObservation(observation.Name ?? "Database", observation.Source, status, details, connected);
+                  (Runner.ConfigurationNeedsRestart ? $"Restart {Name} to apply its saved configuration." : "");
+            database.SetObservation(observation.Name, status, connected, cardDetails.Trim());
         }
         NotifyIfChanged(DatabaseServiceCount, nameof(DatabaseServiceCount));
         NotifyIfChanged(ConnectedDatabaseServiceCount, nameof(ConnectedDatabaseServiceCount));
@@ -137,29 +135,40 @@ public sealed partial class ServiceViewModel
 
 public sealed class ApiDatabaseServiceViewModel(ServiceViewModel service, string identity) : ObservableObject
 {
-    private string? _sourceLabel;
+    private bool _hasDatabaseName;
     internal string Identity { get; } = identity;
     public ServiceViewModel Service { get; } = service;
     public string Name { get; private set; } = "Database";
-    public string SourceLabel => $"Database · {Service.Name}";
+    public string Title => _hasDatabaseName ? $"{Name} Database" : "Database";
     public string Status { get; private set; } = "Reading configuration…";
     public string StatusColor => IsConnected ? "#81D5AE" : "#FFD27A";
-    public string Details { get; private set; } = "";
+    public string CardDetails { get; private set; } = "";
+    public bool HasCardDetails => !string.IsNullOrWhiteSpace(CardDetails);
     public bool IsConnected { get; private set; }
-    public string ConnectionSource { get; private set; } = "";
 
-    internal void SetObservation(string name, string source, string status, string details, bool connected)
+    internal void SetObservation(string? name, string status, bool connected, string cardDetails)
     {
-        if (Name != name) { Name = name; Changed(nameof(Name)); }
-        if (ConnectionSource != source) { ConnectionSource = source; Changed(nameof(ConnectionSource)); }
+        var titleChanged = Name != (name ?? "Database") || _hasDatabaseName != (name is not null);
+        _hasDatabaseName = name is not null;
+        if (Name != (name ?? "Database"))
+        {
+            Name = name ?? "Database";
+            Changed(nameof(Name));
+        }
+        if (titleChanged) Changed(nameof(Title));
         if (Status != status) { Status = status; Changed(nameof(Status)); }
-        if (Details != details) { Details = details; Changed(nameof(Details)); }
+        if (CardDetails != cardDetails)
+        {
+            var hadCardDetails = HasCardDetails;
+            CardDetails = cardDetails;
+            Changed(nameof(CardDetails));
+            if (hadCardDetails != HasCardDetails) Changed(nameof(HasCardDetails));
+        }
         if (IsConnected != connected)
         {
             IsConnected = connected;
             Changed(nameof(IsConnected));
             Changed(nameof(StatusColor));
         }
-        if (_sourceLabel != SourceLabel) { _sourceLabel = SourceLabel; Changed(nameof(SourceLabel)); }
     }
 }

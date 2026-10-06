@@ -17,6 +17,7 @@ public sealed partial class ServiceViewModel(ServiceRunner runner) : ObservableO
 {
     private const int MaxRetainedConsoleLines = 600;
     private ServiceSnapshot _snapshot = runner.Snapshot;
+    private SwaggerUiStatus _swaggerStatus = runner.SwaggerStatus;
     private readonly Dictionary<string, object?> _notifiedValues = new(StringComparer.Ordinal);
     private bool _hasDotnetProject;
     private bool _refreshingApiProject;
@@ -81,6 +82,8 @@ public sealed partial class ServiceViewModel(ServiceRunner runner) : ObservableO
     public bool OpenAfterBuild => Profile.OpenAfterBuild;
     public bool CanChangeOpenAfterBuild => IsFrontendService && !IsEditing && !IsSavingEdits &&
         !AreCommandsBlocked && !IsBusy && !IsStopping;
+    public bool CanChangeFrontendPort => IsFrontendService && !IsEditing && !IsSavingEdits &&
+        !AreCommandsBlocked && !IsBusy && !IsStopping;
     private string _browserOpenStatus = "Applies to the next managed start or restart.";
     public string OpenAfterBuildDetails =>
         "Open this frontend after a successful build and local HTTP readiness. " +
@@ -102,15 +105,17 @@ public sealed partial class ServiceViewModel(ServiceRunner runner) : ObservableO
     public string StartButtonLabel => IsConsoleApp ? "▶ Run" : "▶ Start";
     public bool ShowClean => !(IsConsoleApp || IsCommandApi) || !string.IsNullOrWhiteSpace(Profile.CleanCommand);
     public bool ShowSetup => !(IsConsoleApp || IsCommandApi) || !string.IsNullOrWhiteSpace(Profile.SetupCommand);
-    public bool CanStopForPortEdit => HasWebEndpoint && CanStop;
+    public bool ShowInlinePortEdit => HasWebEndpoint && !IsFrontendService;
+    public bool CanStopForPortEdit => ShowInlinePortEdit && CanStop;
     public string ServiceTypeLabel => IsCommandApi ? Profile.ApiType!.ToUpperInvariant() : Profile.IsGenericConsole
         ? string.IsNullOrWhiteSpace(Profile.ConsoleType) ? "CONSOLE APP" : Profile.ConsoleType.ToUpperInvariant()
         : Kind;
     public bool ShowProcessTrackingHint => Runner.UsesManagedProcessTrackingOnly;
     public string ProcessTrackingHint => Profile.IsGenericConsole || IsCommandApi
         ? "Tracks launcher-started command processes."
-        : "Shared command folder: tracks only launcher-started processes.";
-    public bool ShowServiceTypeLabel => !Profile.Kind.Equals("Angular", StringComparison.OrdinalIgnoreCase);
+        : "Shared service folder: tracks only launcher-started processes.";
+    public bool ShowServiceTypeLabel => !IsCommandApi && !ShowApiDatabaseLabel &&
+        !Profile.Kind.Equals("Angular", StringComparison.OrdinalIgnoreCase);
     public bool IsStoppedForPortEdit => HasWebEndpoint && !IsBusy && !IsStopping && !Runner.HasManagedProcess &&
         Runner.HasVerifiedNoServiceProcesses && Runner.Snapshot.ProcessIds.Count == 0 &&
         Runner.Snapshot.State is ServiceState.Stopped or ServiceState.Error or ServiceState.Conflict;
@@ -149,19 +154,17 @@ public sealed partial class ServiceViewModel(ServiceRunner runner) : ObservableO
     public bool ShowApiDatabaseLabel => !(IsConsoleApp || IsCommandApi) && (HasApiConfiguration ||
         Profile.Kind.Equals(".NET", StringComparison.OrdinalIgnoreCase) ||
         Profile.Kind.Equals("API", StringComparison.OrdinalIgnoreCase));
-    public string ApiDatabaseLabel => DiscoveredDatabaseName is { } name
-        ? $"DB {name} · configuration" : "DB Unknown";
-    public string ApiDatabaseDetails => HasCurrentApiDatabaseDiscovery
-        ? "Database discovered from Local API configuration."
-        : "Local API database configuration has not been discovered.";
     private string? DiscoveredDatabaseName => HasCurrentApiDatabaseDiscovery
         ? _discoveredApiDatabases.OrderBy(database => ApiDatabaseIdentifier.ConnectionKeyPriority(database.Key))
             .Select(database => database.Name).FirstOrDefault(name => name is not null) : null;
     public bool ShowChangeDatabaseRecovery => HasApiConfiguration && !HasDatabaseCard;
     public string DatabaseCardName => _databaseChangeCardName ?? DiscoveredDatabaseName ?? "Database";
-    public string DatabaseCardStatus => _databaseChangeStatus ?? (HasCurrentApiDatabaseDiscovery ? "Connected"
+    public string DatabaseCardStatus => _databaseChangeStatus ?? (HasCurrentApiDatabaseDiscovery
+        ? HasDatabaseCard ? "Connected" : "Unavailable · no database configured"
+        : _apiDatabaseDiscoveryAvailable ? "Unavailable · Local configuration inactive"
         : "Unavailable · configuration unreadable");
-    public string DatabaseCardDetails => _databaseChangeDetails ?? "Database discovered from Local API configuration.";
+    public string DatabaseCardDetails => _databaseChangeDetails ?? "";
+    public bool HasDatabaseCardDetails => !string.IsNullOrWhiteSpace(_databaseChangeDetails);
 
     internal void BeginDatabaseChange(string expectedName, string key)
     {
@@ -201,12 +204,11 @@ public sealed partial class ServiceViewModel(ServiceRunner runner) : ObservableO
     private void NotifyDatabaseCard()
     {
         UpdateApiDatabaseServices();
-        NotifyIfChanged(ApiDatabaseLabel, nameof(ApiDatabaseLabel));
-        NotifyIfChanged(ApiDatabaseDetails, nameof(ApiDatabaseDetails));
         NotifyIfChanged(ShowChangeDatabaseRecovery, nameof(ShowChangeDatabaseRecovery));
         NotifyIfChanged(DatabaseCardName, nameof(DatabaseCardName));
         NotifyIfChanged(DatabaseCardStatus, nameof(DatabaseCardStatus));
         NotifyIfChanged(DatabaseCardDetails, nameof(DatabaseCardDetails));
+        NotifyIfChanged(HasDatabaseCardDetails, nameof(HasDatabaseCardDetails));
     }
 
     // Bindings must not touch the filesystem: project folders may live on OneDrive or a slow drive.
@@ -228,6 +230,7 @@ public sealed partial class ServiceViewModel(ServiceRunner runner) : ObservableO
             NotifyIfChanged(HasApiConfiguration, nameof(HasApiConfiguration));
             NotifyIfChanged(ShowChangeDatabaseRecovery, nameof(ShowChangeDatabaseRecovery));
             NotifyIfChanged(ShowApiDatabaseLabel, nameof(ShowApiDatabaseLabel));
+            NotifyIfChanged(ShowServiceTypeLabel, nameof(ShowServiceTypeLabel));
             NotifyIfChanged(CanConfigureApi, nameof(CanConfigureApi));
             NotifyIfChanged(CanSwitchConfiguration, nameof(CanSwitchConfiguration));
             NotifyIfChanged(CanChangeDatabase, nameof(CanChangeDatabase));
@@ -244,8 +247,6 @@ public sealed partial class ServiceViewModel(ServiceRunner runner) : ObservableO
     public string SelectedConfiguration => Profile.ApiConfiguration?.Environment ?? "Local";
     public bool ProductionWarning => SelectedConfiguration == "Prod" || Runner.AppliedConfigurationEnvironment == "Prod";
     public string ConfigurationColor => ProductionWarning ? "#FFACA9" : "#A6B4C9";
-    public string ConfigurationBackground => ProductionWarning ? "#3D202A" : "#121A25";
-    public string ConfigurationBorder => ProductionWarning ? "#E96B78" : "#303D50";
     public string ConfigurationStatus
     {
         get
@@ -340,6 +341,10 @@ public sealed partial class ServiceViewModel(ServiceRunner runner) : ObservableO
         }
     }
     public string LaunchButtonAccessibleName => $"{LaunchButtonLabel} for {Name}";
+    public bool IsSwaggerUnavailable => Runner.IsSwaggerUiLaunch &&
+        _snapshot.State == ServiceState.Running && !IsBusy && !IsStopping &&
+        _swaggerStatus.Availability == SwaggerUiAvailability.Unavailable &&
+        string.Equals(_swaggerStatus.UiUrl, _snapshot.ActiveUrl, StringComparison.Ordinal);
     public string LaunchButtonHelpText
     {
         get
@@ -347,6 +352,11 @@ public sealed partial class ServiceViewModel(ServiceRunner runner) : ObservableO
             if (HasLiveUrl) return $"Open {LiveUrl} in your default browser.";
             if (IsStopping) return $"{Name} is stopping. Start it again and wait until this button turns green.";
             if (IsBusy) return $"{Name} is busy. Wait for the operation to finish and for this button to turn green.";
+            if (Runner.IsSwaggerUiLaunch && _snapshot.State == ServiceState.Running)
+                return string.Equals(_swaggerStatus.UiUrl, _snapshot.ActiveUrl, StringComparison.Ordinal) &&
+                    _swaggerStatus.Availability is SwaggerUiAvailability.Checking or SwaggerUiAvailability.Unavailable
+                    ? _swaggerStatus.Message
+                    : "Checking whether Swagger UI is available. Wait until this button turns green.";
             return _snapshot.State switch
             {
                 ServiceState.Checking => $"Checking whether {Name} is ready. Wait until this button turns green.",
@@ -361,7 +371,9 @@ public sealed partial class ServiceViewModel(ServiceRunner runner) : ObservableO
     }
     public string ExpectedUrl => Uri.TryCreate(Profile.Url, UriKind.Absolute, out var uri)
         ? new Uri(uri, string.IsNullOrWhiteSpace(Profile.UiPath) ? "/" : Profile.UiPath).ToString() : Profile.Url;
-    public bool CanOpen => HasWebEndpoint && _snapshot.State == ServiceState.Running && _snapshot.ActiveUrl is not null;
+    public bool CanOpen => HasWebEndpoint && _snapshot.State == ServiceState.Running && _snapshot.ActiveUrl is not null &&
+        (!Runner.IsSwaggerUiLaunch || (_swaggerStatus.Availability == SwaggerUiAvailability.Ready &&
+            string.Equals(_swaggerStatus.UiUrl, _snapshot.ActiveUrl, StringComparison.Ordinal)));
     public bool HasLiveUrl => CanOpen && !IsBusy && !IsStopping;
     public string? LiveUrl => HasLiveUrl ? _snapshot.ActiveUrl : null;
     public bool CanStart => !AreCommandsBlocked && !IsEditing && !IsBusy && !IsStopping && (_snapshot.State is ServiceState.Stopped or ServiceState.Error or ServiceState.Completed) && _snapshot.ProcessIds.Count == 0;
@@ -378,6 +390,7 @@ public sealed partial class ServiceViewModel(ServiceRunner runner) : ObservableO
     public void Update()
     {
         _snapshot = Runner.Snapshot;
+        _swaggerStatus = Runner.SwaggerStatus;
         UpdateFlutterDatabaseState();
         // The same VM appears in the sidebar and the service card. Re-notifying every property
         // for an unchanged poll unnecessarily invalidates both visual trees and their layout.
@@ -389,11 +402,13 @@ public sealed partial class ServiceViewModel(ServiceRunner runner) : ObservableO
         NotifyIfChanged(IsFrontendService, nameof(IsFrontendService));
         NotifyIfChanged(OpenAfterBuild, nameof(OpenAfterBuild));
         NotifyIfChanged(CanChangeOpenAfterBuild, nameof(CanChangeOpenAfterBuild));
+        NotifyIfChanged(CanChangeFrontendPort, nameof(CanChangeFrontendPort));
         NotifyIfChanged(HasWebEndpoint, nameof(HasWebEndpoint));
         NotifyIfChanged(StartButtonLabel, nameof(StartButtonLabel));
         NotifyIfChanged(ShowClean, nameof(ShowClean));
         NotifyIfChanged(ShowSetup, nameof(ShowSetup));
         NotifyIfChanged(CanStopForPortEdit, nameof(CanStopForPortEdit));
+        NotifyIfChanged(ShowInlinePortEdit, nameof(ShowInlinePortEdit));
         NotifyIfChanged(ServiceTypeLabel, nameof(ServiceTypeLabel));
         NotifyIfChanged(ShowProcessTrackingHint, nameof(ShowProcessTrackingHint));
         NotifyIfChanged(ProcessTrackingHint, nameof(ProcessTrackingHint));
@@ -419,6 +434,7 @@ public sealed partial class ServiceViewModel(ServiceRunner runner) : ObservableO
         NotifyIfChanged(Url, nameof(Url));
         NotifyIfChanged(LaunchButtonLabel, nameof(LaunchButtonLabel));
         NotifyIfChanged(LaunchButtonAccessibleName, nameof(LaunchButtonAccessibleName));
+        NotifyIfChanged(IsSwaggerUnavailable, nameof(IsSwaggerUnavailable));
         NotifyIfChanged(LaunchButtonHelpText, nameof(LaunchButtonHelpText));
         NotifyIfChanged(CanOpen, nameof(CanOpen));
         NotifyIfChanged(HasLiveUrl, nameof(HasLiveUrl));
@@ -437,8 +453,6 @@ public sealed partial class ServiceViewModel(ServiceRunner runner) : ObservableO
         NotifyIfChanged(CanForceStop, nameof(CanForceStop));
         NotifyIfChanged(HasApiConfiguration, nameof(HasApiConfiguration));
         NotifyIfChanged(ShowApiDatabaseLabel, nameof(ShowApiDatabaseLabel));
-        NotifyIfChanged(ApiDatabaseLabel, nameof(ApiDatabaseLabel));
-        NotifyIfChanged(ApiDatabaseDetails, nameof(ApiDatabaseDetails));
         NotifyDatabaseCard();
         NotifyIfChanged(CanConfigureApi, nameof(CanConfigureApi));
         NotifyIfChanged(CanSwitchConfiguration, nameof(CanSwitchConfiguration));
@@ -446,8 +460,6 @@ public sealed partial class ServiceViewModel(ServiceRunner runner) : ObservableO
         NotifyIfChanged(SelectedConfiguration, nameof(SelectedConfiguration));
         NotifyIfChanged(ProductionWarning, nameof(ProductionWarning));
         NotifyIfChanged(ConfigurationColor, nameof(ConfigurationColor));
-        NotifyIfChanged(ConfigurationBackground, nameof(ConfigurationBackground));
-        NotifyIfChanged(ConfigurationBorder, nameof(ConfigurationBorder));
         NotifyIfChanged(ConfigurationStatus, nameof(ConfigurationStatus));
     }
 

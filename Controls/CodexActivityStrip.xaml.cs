@@ -104,7 +104,11 @@ public partial class CodexActivityStrip : UserControl, INotifyPropertyChanged
         _timer.Tick += Timer_Tick;
         Loaded += Strip_Loaded;
         Unloaded += Strip_Unloaded;
-        IsVisibleChanged += (_, _) => UpdateAnimations();
+        IsVisibleChanged += (_, _) =>
+        {
+            if (!IsVisible) ViewMenu.IsOpen = false;
+            UpdateAnimations();
+        };
         AgentScroller.ScrollChanged += (_, _) => { UpdateCardSize(); UpdateAnimations(); };
         AgentScroller.SizeChanged += (_, _) => { UpdateCardSize(); UpdateAnimations(); };
         SizeChanged += (_, _) =>

@@ -18,7 +18,7 @@ internal static class CodexMcpSetup
     private const string ServerName = "fullStackLauncher";
     private const int OutputLimit = 256 * 1024;
     private static readonly TimeSpan CommandTimeout = TimeSpan.FromSeconds(15);
-    private const string VerifyConnection = "Reconnect MCP or restart Codex, then open a new chat and ask your agent to call launcher_projects. Registration alone does not prove a live dashboard connection.";
+    private const string VerifyConnection = "Reconnect MCP or restart Codex, then open a new chat and ask your agent to call launcher_projects. Use the updated build for both the dashboard and MCP adapter to discover new tools, including launcher_save_follow_up_note. Registration alone does not prove a live dashboard connection.";
 
     internal static Task<CodexMcpSetupResult> ConnectAsync(FirstTimeSetupContent content,
         CancellationToken token = default) => Task.Run(() => ConnectOwned(content, token));

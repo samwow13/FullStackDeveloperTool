@@ -60,7 +60,7 @@
             <Grid Grid.Column="1" Margin="18,0,0,0" VerticalAlignment="Top">
                 <ToggleButton x:Name="QueueSettingsToggle" Width="42" Height="42"
                               VerticalAlignment="Top" Style="{StaticResource QueueSettingsToggleStyle}"
-                              AutomationProperties.Name="Queue settings" AutomationProperties.HelpText="Show Codex connection, model, thinking level, and assigned queue folder"
+                              AutomationProperties.Name="Queue settings" AutomationProperties.HelpText="Show Codex connection, model, thinking level, delay between tasks, and assigned queue folder"
                               ToolTip="Queue settings and Codex connection">
                     <TextBlock Text="&#xE713;" FontFamily="Segoe MDL2 Assets" FontSize="19"/>
                 </ToggleButton>
@@ -96,6 +96,17 @@
                             <Label Content="_Thinking level" Target="{Binding ElementName=DefaultEffortChoice}" Foreground="{StaticResource MutedBrush}" Padding="0,8,0,5"/>
                             <ComboBox x:Name="DefaultEffortChoice" ItemsSource="{Binding DefaultEfforts}" SelectedItem="{Binding SelectedDefaultEffort, Mode=TwoWay}" DisplayMemberPath="Id" IsEnabled="{Binding CanChooseDefaultModel}" ToolTip="{Binding SelectedDefaultEffort.Description}"/>
                             <TextBlock Text="{Binding DefaultOptionsStatus}" Style="{StaticResource TaskCaption}" Margin="0,8,0,11"/>
+                            <Label Content="_Delay between tasks (minutes)" Target="{Binding ElementName=QueueDelayMinutes}" Foreground="{StaticResource MutedBrush}" Padding="0,0,0,5"/>
+                            <Grid Margin="0,0,0,6">
+                                <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+                                <TextBox x:Name="QueueDelayMinutes" Text="{Binding QueueDelayMinutesText, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
+                                         IsEnabled="{Binding CanEdit}" VerticalContentAlignment="Center" MaxLength="5"
+                                         AutomationProperties.Name="Delay between tasks in minutes"/>
+                                <Button Grid.Column="1" Content="Save delay" Command="{Binding SaveQueueDelayCommand}" FontSize="11" Padding="9,6" Margin="8,0,0,0"/>
+                            </Grid>
+                            <TextBlock Text="Wait after a task completes successfully before starting the next task in this project's queue. 0 starts immediately. Changing the saved delay also adjusts a current wait."
+                                       Style="{StaticResource TaskCaption}"/>
+                            <TextBlock Text="{Binding QueueDelayStatus}" Style="{StaticResource TaskCaption}" Margin="0,6,0,11" AutomationProperties.LiveSetting="Polite"/>
                             <TextBlock Text="Assigned queue folder" Foreground="{StaticResource MutedBrush}" FontSize="11"/>
                             <TextBlock Text="{Binding AssignedFolder}" FontSize="11" TextWrapping="Wrap" Margin="0,3,0,0"/>
                             <Border Visibility="{Binding FolderChanged, Converter={StaticResource BoolToVisibility}}"

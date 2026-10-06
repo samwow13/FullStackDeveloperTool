@@ -9,13 +9,21 @@ public static partial class GitRepositoryService
 {
     /// <summary>Local-only validation for the UI's explicit clone review. No network request or mutation.</summary>
     public static Task<GitCloneReview> PrepareCloneAsync(string folder, GitHostingProvider provider, string url,
-        CancellationToken token = default) => Task.Run(async () =>
+        CancellationToken token = default) => PrepareCloneCoreAsync(folder, provider, url, null, token);
+
+    /// <summary>Captures an explicit branch together with the empty folder and clone URL.</summary>
+    public static Task<GitCloneReview> PrepareCloneAsync(string folder, GitHostingProvider provider, string url,
+        string branch, CancellationToken token = default) => PrepareCloneCoreAsync(folder, provider, url, branch, token);
+
+    private static Task<GitCloneReview> PrepareCloneCoreAsync(string folder, GitHostingProvider provider, string url,
+        string? branch, CancellationToken token) => Task.Run(async () =>
         {
             var fullFolder = RequireFolder(folder);
             var cleanUrl = GitConnectionService.ValidateUrl(provider, url);
             using var directory = OpenCloneDirectory(fullFolder, out var identity);
             await RequireCloneDestinationAsync(fullFolder, cleanUrl, token).ConfigureAwait(false);
-            return new GitCloneReview(fullFolder, provider, cleanUrl, identity);
+            if (branch is not null) await ValidateBranchAsync(fullFolder, branch, token).ConfigureAwait(false);
+            return new GitCloneReview(fullFolder, provider, cleanUrl, identity, branch);
         }, token);
 
     /// <summary>Clones only into the exact empty folder reviewed by the user; never stages, commits, or pushes.</summary>
@@ -37,17 +45,29 @@ public static partial class GitRepositoryService
                 if (!string.Equals(identity, review.DirectoryIdentity, StringComparison.Ordinal))
                     throw new InvalidOperationException("This folder changed. Review the empty folder again before cloning.");
                 await RequireCloneDestinationAsync(fullFolder, cleanUrl, token).ConfigureAwait(false);
+                if (review.Branch is not null) await ValidateBranchAsync(fullFolder, review.Branch, token).ConfigureAwait(false);
+                if (review.FeatureBranch is not null)
+                {
+                    if (review.Branch is null)
+                        throw new InvalidOperationException("Select a starting branch before creating a feature branch.");
+                    await ValidateWorkspaceBranchesAsync(fullFolder, review.Branch, review.FeatureBranch, token).ConfigureAwait(false);
+                }
                 var hooksFolder = Path.Combine(Path.GetDirectoryName(setupLease.Name)!, "disabled-hooks");
                 Directory.CreateDirectory(hooksFolder);
                 if (Directory.EnumerateFileSystemEntries(hooksFolder).Any())
                     throw new InvalidOperationException("The Git setup hooks folder is not empty. Clone with Git directly, then refresh.");
                 // No templates, submodules, checkout hooks, external filters, or new SSH trust.
-                var clone = await GitAsync(fullFolder,
-                    ["-c", "core.hooksPath=" + hooksFolder, "-c", "core.fsmonitor=false",
+                var cloneArguments = new List<string>
+                    {"-c", "core.hooksPath=" + hooksFolder, "-c", "core.fsmonitor=false",
                      "-c", "core.protectNTFS=true", "-c", "core.protectHFS=true",
                      "-c", "http.followRedirects=false", "-c", "http." + cleanUrl + ".sslVerify=true",
-                     "clone", "--quiet", "--no-recurse-submodules", "--origin", "origin", "--template=", "--",
-                     cleanUrl, fullFolder], token, network: true, interactive: true, strictSsh: true).ConfigureAwait(false);
+                     "clone", "--quiet", "--no-recurse-submodules", "--origin", "origin", "--template="};
+                if (review.Provider == GitHostingProvider.AzureDevOps && review.Branch is not null)
+                    cloneArguments.InsertRange(0, await GitCredentialManagerSupport.CloneOptionsAsync(fullFolder, token).ConfigureAwait(false));
+                if (review.Branch is not null) cloneArguments.AddRange(["--branch", review.Branch]);
+                cloneArguments.AddRange(["--", cleanUrl, fullFolder]);
+                var clone = await GitAsync(fullFolder, cloneArguments, token,
+                    network: true, interactive: true, strictSsh: true).ConfigureAwait(false);
                 if (clone.ExitCode != 0)
                 {
                     try { ThrowCommandFailure(clone); }
@@ -58,16 +78,24 @@ public static partial class GitRepositoryService
                     }
                 }
                 var success = Result(clone, "Repository cloned.");
+                var branchConfirmed = review.Branch is null && review.FeatureBranch is null;
                 try
                 {
                     await using var repositoryLease = await AcquireRepositoryOperationLeaseAsync(fullFolder, token).ConfigureAwait(false);
                     var snapshot = await ReadCoreAsync(fullFolder, token).ConfigureAwait(false);
                     RequireExactRoot(fullFolder, snapshot);
+                    if (review.Branch is not null && !string.Equals(snapshot.Branch, review.Branch, StringComparison.Ordinal))
+                        throw new InvalidOperationException("The cloned checkout does not match the reviewed branch. Inspect it before continuing.");
+                    branchConfirmed = review.FeatureBranch is null;
                     var fetchUrl = await RequireSingleRemoteAsync(fullFolder, "origin", false, token).ConfigureAwait(false);
                     var pushUrl = await RequireSingleRemoteAsync(fullFolder, "origin", true, token).ConfigureAwait(false);
                     if (!string.Equals(cleanUrl, fetchUrl, StringComparison.Ordinal)
                         || !string.Equals(cleanUrl, pushUrl, StringComparison.Ordinal))
                         throw new InvalidOperationException("The cloned remote no longer matches the reviewed URL.");
+                    if (review.FeatureBranch is not null)
+                        await CreateCloneFeatureBranchAsync(fullFolder, snapshot, review.Branch!, review.FeatureBranch,
+                            hooksFolder, token).ConfigureAwait(false);
+                    branchConfirmed = true;
                     EnsureSuccess(await GitAsync(fullFolder,
                         ["config", "--local", "--replace-all", "remote.origin.launcherProvider", review.Provider.ToString()], token).ConfigureAwait(false));
                     EnsureSuccess(await GitAsync(fullFolder,
@@ -75,6 +103,17 @@ public static partial class GitRepositoryService
                     return success;
                 }
                 catch (GitCommandExitUnconfirmedException) { throw; }
+                catch (OperationCanceledException exception) when (!branchConfirmed && review.FeatureBranch is not null)
+                {
+                    throw new OperationCanceledException("Repository downloaded, but feature branch setup was canceled. "
+                        + "Inspect the cloned folder before adding it.\n" + Sanitize(exception.Message), exception, exception.CancellationToken);
+                }
+                catch (Exception exception) when (!branchConfirmed && (exception is InvalidOperationException or IOException
+                    or UnauthorizedAccessException or OperationCanceledException))
+                {
+                    throw new InvalidOperationException("Repository downloaded, but branch setup could not be verified. "
+                        + "Inspect the cloned folder before adding it.\n" + Sanitize(exception.Message), exception);
+                }
                 catch (Exception exception) when (exception is InvalidOperationException or IOException
                     or UnauthorizedAccessException or OperationCanceledException)
                 {
@@ -88,6 +127,17 @@ public static partial class GitRepositoryService
 
     private static async Task RequireCloneDestinationAsync(string folder, string cleanUrl, CancellationToken token)
     {
+        await RequireNonRepositoryCloneFolderAsync(folder, token).ConfigureAwait(false);
+        if (Directory.EnumerateFileSystemEntries(folder).Any())
+            throw new InvalidOperationException("This folder contains files. Choose New repository, or select an empty configured folder.");
+        await RequireCloneRemoteEnvironmentAsync(folder, cleanUrl, token).ConfigureAwait(false);
+        token.ThrowIfCancellationRequested();
+        if (Directory.EnumerateFileSystemEntries(folder).Any())
+            throw new InvalidOperationException("This folder contains files. Choose New repository, or select an empty configured folder.");
+    }
+
+    private static async Task RequireNonRepositoryCloneFolderAsync(string folder, CancellationToken token)
+    {
         token.ThrowIfCancellationRequested();
         RequireUnlinkedCloneAncestry(folder);
         var metadata = await GitBranchReader.ReadAsync(folder, token).ConfigureAwait(false);
@@ -96,8 +146,10 @@ public static partial class GitRepositoryService
             throw new InvalidOperationException("This folder is already inside a repository, or its Git metadata cannot be verified. Refresh before connecting it.");
         if (!existing.Error.Contains("not a git repository", StringComparison.OrdinalIgnoreCase))
             ThrowCommandFailure(existing);
-        if (Directory.EnumerateFileSystemEntries(folder).Any())
-            throw new InvalidOperationException("This folder contains files. Choose New repository, or select an empty configured folder.");
+    }
+
+    private static async Task RequireCloneRemoteEnvironmentAsync(string folder, string cleanUrl, CancellationToken token)
+    {
         var filters = await GitAsync(folder,
             ["config", "--null", "--get-regexp", "^filter\\..*\\.(smudge|process)$"], token).ConfigureAwait(false);
         if (filters.ExitCode is not (0 or 1)) ThrowCommandFailure(filters);
@@ -111,9 +163,6 @@ public static partial class GitRepositoryService
         var resolved = await GitAsync(folder, ["ls-remote", "--get-url", "--", cleanUrl], token).ConfigureAwait(false);
         if (resolved.ExitCode != 0 || !string.Equals(resolved.Output.TrimEnd('\r', '\n'), cleanUrl, StringComparison.Ordinal))
             throw new InvalidOperationException("Git rewrites this clone URL or cannot resolve it. Review URL rewrite rules with Git before connecting.");
-        token.ThrowIfCancellationRequested();
-        if (Directory.EnumerateFileSystemEntries(folder).Any())
-            throw new InvalidOperationException("This folder contains files. Choose New repository, or select an empty configured folder.");
     }
 
     /// <summary>Shared setup lease lives outside the reviewed folder so the destination stays empty.</summary>

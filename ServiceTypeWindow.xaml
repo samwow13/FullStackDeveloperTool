@@ -1,0 +1,31 @@
+<Window x:Class="FullStackLauncher.ServiceTypeWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="Add Service" Width="430" SizeToContent="Height" ResizeMode="NoResize"
+        Background="{StaticResource BackgroundBrush}" Foreground="{StaticResource TextBrush}"
+        FontFamily="Segoe UI" FontSize="13" UseLayoutRounding="True" Icon="/Assets/launcher.ico"
+        WindowStartupLocation="CenterOwner" ShowInTaskbar="False">
+    <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
+        <Grid Margin="20">
+            <Grid.RowDefinitions>
+                <RowDefinition Height="Auto"/>
+                <RowDefinition Height="Auto"/>
+                <RowDefinition Height="Auto"/>
+                <RowDefinition Height="Auto"/>
+            </Grid.RowDefinitions>
+            <TextBlock Text="Project type" FontSize="16" FontWeight="SemiBold"/>
+            <TextBlock x:Name="FolderText" Grid.Row="1" Foreground="{StaticResource MutedBrush}"
+                       TextTrimming="CharacterEllipsis" Margin="0,8,0,16"
+                       AutomationProperties.Name="Selected service folder"/>
+            <Grid Grid.Row="2">
+                <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="12"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+                <Button x:Name="ConsoleAppButton" Content="_Console app" Click="ConsoleApp_Click" MinHeight="48"
+                        AutomationProperties.Name="Add console app" ToolTip="Continue with console app setup."/>
+                <Button Grid.Column="2" Content="_API" Click="Api_Click" MinHeight="48"
+                        AutomationProperties.Name="Add API" ToolTip="Continue with API setup."/>
+            </Grid>
+            <Button Grid.Row="3" Content="Cancel" IsCancel="True" MinWidth="86"
+                    HorizontalAlignment="Right" Margin="0,16,0,0"/>
+        </Grid>
+    </ScrollViewer>
+</Window>

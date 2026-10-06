@@ -129,6 +129,13 @@ public partial class MainWindow
             ProjectNameEditor.Focus();
             return false;
         }
+        if (!DraftProjectName.Trim().Equals(selected.Name.Trim(), StringComparison.OrdinalIgnoreCase) &&
+            SettingsStore.FindProjectNameConflict(_settings.Projects, DraftProjectName, selected.Id) is { } nameConflict)
+        {
+            EditError = $"Project name '{nameConflict.Name}' is already used. Choose a different project name.";
+            ProjectNameEditor.Focus();
+            return false;
+        }
         var services = Services.ToArray();
         foreach (var service in services)
         {
@@ -192,6 +199,7 @@ public partial class MainWindow
                     throw new InvalidOperationException($"Port {port} is already assigned to {conflict.Name}. Choose a different port for {profile.Name}.");
             }
             var proxyChanges = AngularDevProxyConfiguration.Prepare(selected, candidate, _store);
+            await RequireStoppedProxyFileServicesAsync(proxyChanges, candidate);
             proxyChanges.SaveWithSettings(() => _store.Save(candidateSettings));
 
             // Preserve original profiles and runners: they own live processes, logs, notes and database state.

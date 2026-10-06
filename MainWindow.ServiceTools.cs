@@ -23,7 +23,7 @@ public partial class MainWindow
         var folder = service.Directory;
         var configured = _settings.DeveloperTools
             .Where(tool => tool.Kind.Equals("Application", StringComparison.OrdinalIgnoreCase))
-            .Select(tool => new DeveloperTool { Id = tool.Id, Name = tool.Name, Kind = tool.Kind, Target = tool.Target })
+            .Select(tool => tool.Clone())
             .ToArray();
         var menu = new ContextMenu
         {
@@ -57,14 +57,14 @@ public partial class MainWindow
         {
             var choices = await Task.Run(() =>
             {
-                var found = DeveloperToolLauncher.FindInstalledEditors()
-                    .Select(editor => (Name: editor.Name, Target: (DeveloperToolTarget?)new(editor.FileName, false, editor.Name)))
-                    .ToList();
+                var found = new List<(string Name, DeveloperToolTarget? Target, DeveloperTool? Profile)>();
                 foreach (var tool in configured)
                 {
-                    try { found.Add((tool.Name, DeveloperToolLauncher.Resolve(tool, _store.BaseDirectory))); }
-                    catch { found.Add((tool.Name, null)); }
+                    try { found.Add((tool.Name, DeveloperToolLauncher.Resolve(tool, _store.BaseDirectory), tool)); }
+                    catch { found.Add((tool.Name, null, tool)); }
                 }
+                found.AddRange(DeveloperToolLauncher.FindInstalledEditors().Select(editor =>
+                    (editor.Name, (DeveloperToolTarget?)new DeveloperToolTarget(editor.FileName, false, editor.Name), (DeveloperTool?)null)));
                 return found;
             });
             if (_closing || !menu.IsOpen || !button.IsLoaded || !ReferenceEquals(button.DataContext, service))
@@ -76,7 +76,7 @@ public partial class MainWindow
             menu.Items.RemoveAt(discoveryIndex);
             var insertAt = discoveryIndex;
             var added = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-            foreach (var (name, target) in choices)
+            foreach (var (name, target, profile) in choices)
             {
                 if (target is null)
                 {
@@ -86,10 +86,12 @@ public partial class MainWindow
                     menu.Items.Insert(insertAt++, missing);
                     continue;
                 }
-                if (!added.Add(target.FileName)) continue;
+                // Keep separately saved account assignments visible even when the executable matches.
+                if (profile is null && added.Contains(target.FileName)) continue;
+                added.Add(target.FileName);
                 var item = ServiceToolMenuItem(name);
                 item.ToolTip = target.FileName;
-                item.Click += (_, _) => OpenServiceFolder(service, folder, target);
+                item.Click += (_, _) => OpenServiceFolder(service, folder, target, profile);
                 menu.Items.Insert(insertAt++, item);
             }
             if (choices.Count == 0)
@@ -163,7 +165,7 @@ public partial class MainWindow
         }
     }
 
-    private void OpenServiceFolder(ServiceViewModel service, string folder, DeveloperToolTarget target)
+    private async void OpenServiceFolder(ServiceViewModel service, string folder, DeveloperToolTarget target, DeveloperTool? profile = null)
     {
         if (_closing) return;
         try
@@ -180,11 +182,28 @@ public partial class MainWindow
                 MessageBox.Show(this, locationMessage, "Open service folder", MessageBoxButton.OK, MessageBoxImage.Warning);
                 return;
             }
-            DeveloperToolLauncher.OpenFolder(target, folder);
+            if (profile?.CredentialProfileId is { } profileId)
+            {
+                await Task.Run(() =>
+                {
+                    using var credential = ToolCredentialStore.Read(profileId);
+                    _developerToolLifetime.Token.ThrowIfCancellationRequested();
+                    AlternateUserToolLauncher.Open(executable, credential, folder: folder);
+                });
+            }
+            else DeveloperToolLauncher.OpenFolder(target, folder);
+            if (_closing) return;
             Notice = $"Opened {service.Name}'s folder in {target.Description}.";
+        }
+        catch (ToolCredentialStoreException ex)
+        {
+            if (_closing) return;
+            Notice = ex.Message;
+            MessageBox.Show(this, ex.Message, "Open service folder", MessageBoxButton.OK, MessageBoxImage.Warning);
         }
         catch
         {
+            if (_closing) return;
             const string message = "The service folder could not be opened. Check that its working folder and the selected application still exist, and that the application accepts a folder argument.";
             Notice = message;
             MessageBox.Show(this, message, "Open service folder", MessageBoxButton.OK, MessageBoxImage.Warning);

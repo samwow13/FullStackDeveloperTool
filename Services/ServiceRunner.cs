@@ -16,9 +16,9 @@ namespace FullStackLauncher.Services;
 /// </summary>
 public sealed class ServiceRunner : IDisposable
 {
-    // Every saved service has a runner, including unselected projects. Register command
-    // folders before commands start so another service cannot adopt their child processes.
-    private static readonly ConcurrentDictionary<Guid, string> CommandFolders = new();
+    // Every saved service has a runner, including unselected and archived projects. Register
+    // all folders before commands start so overlapping services cannot adopt each other's processes.
+    private static readonly ConcurrentDictionary<Guid, string> ServiceFolders = new();
     private readonly Guid _runnerId = Guid.NewGuid();
     private static readonly Regex Ansi = new(@"\x1B(?:\][^\x07]*(?:\x07|\x1B\\)|\[[0-?]*[ -/]*[@-~])", RegexOptions.Compiled);
     private static readonly Regex StartupUrl = new(@"(?:Now listening on:|\bLocal:|(?:listening|running|started|ready)\s+(?:at|on)\s*:?|open your browser on|is being served at|Waiting for connection from Dart debug extension at)\s*(?<url>https?://[^\s<>""']+)", RegexOptions.Compiled | RegexOptions.IgnoreCase);
@@ -46,6 +46,13 @@ public sealed class ServiceRunner : IDisposable
     private readonly Channel<ServiceLog> _logs = Channel.CreateBounded<ServiceLog>(new BoundedChannelOptions(500)
     { FullMode = BoundedChannelFullMode.DropOldest, SingleReader = true, SingleWriter = false });
     private readonly object _consoleLogSync = new();
+    private readonly object _swaggerUiSync = new();
+    private SwaggerUiStatus _swaggerStatus = new(SwaggerUiAvailability.ApiUnavailable, "API is not running and ready yet.");
+    private CancellationTokenSource? _swaggerCancellation;
+    private string? _swaggerProbeKey;
+    private long _swaggerProbeVersion;
+    private bool _swaggerProbeInFlight;
+    private DateTime _swaggerNextCheckUtc;
     private long _consoleSequence;
     private long _consoleResetSequence;
     private long _outputGeneration;
@@ -100,7 +107,7 @@ public sealed class ServiceRunner : IDisposable
     {
         Profile = profile;
         WorkingDirectory = Path.GetFullPath(workingDirectory);
-        if (profile.IsGenericConsole || profile.IsCommandApi) CommandFolders[_runnerId] = WorkingDirectory;
+        ServiceFolders[_runnerId] = WorkingDirectory;
         if (profile.IsConsole) _snapshot = new(ServiceState.Checking, "Waiting for the first process check", []);
         _ = PumpLogsAsync();
     }
@@ -115,10 +122,12 @@ public sealed class ServiceRunner : IDisposable
     public string WorkingDirectory { get; }
     public ServiceSnapshot Snapshot => Volatile.Read(ref _snapshot);
     public bool HasManagedProcess => _hasManagedProcess;
-    public bool UsesManagedProcessTrackingOnly => Profile.IsGenericConsole || Profile.IsCommandApi || CommandFolders.Any(folder =>
+    public bool UsesManagedProcessTrackingOnly => Profile.IsGenericConsole || Profile.IsCommandApi || ServiceFolders.Any(folder =>
         folder.Key != _runnerId && SettingsStore.WorkingFoldersOverlap(WorkingDirectory, folder.Value));
     public bool HasVerifiedNoServiceProcesses => _hasVerifiedNoServiceProcesses;
     internal IReadOnlyList<ProcessIdentity> FlutterAppProcessIdentities => Volatile.Read(ref _flutterAppProcessIdentities);
+    internal SwaggerUiStatus SwaggerStatus => Volatile.Read(ref _swaggerStatus);
+    internal bool IsSwaggerUiLaunch => !Profile.IsConsole && SwaggerUiProbe.IsSwaggerUiUri(BuildUiUrl());
 
     internal bool CanOpenReadyFrontend(long runVersion)
     {
@@ -366,6 +375,7 @@ public sealed class ServiceRunner : IDisposable
             if (!_keepRunningPrepared) throw new InvalidOperationException("Services must be prepared before leaving them running.");
             _disposed = true;
             _intentionalStop = true;
+            ResetSwaggerUiStatus(ServiceState.Stopped);
             InvalidateFrontendRun();
             _consoleSession?.DisposeKeepingRunning();
             _maintenanceSession?.DisposeKeepingRunning();
@@ -377,7 +387,7 @@ public sealed class ServiceRunner : IDisposable
             _startProcess?.Dispose();
             _maintenanceProcess?.Dispose();
             _logs.Writer.TryComplete();
-            CommandFolders.TryRemove(_runnerId, out _);
+            ServiceFolders.TryRemove(_runnerId, out _);
         }
         finally { _gate.Release(); }
     }
@@ -910,7 +920,7 @@ public sealed class ServiceRunner : IDisposable
         foreach (var process in owned) _owned[process.Id] = process.Identity;
         _hasManagedProcess = owned.Length > 0 || consoleInspectionFailed ||
             (inventory.InspectionError is not null && _owned.Values.Any(ProcessInspector.IsSameProcess));
-        // Folder evidence cannot distinguish overlapping commands. Managed/recovered
+        // Folder evidence cannot distinguish overlapping services. Managed/recovered
         // identities and verified job membership remain sufficient for both services.
         InspectedProcess[] external = UsesManagedProcessTrackingOnly ? [] : inventory.Processes.Where(p => !ancestors.Contains(p.Id)
             && ProcessInspector.BelongsToDirectory(p, WorkingDirectory)).ToArray();
@@ -1053,6 +1063,7 @@ public sealed class ServiceRunner : IDisposable
             }
             Publish(ServiceState.Running, status >= 500 ? $"{origin}; HTTP {status} (server reports an error)" : $"{origin}; HTTP {status}", ids, uiUrl,
                 status >= 500 ? ServiceLogKind.Warning : ServiceLogKind.Success);
+            RefreshSwaggerUiStatus(inspection, uiUrl);
             NotifyFrontendReady(uiUrl, status, frontendAttempt);
         }
         catch (Exception ex) when (ex is HttpRequestException or TaskCanceledException)
@@ -1081,6 +1092,101 @@ public sealed class ServiceRunner : IDisposable
             }
         }
         return false;
+    }
+
+    private void RefreshSwaggerUiStatus(Inspection inspection, string? uiUrl)
+    {
+        if (!IsSwaggerUiLaunch || _disposed || _intentionalStop || Snapshot.State != ServiceState.Running ||
+            !Uri.TryCreate(uiUrl, UriKind.Absolute, out var uri)) return;
+        var stopRevision = Volatile.Read(ref _stopRevision);
+        var runVersion = ManagedApiRunVersion;
+        var profileUrl = Profile.Url;
+        var uiPath = Profile.UiPath;
+        // Start times distinguish a replacement process even when Windows reuses its PID.
+        var processes = string.Join(",", inspection.All.OrderBy(process => process.Id)
+            .Select(process => $"{process.Id}:{process.Identity.StartedUtcTicks}"));
+        var key = $"{uiUrl}|{profileUrl}|{uiPath}|{stopRevision}|{runVersion}|{processes}";
+        CancellationTokenSource cancellation;
+        long version;
+        var changed = false;
+        lock (_swaggerUiSync)
+        {
+            if (!string.Equals(_swaggerProbeKey, key, StringComparison.Ordinal))
+            {
+                _swaggerCancellation?.Cancel();
+                _swaggerCancellation = null;
+                _swaggerProbeKey = key;
+                _swaggerProbeVersion++;
+                _swaggerProbeInFlight = false;
+                _swaggerNextCheckUtc = DateTime.MinValue;
+                var checking = new SwaggerUiStatus(SwaggerUiAvailability.Checking, "API is running; checking its configured Swagger UI.", uiUrl);
+                changed = _swaggerStatus != checking;
+                Volatile.Write(ref _swaggerStatus, checking);
+            }
+            if (_swaggerProbeInFlight || DateTime.UtcNow < _swaggerNextCheckUtc) return;
+            cancellation = new CancellationTokenSource();
+            _swaggerCancellation = cancellation;
+            _swaggerProbeInFlight = true;
+            version = _swaggerProbeVersion;
+        }
+        if (changed) SnapshotChanged?.Invoke();
+        // Probing is independent of the process-operation gate and never blocks stop/restart.
+        _ = Task.Run(() => ProbeSwaggerUiAsync(uri, key, version, stopRevision, runVersion, profileUrl, uiPath, cancellation));
+    }
+
+    private async Task ProbeSwaggerUiAsync(Uri uri, string key, long version, int stopRevision,
+        long runVersion, string profileUrl, string uiPath, CancellationTokenSource cancellation)
+    {
+        try
+        {
+            var result = await SwaggerUiProbe.ProbeAsync(uri, cancellation.Token).ConfigureAwait(false);
+            var changed = false;
+            lock (_swaggerUiSync)
+            {
+                if (_disposed || _intentionalStop || cancellation.IsCancellationRequested || version != _swaggerProbeVersion ||
+                    !string.Equals(key, _swaggerProbeKey, StringComparison.Ordinal) ||
+                    stopRevision != Volatile.Read(ref _stopRevision) || runVersion != ManagedApiRunVersion ||
+                    !string.Equals(profileUrl, Profile.Url, StringComparison.Ordinal) || !string.Equals(uiPath, Profile.UiPath, StringComparison.Ordinal) ||
+                    Snapshot.State != ServiceState.Running || !string.Equals(uri.AbsoluteUri, Snapshot.ActiveUrl, StringComparison.Ordinal) ||
+                    !IsSwaggerUiLaunch) return;
+                changed = _swaggerStatus != result;
+                Volatile.Write(ref _swaggerStatus, result);
+                _swaggerNextCheckUtc = DateTime.UtcNow.AddSeconds(15);
+            }
+            if (changed) SnapshotChanged?.Invoke();
+        }
+        catch (OperationCanceledException) when (cancellation.IsCancellationRequested) { }
+        finally
+        {
+            lock (_swaggerUiSync)
+            {
+                if (ReferenceEquals(_swaggerCancellation, cancellation))
+                {
+                    _swaggerCancellation = null;
+                    _swaggerProbeInFlight = false;
+                }
+            }
+            cancellation.Dispose();
+        }
+    }
+
+    private bool ResetSwaggerUiStatus(ServiceState state)
+    {
+        if (state == ServiceState.Running && IsSwaggerUiLaunch && !_disposed && !_intentionalStop) return false;
+        lock (_swaggerUiSync)
+        {
+            _swaggerCancellation?.Cancel();
+            _swaggerCancellation = null;
+            _swaggerProbeKey = null;
+            _swaggerProbeVersion++;
+            _swaggerProbeInFlight = false;
+            _swaggerNextCheckUtc = DateTime.MinValue;
+            var status = new SwaggerUiStatus(IsSwaggerUiLaunch ? SwaggerUiAvailability.ApiUnavailable : SwaggerUiAvailability.NotApplicable,
+                IsSwaggerUiLaunch ? "API is not running and ready yet." : "This launch address does not target Swagger UI.");
+            if (_swaggerStatus == status) return false;
+            Volatile.Write(ref _swaggerStatus, status);
+            return true;
+        }
     }
 
     private void RefreshConsole(Inspection inspection, int[] ids)
@@ -1358,10 +1464,11 @@ public sealed class ServiceRunner : IDisposable
     {
         var previous = Snapshot;
         Volatile.Write(ref _snapshot, new(state, detail, ids.ToArray(), url, _hasManagedProcess));
+        var swaggerChanged = ResetSwaggerUiStatus(state);
         // A new stop/restart clears earlier diagnostics, including an identical error from
         // the previous attempt. Emit that current failure once in the fresh console buffer.
         var repeatDiagnostic = _repeatDiagnosticAfterConsoleReset && state is ServiceState.Error or ServiceState.Conflict;
-        if (previous.State == state && previous.Detail == detail && !repeatDiagnostic) return;
+        if (previous.State == state && previous.Detail == detail && previous.ActiveUrl == url && !swaggerChanged && !repeatDiagnostic) return;
         SnapshotChanged?.Invoke();
         switch (state)
         {
@@ -1383,6 +1490,7 @@ public sealed class ServiceRunner : IDisposable
     private void CancelMaintenance()
     {
         Interlocked.Increment(ref _stopRevision);
+        if (ResetSwaggerUiStatus(ServiceState.Stopped)) SnapshotChanged?.Invoke();
         try { Volatile.Read(ref _operationCancellation)?.Cancel(); }
         catch (ObjectDisposedException) { }
     }
@@ -1470,6 +1578,6 @@ public sealed class ServiceRunner : IDisposable
         _startProcess?.Dispose();
         _maintenanceProcess?.Dispose();
         _logs.Writer.TryComplete();
-        CommandFolders.TryRemove(_runnerId, out _);
+        ServiceFolders.TryRemove(_runnerId, out _);
     }
 }

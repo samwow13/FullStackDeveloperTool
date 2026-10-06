@@ -32,6 +32,8 @@ public partial class MainWindow
         {
             instanceId = _agentCoordination.InstanceId,
             projectId = discovery.Project.Id,
+            projectName = discovery.Project.Name,
+            projectRoot = _store.ResolveRoot(discovery.Project),
             observedUtc = DateTime.UtcNow,
             authentication = "not_checked",
             warning = discovery.Warning,
@@ -76,8 +78,12 @@ public partial class MainWindow
         {
             instanceId = _agentCoordination.InstanceId,
             projectId = project.Id,
+            projectName = project.Name,
+            projectRoot = _store.ResolveRoot(project),
             repositoryId = repository.RepositoryId,
+            repositoryRoot = repository.RepositoryRoot,
             connectionId = connection.ConnectionId,
+            remoteName = connection.RemoteName,
             branch = repository.Branch,
             updateId = entry.UpdateId,
             entryId = entry.Id,

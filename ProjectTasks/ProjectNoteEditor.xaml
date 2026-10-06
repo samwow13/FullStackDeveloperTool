@@ -13,7 +13,19 @@
             <RowDefinition Height="Auto"/>
             <RowDefinition Height="Auto"/>
         </Grid.RowDefinitions>
-        <TextBlock Text="{Binding EditorHeading}" FontSize="17" FontWeight="SemiBold" Margin="0,0,0,12"/>
+        <StackPanel Margin="0,0,0,12">
+            <TextBlock Text="{Binding EditorHeading}" FontSize="17" FontWeight="SemiBold"/>
+            <TextBlock Text="{Binding EditorAgentOrigin}" Foreground="{StaticResource AccentBrush}" FontSize="11"
+                       TextWrapping="Wrap" Margin="0,5,0,0"
+                       Visibility="{Binding HasAgentSource, Converter={StaticResource BoolToVisibility}}"/>
+            <Expander Header="Agent source" Foreground="{StaticResource TextBrush}" Margin="0,5,0,0"
+                      Visibility="{Binding HasAgentSource, Converter={StaticResource BoolToVisibility}}">
+                <TextBox Text="{Binding EditorAgentSourceDetails, Mode=OneWay}" IsReadOnly="True"
+                         TextWrapping="Wrap" AcceptsReturn="True" VerticalScrollBarVisibility="Auto"
+                         HorizontalScrollBarVisibility="Disabled" MaxHeight="180" Margin="0,6,0,0" FontSize="11"
+                         AutomationProperties.Name="Original agent suggestion context and provenance"/>
+            </Expander>
+        </StackPanel>
         <DockPanel Grid.Row="1" LastChildFill="True">
             <Label Content="Task _name" Target="{Binding ElementName=NoteName}" Foreground="{StaticResource MutedBrush}" Padding="0,8,12,0"/>
             <TextBox x:Name="NoteName" Text="{Binding EditorName, UpdateSourceTrigger=PropertyChanged}" MaxLength="160"

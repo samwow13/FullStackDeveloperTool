@@ -57,6 +57,14 @@ public sealed class ProjectTaskStore
         else StorePath = DefaultStorePath;
     }
 
+    private ProjectTaskStore(string storePath, bool independentBaseline)
+    {
+        StorePath = storePath;
+    }
+
+    // An MCP submission must not replace the baseline used by open note drafts.
+    internal ProjectTaskStore CreateIndependentInstance() => new(StorePath, true);
+
     public ProjectTaskData Load()
     {
         lock (_gate)
@@ -113,8 +121,8 @@ public sealed class ProjectTaskStore
             if (!CanSave)
                 throw new InvalidOperationException(LoadWarning ?? "Load project tasks before saving them.");
             // Hold the owner slot through the file replacement. A one-time check
-            // would race an older owner starting immediately before the v6 write.
-            using var migrationClaim = _loadedSourceVersion < 6 &&
+            // would race an older owner starting immediately before the schema upgrade.
+            using var migrationClaim = _loadedSourceVersion < 8 &&
                 !Environment.GetCommandLineArgs().Contains("--queue-owner", StringComparer.OrdinalIgnoreCase)
                 ? QueueOwnerClient.TryClaimOwnerMutex(StorePath)
                     ?? throw new InvalidOperationException("An older queue owner is still running. Wait for its idle handoff or exit its tray icon before saving project tasks.")
@@ -143,7 +151,7 @@ public sealed class ProjectTaskStore
             }
             var fingerprint = current == null ? null : Fingerprint(current);
             if (!string.Equals(fingerprint, _loadedFingerprint, StringComparison.Ordinal))
-                throw new InvalidOperationException("Project tasks changed in another launcher or editor. Reload project tasks before saving again.");
+                throw new ProjectTaskStoreConflictException("Project tasks changed in another launcher or editor. Reload project tasks before saving again.");
 
             var temporaryPath = StorePath + "." + Guid.NewGuid().ToString("N") + ".tmp";
             try
@@ -182,7 +190,7 @@ public sealed class ProjectTaskStore
         }
         catch (IOException ex)
         {
-            throw new InvalidOperationException("Another launcher is saving project tasks. Wait briefly, then reload and retry.", ex);
+            throw new ProjectTaskStoreConflictException("Another launcher is saving project tasks. Wait briefly, then reload and retry.", ex);
         }
     }
 
@@ -240,19 +248,38 @@ public sealed class ProjectTaskStore
         var root = document.RootElement;
         RequireUniqueProperties(root);
         var version = RequireProperty(root, "version", JsonValueKind.Number);
-        if (!version.TryGetInt32(out var sourceVersion) || sourceVersion is not (1 or 2 or 3 or 4 or 5 or 6))
+        if (!version.TryGetInt32(out var sourceVersion) || sourceVersion is not (1 or 2 or 3 or 4 or 5 or 6 or 7 or 8))
             throw new ArgumentException("Unsupported project task store version.");
         if (sourceVersion >= 4) RequireBoolean(root, "pauseAllQueues");
         var notes = RequireProperty(root, "notes", JsonValueKind.Array);
         var items = RequireProperty(root, "queueItems", JsonValueKind.Array);
         var queues = RequireProperty(root, "queues", JsonValueKind.Array);
         var receipts = RequireProperty(root, "receipts", JsonValueKind.Array);
+        if (sourceVersion >= 7)
+        {
+            var suggestions = RequireProperty(root, "agentFollowUpReceipts", JsonValueKind.Array);
+            foreach (var suggestion in suggestions.EnumerateArray())
+            {
+                RequireProperties(suggestion, JsonValueKind.String, "noteId", "author", "payloadHash", "createdAt");
+                RequireProperties(RequireProperty(suggestion, "request", JsonValueKind.Object), JsonValueKind.String,
+                    "projectId", "updateId", "name", "prompt", "context", "sourceTaskId", "sourcePrompt", "pageUrl", "pageTitle");
+            }
+        }
         foreach (var note in notes.EnumerateArray())
         {
             RequireProperties(note, JsonValueKind.String, "id", "projectId", "name", "prompt", "createdAt", "updatedAt");
             RequireProperty(note, "order", JsonValueKind.Number);
             RequireBoolean(note, "isCompleted");
             RequireBoolean(note, "isArchived");
+            if (sourceVersion >= 7)
+            {
+                RequireNullableProperty(note, "agentSource", JsonValueKind.Object);
+                var source = note.EnumerateObject().First(property =>
+                    property.Name.Equals("agentSource", StringComparison.OrdinalIgnoreCase)).Value;
+                if (source.ValueKind == JsonValueKind.Object)
+                    RequireProperties(source, JsonValueKind.String,
+                        "updateId", "author", "context", "sourceTaskId", "sourcePrompt", "pageUrl", "pageTitle");
+            }
             if (sourceVersion >= 3)
             {
                 var images = RequireProperty(note, "images", JsonValueKind.Array);
@@ -275,6 +302,8 @@ public sealed class ProjectTaskStore
             RequireBoolean(queue, "enabled");
             if (sourceVersion >= 4)
                 RequireProperties(queue, JsonValueKind.String, "defaultModelId", "defaultReasoningEffort");
+            if (sourceVersion >= 8)
+                RequireProperty(queue, "delayBetweenTasksMinutes", JsonValueKind.Number);
         }
         foreach (var receipt in receipts.EnumerateArray())
         {
@@ -296,9 +325,9 @@ public sealed class ProjectTaskStore
             ?? throw new ArgumentException("Project task data is empty.");
         // Migrate only in memory; a normal atomic save retains the prior file as backup.
         // Legacy queue flags never authorize execution in the new format.
-        if (data.Version is 1 or 2 or 3 or 4 or 5)
+        if (data.Version is 1 or 2 or 3 or 4 or 5 or 6 or 7)
         {
-            data.Version = 6;
+            data.Version = 8;
             if (sourceVersion <= 3 && data.Queues != null)
                 foreach (var queue in data.Queues)
                     if (queue != null) queue.Enabled = false;
@@ -309,8 +338,8 @@ public sealed class ProjectTaskStore
 
     private static void Validate(ProjectTaskData data)
     {
-        if (data.Version != 6) throw new ArgumentException("Unsupported project task store version; expected version 1, 2, 3, 4, 5, or 6 on load, and version 6 on save.");
-        if (data.Notes == null || data.QueueItems == null || data.Queues == null || data.Receipts == null)
+        if (data.Version != 8) throw new ArgumentException("Unsupported project task store version; expected version 1, 2, 3, 4, 5, 6, 7, or 8 on load, and version 8 on save.");
+        if (data.Notes == null || data.QueueItems == null || data.Queues == null || data.Receipts == null || data.AgentFollowUpReceipts == null)
             throw new ArgumentException("Project task collections must be arrays.");
         var notes = new Dictionary<string, ProjectTaskNote>(StringComparer.Ordinal);
         foreach (var note in data.Notes)
@@ -333,6 +362,8 @@ public sealed class ProjectTaskStore
             RequireAbsoluteFolder(queue.AssignedFolder);
             RequireText(queue.DefaultModelId, "Default queue model");
             RequireText(queue.DefaultReasoningEffort, "Default queue thinking level");
+            if (queue.DelayBetweenTasksMinutes is < 0 or > ProjectQueueConfiguration.MaximumDelayMinutes)
+                throw new ArgumentException("Queue delay must be a whole number from 0 to 10080 minutes.");
             RequireText(queue.StatusMessage, "Queue status message");
             RequireEnum(queue.RecoveryState);
             if (!queueIds.Add(queue.ProjectId)) throw new ArgumentException("Duplicate project queue.");
@@ -454,10 +485,25 @@ public sealed class ProjectTaskStore
                 receipt.Snapshot.QueueItemId != item.Id || receipt.Snapshot.ProjectId != item.ProjectId)
                 throw new ArgumentException("A queue item's attempt must reference its own execution receipt.");
         }
+        ValidateFollowUpReceipts(data, notes);
     }
 
     private static void ValidateReceiptPreservation(ProjectTaskData candidate, ProjectTaskData previous)
     {
+        var suggestionReceipts = candidate.AgentFollowUpReceipts.ToDictionary(
+            receipt => (receipt.Request.ProjectId, receipt.Request.UpdateId));
+        foreach (var oldReceipt in previous.AgentFollowUpReceipts)
+        {
+            if (!suggestionReceipts.TryGetValue((oldReceipt.Request.ProjectId, oldReceipt.Request.UpdateId), out var receipt) ||
+                receipt != oldReceipt)
+                throw new ArgumentException("Agent follow-up submission receipts must be retained unchanged independently of notes and queue entries.");
+        }
+        var candidateNotes = candidate.Notes.ToDictionary(note => note.Id, StringComparer.Ordinal);
+        foreach (var oldNote in previous.Notes.Where(note => note.AgentSource != null))
+        {
+            if (candidateNotes.TryGetValue(oldNote.Id, out var note) && note.AgentSource != oldNote.AgentSource)
+                throw new ArgumentException("A saved agent note's original provenance cannot be changed or cleared.");
+        }
         var receipts = candidate.Receipts.ToDictionary(receipt => receipt.AttemptId, StringComparer.Ordinal);
         foreach (var oldReceipt in previous.Receipts)
         {
@@ -500,6 +546,36 @@ public sealed class ProjectTaskStore
                 (receipt.NotificationState != ProjectTaskNotificationState.Attempted ||
                  receipt.NotificationAttemptedAt != oldReceipt.NotificationAttemptedAt))
                 throw new ArgumentException("A recorded notification attempt cannot be reset.");
+        }
+    }
+
+    private static void ValidateFollowUpReceipts(ProjectTaskData data,
+        IReadOnlyDictionary<string, ProjectTaskNote> notes)
+    {
+        var identities = new HashSet<(string ProjectId, string UpdateId)>();
+        var noteIds = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var receipt in data.AgentFollowUpReceipts)
+        {
+            if (receipt == null) throw new ArgumentException("An agent follow-up receipt cannot be null.");
+            Require(receipt.NoteId, "Agent follow-up note ID");
+            if (receipt.CreatedAt == default)
+                throw new ArgumentException("An agent follow-up receipt must record its creation time.");
+            var normalized = AgentFollowUpNoteService.NormalizeRequest(receipt.Request);
+            if (normalized != receipt.Request || AgentFollowUpNoteService.NormalizeAuthor(receipt.Author) != receipt.Author)
+                throw new ArgumentException("An agent follow-up receipt contains invalid submission metadata.");
+            if (receipt.PayloadHash != AgentFollowUpNoteService.PayloadHash(receipt.Request))
+                throw new ArgumentException("An agent follow-up receipt has an invalid payload identity.");
+            if (!identities.Add((receipt.Request.ProjectId, receipt.Request.UpdateId)) || !noteIds.Add(receipt.NoteId))
+                throw new ArgumentException("Duplicate agent follow-up submission identity.");
+            if (notes.TryGetValue(receipt.NoteId, out var note) &&
+                (note.ProjectId != receipt.Request.ProjectId ||
+                 note.AgentSource != AgentFollowUpNoteService.SourceMetadata(receipt.Request, receipt.Author)))
+                throw new ArgumentException("An agent follow-up note must retain its original project and provenance.");
+        }
+        foreach (var note in data.Notes.Where(note => note.AgentSource != null))
+        {
+            if (!noteIds.Contains(note.Id))
+                throw new ArgumentException("An agent follow-up note must reference its retained submission receipt.");
         }
     }
 
@@ -655,4 +731,10 @@ public sealed class ProjectTaskStore
 
     private static bool IsStoreException(Exception ex) =>
         ex is IOException or UnauthorizedAccessException or JsonException or ArgumentException or NotSupportedException;
+}
+
+internal sealed class ProjectTaskStoreConflictException : InvalidOperationException
+{
+    public ProjectTaskStoreConflictException(string message, Exception? innerException = null)
+        : base(message, innerException) { }
 }

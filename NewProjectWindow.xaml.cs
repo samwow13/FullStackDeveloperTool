@@ -16,10 +16,10 @@ public partial class NewProjectWindow : Window
     private readonly IReadOnlyList<ProjectProfile> _savedProjects;
     private int _scanVersion;
     private string? _scannedRoot;
-    private bool _hasExistingFolderConflict;
     private bool _showingServices;
+    private bool _sourceChosen;
     private bool _busy;
-    private string? _suggestedName;
+    private string? _suggestedName = "My Angular project";
     private ProjectProfile? _reviewDraft;
     private string? _reviewKey;
     private bool _applyingDetectedType;
@@ -51,7 +51,7 @@ public partial class NewProjectWindow : Window
         ProjectNameBox.Text = "My Angular project";
         UpdateProjectTypePresentation();
         UpdateStepPresentation();
-        Loaded += (_, _) => RootPathBox.Focus();
+        Loaded += (_, _) => LocalSourceButton.Focus();
     }
 
     private async void ProjectType_Changed(object sender, RoutedEventArgs e)
@@ -85,9 +85,20 @@ public partial class NewProjectWindow : Window
 
     private void UpdateStepPresentation()
     {
+        SourcePage.Visibility = _sourceChosen ? Visibility.Collapsed : Visibility.Visible;
+        ContinueButton.Visibility = _sourceChosen ? Visibility.Visible : Visibility.Collapsed;
+        if (!_sourceChosen)
+        {
+            FolderPage.Visibility = ServicesPage.Visibility = BackButton.Visibility = Visibility.Collapsed;
+            StepText.Text = "NEW PROJECT · SOURCE";
+            PageTitleText.Text = "Choose your project source";
+            IntroHelpText.Text = "Use an existing local folder, or clone repositories into a workspace.";
+            NextStepText.Text = "Choose a source to continue.";
+            return;
+        }
         FolderPage.Visibility = _showingServices ? Visibility.Collapsed : Visibility.Visible;
         ServicesPage.Visibility = _showingServices ? Visibility.Visible : Visibility.Collapsed;
-        BackButton.Visibility = _showingServices ? Visibility.Visible : Visibility.Collapsed;
+        BackButton.Visibility = Visibility.Visible;
         StepText.Text = _showingServices ? "STEP 2 OF 3 · SERVICES" : "STEP 1 OF 3 · FOLDER";
         PageTitleText.Text = _showingServices ? "Review your services" : "Choose your project folder";
         IntroHelpText.Text = _showingServices
@@ -102,10 +113,43 @@ public partial class NewProjectWindow : Window
     private void Back_Click(object sender, RoutedEventArgs e)
     {
         if (_busy) return;
+        if (!_showingServices)
+        {
+            _sourceChosen = false;
+            UpdateStepPresentation();
+            PageScrollViewer.ScrollToTop();
+            LocalSourceButton.Focus();
+            return;
+        }
         _showingServices = false;
         UpdateStepPresentation();
         PageScrollViewer.ScrollToTop();
         RootPathBox.Focus();
+    }
+
+    private void LocalSource_Click(object sender, RoutedEventArgs e)
+    {
+        if (_busy) return;
+        _sourceChosen = true;
+        UpdateStepPresentation();
+        PageScrollViewer.ScrollToTop();
+        RootPathBox.Focus();
+    }
+
+    private void RemoteSource_Click(object sender, RoutedEventArgs e)
+    {
+        if (_busy) return;
+        var import = new AzureDevOpsImportWindow(_settingsDirectory, _savedProjects) { Owner = this };
+        if (import.ShowDialog() != true || import.ImportedRoot is not { } root) return;
+        RootPathBox.Text = root;
+        var workspaceName = string.IsNullOrWhiteSpace(import.ImportedWorkspaceName)
+            ? new DirectoryInfo(root).Name : import.ImportedWorkspaceName;
+        _suggestedName = null;
+        ProjectNameBox.Text = string.IsNullOrWhiteSpace(workspaceName) ? "My project" : workspaceName;
+        _sourceChosen = true;
+        UpdateStepPresentation();
+        PageScrollViewer.ScrollToTop();
+        ContinueButton.Focus();
     }
 
     private async Task<bool> DetectProjectTypeAsync(string root)
@@ -141,7 +185,6 @@ public partial class NewProjectWindow : Window
                 _ => "Project type unclear. Choose a type; scan details show what was found."
             };
             UpdateProjectTypePresentation();
-            UpdateExistingFolderConflict();
             return true;
         }
         catch (Exception ex) when (ex is ArgumentException or IOException or UnauthorizedAccessException or
@@ -220,7 +263,6 @@ public partial class NewProjectWindow : Window
             ? "Scan this folder to find the API and Angular working folders."
             : $"Scan this folder to find {AppLabel} packages.";
         ManualConfigurationWarning.Visibility = Visibility.Collapsed;
-        UpdateExistingFolderConflict();
         SetBusy(false);
     }
 
@@ -280,7 +322,6 @@ public partial class NewProjectWindow : Window
                     ManualConfigurationWarning.Text = "Multiple console apps found. Choose the app to run.";
                     ManualConfigurationWarning.Visibility = Visibility.Visible;
                 }
-                UpdateExistingFolderConflict();
                 return;
             }
             if (type == ProjectType.FlutterDart)
@@ -303,7 +344,6 @@ public partial class NewProjectWindow : Window
                         : $"Multiple {AppLabel} packages found. Choose the app to run.";
                     ManualConfigurationWarning.Visibility = Visibility.Visible;
                 }
-                UpdateExistingFolderConflict();
                 return;
             }
             var found = detected?.FullStack ?? await Task.Run(() => FullStackProjectDiscovery.Discover(root));
@@ -335,7 +375,6 @@ public partial class NewProjectWindow : Window
                 ManualConfigurationWarning.Text = string.Join(" ", warnings);
                 ManualConfigurationWarning.Visibility = Visibility.Visible;
             }
-            UpdateExistingFolderConflict();
         }
         catch (Exception ex) when (ex is ArgumentException or IOException or UnauthorizedAccessException or NotSupportedException)
         {
@@ -375,13 +414,12 @@ public partial class NewProjectWindow : Window
         if (dialog.ShowDialog(this) == true)
         {
             choice.Text = dialog.FolderName;
-            UpdateExistingFolderConflict();
         }
     }
 
     private async void Continue_Click(object sender, RoutedEventArgs e)
     {
-        if (_busy) return;
+        if (_busy || !_sourceChosen) return;
         if (!TryResolveRoot(out var root, out var message))
         {
             ShowValidation(message);
@@ -392,8 +430,7 @@ public partial class NewProjectWindow : Window
         if (!_showingServices)
         {
             if (!await DetectProjectTypeAsync(root)) return;
-            if (string.IsNullOrWhiteSpace(ProjectNameBox.Text) || ProjectNameBox.Text == "My Angular project" ||
-                ProjectNameBox.Text == _suggestedName)
+            if (string.IsNullOrWhiteSpace(ProjectNameBox.Text) || ProjectNameBox.Text == _suggestedName)
             {
                 _suggestedName = new DirectoryInfo(root).Name;
                 ProjectNameBox.Text = string.IsNullOrWhiteSpace(_suggestedName) ? "My project" : _suggestedName;
@@ -414,16 +451,16 @@ public partial class NewProjectWindow : Window
             ProjectNameBox.Focus();
             return;
         }
+        if (SettingsStore.FindProjectNameConflict(_savedProjects, name) is { } nameConflict)
+        {
+            ShowValidation($"Project name '{nameConflict.Name}' is already used. Choose a different project name.");
+            ProjectNameBox.Focus();
+            return;
+        }
 
         if (ConsoleType.IsChecked == true)
         {
             if (!TryResolveServiceFolder(FrontendDirectoryBox.Text, root, "Console app", out var consoleDirectory)) return;
-            UpdateExistingFolderConflict();
-            if (_hasExistingFolderConflict)
-            {
-                ShowValidation(ExistingFolderWarning.Text);
-                return;
-            }
             Result = new ProjectProfile
             {
                 Name = name, RootPath = Path.GetRelativePath(_settingsDirectory, root),
@@ -457,13 +494,6 @@ public partial class NewProjectWindow : Window
             ShowValidation("The API and Angular working folders must be separate. Neither folder can contain the other.");
             return;
         }
-        UpdateExistingFolderConflict();
-        if (_hasExistingFolderConflict)
-        {
-            ShowValidation(ExistingFolderWarning.Text);
-            return;
-        }
-
         var apiChoice = ApiDirectoryBox.Text;
         var frontendChoice = FrontendDirectoryBox.Text;
         var currentScanVersion = _scanVersion;
@@ -523,12 +553,6 @@ public partial class NewProjectWindow : Window
         if (SelectedType != type || !TryResolveRoot(out var currentRoot, out _) ||
             !string.Equals(currentRoot, root, StringComparison.OrdinalIgnoreCase)) return;
         if (!TryResolveServiceFolder(FrontendDirectoryBox.Text, root, AppLabel, out var appDirectory)) return;
-        UpdateExistingFolderConflict();
-        if (_hasExistingFolderConflict)
-        {
-            ShowValidation(ExistingFolderWarning.Text);
-            return;
-        }
         var folderChoice = FrontendDirectoryBox.Text;
         var version = _scanVersion;
         SetBusy(true);
@@ -653,50 +677,12 @@ public partial class NewProjectWindow : Window
 
     private async void ServiceFolder_TextChanged(object sender, TextChangedEventArgs e)
     {
-        UpdateExistingFolderConflict();
         await RefreshPackageKindAsync();
     }
 
     private async void ServiceFolder_SelectionChanged(object sender, SelectionChangedEventArgs e)
     {
-        UpdateExistingFolderConflict();
         await RefreshPackageKindAsync();
-    }
-
-    private void UpdateExistingFolderConflict()
-    {
-        if (ExistingFolderWarning == null ||
-            ApiDirectoryBox == null || FrontendDirectoryBox == null) return;
-        _hasExistingFolderConflict = false;
-        ExistingFolderWarning.Visibility = Visibility.Collapsed;
-        if (!TryResolveRoot(out var root, out _)) return;
-
-        var conflicts = new List<(string SelectedService, ProjectProfile Project, ServiceProfile Service)>();
-        var selectedFolders = SelectedType switch
-        {
-            ProjectType.Console => new[] { ("Console app", FrontendDirectoryBox.Text) },
-            ProjectType.FullStack => new[] { ("Backend API", ApiDirectoryBox.Text), ("Angular frontend", FrontendDirectoryBox.Text) },
-            _ => new[] { (AppLabel, FrontendDirectoryBox.Text) }
-        };
-        foreach (var (selectedService, text) in selectedFolders)
-        {
-            if (string.IsNullOrWhiteSpace(text)) continue;
-            try
-            {
-                var folder = Path.GetFullPath(text.Trim(), root);
-                foreach (var owner in SettingsStore.FindServiceFolderConflicts(
-                             _savedProjects, _settingsDirectory, folder))
-                    conflicts.Add((selectedService, owner.Project, owner.Service));
-            }
-            catch (Exception ex) when (ex is ArgumentException or NotSupportedException or PathTooLongException) { }
-        }
-        if (conflicts.Count == 0) return;
-
-        _hasExistingFolderConflict = true;
-        ExistingFolderWarning.Text = string.Join(" ", conflicts.Select(conflict =>
-            $"{conflict.SelectedService} folder overlaps saved '{conflict.Project.Name}' / '{conflict.Service.Name}'.")) +
-            " Choose different folders or select the saved project from the project list.";
-        ExistingFolderWarning.Visibility = Visibility.Visible;
     }
 
     private static (string? Error, string? ApiUrl) InspectSelectedFolders(string apiDirectory, string frontendDirectory)

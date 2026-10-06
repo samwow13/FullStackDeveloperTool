@@ -1,5 +1,7 @@
 using System.ComponentModel;
+using System.Runtime.InteropServices;
 using System.Windows;
+using System.Windows.Interop;
 using System.Windows.Threading;
 using FullStackLauncher.Models;
 using FullStackLauncher.Services;
@@ -15,18 +17,34 @@ public partial class MainWindow
     {
         if (_closed) return;
         e.Cancel = true;
-        if (_closeRequested || _closing) return;
+        await CloseDashboardAsync(automaticReplacement: false);
+    }
+
+    private async Task<bool> CloseDashboardAsync(bool automaticReplacement,
+        CancellationToken cancellationToken = default)
+    {
+        if (_closed) return true;
+        if (_closeRequested || _closing) return false;
+        cancellationToken.ThrowIfCancellationRequested();
+        if (automaticReplacement && (!IsEnabled || _checkingStartupServices || _savingProjectEdits ||
+            _addingProjectService || _batchBusy || _forceStopBatchBusy ||
+            HasOpenReplacementDialog() ||
+            _runners.Values.SelectMany(project => project).Any(service => service.IsBusy || service.IsStopping)))
+        {
+            Notice = "Finish the open dialog or service operation, then open the new launcher again. Apps remain running.";
+            return false;
+        }
         if (_resettingCodex)
         {
             Notice = "Codex reset is in progress. Close the launcher again when it finishes.";
-            return;
+            return false;
         }
         if (_restartingMonitor)
         {
             Notice = "The Codex watcher is restarting. Close the launcher again when it finishes.";
-            return;
+            return false;
         }
-        if (_savingProjectEdits || _addingProjectService) return;
+        if (_savingProjectEdits || _addingProjectService) return false;
 
         // Modal windows run a nested dispatcher loop. Pause passive work before any
         // confirmation, so polling and build output cannot compete with its first paint.
@@ -46,9 +64,10 @@ public partial class MainWindow
             await Dispatcher.Yield(DispatcherPriority.Background);
             _resolvingCloseDrafts = true;
             UpdateActions();
-            try { if (!await ResolveProjectEditsForCloseAsync()) return; }
+            try { if (!await ResolveProjectEditsForCloseAsync()) return false; }
             finally { _resolvingCloseDrafts = false; UpdateActions(); }
-            if (_projectTasksWindow?.PrepareToClose() == false) return;
+            if (_projectTasksWindow?.PrepareToClose() == false) return false;
+            cancellationToken.ThrowIfCancellationRequested();
             // Inspect idle services across every project. Busy services remain in
             // the choice without waiting for a potentially long maintenance command.
             var services = _runners.SelectMany(project => project.Value.Select(service =>
@@ -61,7 +80,7 @@ public partial class MainWindow
             var activeServices = services.Where(item => item.Service.Runner.HasManagedProcess ||
                 item.Service.Runner.Snapshot.ProcessIds.Count > 0 || item.Service.IsBusy || item.Service.IsStopping).ToArray();
             var exitChoice = ExitServicesChoice.LeaveRunning;
-            if (activeServices.Length > 0)
+            if (!automaticReplacement && activeServices.Length > 0)
             {
                 var names = activeServices.Select(item =>
                     $"{Projects.FirstOrDefault(project => project.Id == item.ProjectId)?.Name ?? "Project"} / {item.Service.Name}")
@@ -69,17 +88,18 @@ public partial class MainWindow
                 var dialog = new ExitServicesWindow(names) { Owner = this };
                 dialog.ShowDialog();
                 exitChoice = dialog.Choice;
-                if (exitChoice == ExitServicesChoice.Cancel) return;
+                if (exitChoice == ExitServicesChoice.Cancel) return false;
             }
             var closeWatcher = false;
-            if (CodexMonitor.MonitorLifetime.IsRunning())
+            if (!automaticReplacement && CodexMonitor.MonitorLifetime.IsRunning())
             {
                 var choice = MessageBox.Show(this,
                     "Also close the Codex watcher and its chat progress overlay?\n\nYes: close the watcher too.\nNo: leave it running in the tray.\nCancel: keep the launcher open.\n\nYour saved watches and settings are kept. The Codex app and its tasks are unaffected.",
                     "Close Codex watcher too?", MessageBoxButton.YesNoCancel, MessageBoxImage.Question, MessageBoxResult.No);
-                if (choice == MessageBoxResult.Cancel) return;
+                if (choice == MessageBoxResult.Cancel) return false;
                 closeWatcher = choice == MessageBoxResult.Yes;
             }
+            cancellationToken.ThrowIfCancellationRequested();
             _closing = true;
             IsEnabled = false;
             if (_projectTasksWindow != null) _projectTasksWindow.IsEnabled = false;
@@ -122,18 +142,26 @@ public partial class MainWindow
                 // Prepare every run before releasing any ownership handles. Failure
                 // keeps the dashboard open with its service controls available.
                 await Task.WhenAll(runners.Select(runner => runner.PrepareKeepRunningAsync()));
+                // A timed-out replacement must retain dashboard ownership rather than
+                // detaching services after the new process has already given up.
+                cancellationToken.ThrowIfCancellationRequested();
                 await Task.Run(() => { foreach (var runner in runners) runner.DisposeKeepingServicesRunning(); });
             }
             _closed = true;
             Close();
+            return true;
         }
         catch (Exception ex)
         {
             closeFailed = true;
             IsEnabled = true;
             if (_projectTasksWindow != null) _projectTasksWindow.IsEnabled = true;
-            Notice = $"Closing could not finish: {ex.Message}";
-            MessageBox.Show(this, Notice, "Close incomplete", MessageBoxButton.OK, MessageBoxImage.Warning);
+            Notice = ex is OperationCanceledException && automaticReplacement
+                ? "Launcher replacement timed out. Existing apps remain running. Open the new launcher again."
+                : $"Closing could not finish: {SensitiveDataProtection.Redact(ex.Message)}";
+            if (!automaticReplacement)
+                MessageBox.Show(this, Notice, "Close incomplete", MessageBoxButton.OK, MessageBoxImage.Warning);
+            return false;
         }
         finally
         {
@@ -142,7 +170,7 @@ public partial class MainWindow
                 // A failed preparation must not leave background helpers waiting
                 // for an exit the user canceled, or change normal stop ownership.
                 try { await Task.WhenAll(runners.Select(runner => runner.CancelKeepRunningPreparationAsync())); }
-                catch (Exception ex) { closeFailed = true; Notice = $"Exit cleanup could not finish: {ex.Message}"; }
+                catch (Exception ex) { closeFailed = true; Notice = $"Exit cleanup could not finish: {SensitiveDataProtection.Redact(ex.Message)}"; }
                 foreach (var service in _runners.Values.SelectMany(project => project)) service.Update();
                 _closing = false;
                 _closeRequested = false;
@@ -155,4 +183,21 @@ public partial class MainWindow
             }
         }
     }
+
+    private bool HasOpenReplacementDialog()
+    {
+        var windows = Application.Current.Windows.Cast<Window>().Where(window => window.IsVisible).ToArray();
+        // Note editors can belong to the notes host rather than this window.
+        // Include all visible windows, plus native modal dialogs that disable an owner.
+        return windows.Any(window => window != this && window != _projectTasksWindow &&
+                window is not ServiceConsoleWindow) || windows.Any(window =>
+            {
+                var handle = new WindowInteropHelper(window).Handle;
+                return handle != IntPtr.Zero && !IsReplacementWindowEnabled(handle);
+            });
+    }
+
+    [DllImport("user32.dll", EntryPoint = "IsWindowEnabled")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool IsReplacementWindowEnabled(IntPtr window);
 }

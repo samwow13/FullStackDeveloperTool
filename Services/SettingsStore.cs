@@ -124,6 +124,7 @@ public sealed class SettingsStore
         if (_blocked)
             throw new InvalidOperationException(LoadWarning ?? "Saving is disabled because the settings file could not be loaded.");
         Validate(settings, BaseDirectory);
+        ValidateProjectNameChanges(settings);
         if (File.Exists(SettingsPath))
         {
             var currentContent = File.ReadAllText(SettingsPath);
@@ -258,7 +259,6 @@ public sealed class SettingsStore
         }
         var projectIds = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         var serviceIds = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        var serviceFolders = new List<(string Path, string Label, string ProjectId, ServiceProfile Service)>();
         foreach (var project in settings.Projects)
         {
             if (project == null) throw new ArgumentException("A project entry cannot be null.");
@@ -269,6 +269,7 @@ public sealed class SettingsStore
             ValidatePath(project.RootPath, $"Root folder for '{project.Name}'");
             var projectRoot = Path.GetFullPath(project.RootPath, settingsDirectory);
             if (project.Services == null) throw new ArgumentException($"Services for '{project.Name}' must be an array.");
+            var serviceFolders = new List<(string Path, string Label, ServiceProfile Service)>();
             foreach (var service in project.Services)
             {
                 if (service == null) throw new ArgumentException($"'{project.Name}' contains a null service.");
@@ -285,16 +286,14 @@ public sealed class SettingsStore
                 {
                     // A command service uses its own process identities and job rather than
                     // adopting every process in its folder. Other services sharing that folder
-                    // also require managed identities, so same-project overlap is unambiguous.
-                    if (existing.ProjectId.Equals(project.Id, StringComparison.OrdinalIgnoreCase) &&
-                        (service.IsGenericConsole || service.IsCommandApi ||
-                         existing.Service.IsGenericConsole || existing.Service.IsCommandApi)) continue;
+                    // also require managed identities, so this overlap is unambiguous.
+                    if (service.IsGenericConsole || service.IsCommandApi ||
+                        existing.Service.IsGenericConsole || existing.Service.IsCommandApi) continue;
                     if (WorkingFoldersOverlap(serviceFolder, existing.Path))
                         throw new ArgumentException($"The working folders for {label} and {existing.Label} overlap. " +
-                            "Choose separate service folders, with neither inside the other, across all saved projects. " +
-                            "This is required to identify and stop each service's processes reliably.");
+                            "Choose separate service folders within this project, with neither inside the other.");
                 }
-                serviceFolders.Add((serviceFolder, label, project.Id, service));
+                serviceFolders.Add((serviceFolder, label, service));
                 Require(service.StartCommand, $"Start command for {label}");
                 service.ConsoleType = service.IsGenericConsole && !string.IsNullOrWhiteSpace(service.ConsoleType)
                     ? service.ConsoleType.Trim() : null;
@@ -354,23 +353,26 @@ public sealed class SettingsStore
         }
     }
 
-    internal static IReadOnlyList<(ProjectProfile Project, ServiceProfile Service)> FindServiceFolderConflicts(
-        IEnumerable<ProjectProfile> projects, string settingsDirectory, string proposedFolder,
-        string? excludedProjectId = null)
+    private void ValidateProjectNameChanges(LauncherSettings settings)
     {
-        var conflicts = new List<(ProjectProfile Project, ServiceProfile Service)>();
-        foreach (var project in projects)
+        // Older libraries allowed duplicate names. Keep unchanged profiles loadable and
+        // saveable, while every newly added or renamed profile must have a unique name.
+        var savedProjects = _loadedContent is null ? [] :
+            JsonSerializer.Deserialize<LauncherSettings>(_loadedContent, JsonOptions)!.Projects;
+        foreach (var project in settings.Projects)
         {
-            if (project.Id.Equals(excludedProjectId, StringComparison.OrdinalIgnoreCase)) continue;
-            var root = Path.GetFullPath(project.RootPath, settingsDirectory);
-            foreach (var service in project.Services)
-            {
-                var folder = Path.GetFullPath(service.WorkingDirectory, root);
-                if (WorkingFoldersOverlap(proposedFolder, folder)) conflicts.Add((project, service));
-            }
+            if (savedProjects.Any(saved => saved.Id.Equals(project.Id, StringComparison.OrdinalIgnoreCase) &&
+                saved.Name.Trim().Equals(project.Name.Trim(), StringComparison.OrdinalIgnoreCase))) continue;
+            if (FindProjectNameConflict(settings.Projects, project.Name, project.Id) is { } conflict)
+                throw new ArgumentException($"Project name '{conflict.Name}' is already used. Choose a different project name.");
         }
-        return conflicts;
     }
+
+    internal static ProjectProfile? FindProjectNameConflict(
+        IEnumerable<ProjectProfile> projects, string proposedName, string? excludedProjectId = null) =>
+        projects.FirstOrDefault(project =>
+            !project.Id.Equals(excludedProjectId, StringComparison.OrdinalIgnoreCase) &&
+            project.Name.Trim().Equals(proposedName.Trim(), StringComparison.OrdinalIgnoreCase));
 
     internal static bool WorkingFoldersOverlap(string first, string second)
     {

@@ -1,6 +1,6 @@
 # Local Codex bridge for Full Stack Launcher
 
-Full Stack Launcher owns configured project services. Its agent bridge lets a local Codex task inspect live process and HTTP health, reuse an existing localhost URL, and request guarded Start, Stop, or Restart through the running dashboard. It also discovers configured Git connections and queues concise agent change summaries for the editable **Commit all & push** message. It does not create Codex agents or start a dashboard just to answer a read request.
+Full Stack Launcher owns configured project services. Its agent bridge lets a local Codex task inspect live process and HTTP health, reuse an existing localhost URL, and request guarded Start, Stop, or Restart through the running dashboard. It also saves suggested follow-up prompts and context to **Notes** for human review, discovers configured Git connections, and queues concise agent change summaries for the editable **Commit all & push** message. It does not create Codex agents or start a dashboard just to answer a read request.
 
 ## Build and connect
 
@@ -10,20 +10,20 @@ For an installed build, use **Functions > First Time Setup**. Copy the generated
 
 Reconnect MCP or restart the agent client and open a new chat when necessary. Then call `launcher_projects` through that client. A successful response, including an empty project list, proves that the client can reach the running dashboard. Check configured services only with read-only list/status tools; setup does not start or stop them. If the native CLI is unavailable, use the displayed manual stdio fields or let the prompted agent configure them with its authorized local tools or computer use. Opening the dialog and copying its content do not change `AGENTS.md`, client configuration, or launcher settings.
 
-The agent restart warning update is packaged at `publish\agent-restart-warnings-20261002\FullStackLauncher.exe`. Close the old dashboard through its normal close flow, resolve any draft/service prompts, and open this updated EXE to activate the popup and notification behavior. Running processes keep their old code until restarted. The existing adapter can forward the additive event and heartbeat fields; use the updated EXE for its MCP adapter as well to refresh tool descriptions. Live popup, restart and notification behavior has not been exercised.
+Use the follow-up notes build at `publish\agent-follow-up-notes-20261006\FullStackLauncher.exe`. Close the old dashboard through its normal close flow, resolve any draft/service prompts, and open the updated EXE. Use this same build for the MCP adapter, then reconnect MCP to discover `launcher_project_notes` and `launcher_save_follow_up_note`. Running processes keep their old code until restarted. A published build or saved MCP registration does not establish live WPF interaction or a successful note save; the save tool's successful response confirms persistence.
 
 1. Package the launcher application without running test projects:
 
    ```powershell
-   & 'C:\Users\samwo\OneDrive\Desktop\MyTools\FullStackDeveloperTool\publish.ps1' -OutputDirectory 'publish\agent-restart-warnings-20261002'
+   & 'C:\Users\samwo\OneDrive\Desktop\MyTools\FullStackDeveloperTool\publish.ps1' -OutputDirectory 'publish\agent-follow-up-notes-20261006'
    ```
 
-2. Close any older launcher dashboard through its normal close dialog, then open the updated `publish\agent-restart-warnings-20261002\FullStackLauncher.exe` under the same Windows user and desktop session as Codex. The dashboard must already be running when a bridge tool is called. Keep using your existing `%LOCALAPPDATA%\FullStackLauncher\launcher.settings.json`; a new public checkout starts with an empty project library. Closing an older dashboard can prompt about unsaved drafts and running services, so resolve those prompts before opening the new copy. Reopening creates a new bridge instance; active agents must register and acquire new leases before continuing disruptive work.
+2. Close any older launcher dashboard through its normal close dialog, then open the updated `publish\agent-follow-up-notes-20261006\FullStackLauncher.exe` under the same Windows user and desktop session as Codex. The dashboard must already be running when a bridge tool is called. Keep using your existing `%LOCALAPPDATA%\FullStackLauncher\launcher.settings.json`; a new public checkout starts with an empty project library. Closing an older dashboard can prompt about unsaved drafts and running services, so resolve those prompts before opening the new copy. Reopening creates a new bridge instance; active agents must register and acquire new leases before continuing disruptive work.
 
 3. Register the local stdio MCP adapter with Codex:
 
    ```powershell
-   $launcherExe = 'C:\Users\samwo\OneDrive\Desktop\MyTools\FullStackDeveloperTool\publish\agent-restart-warnings-20261002\FullStackLauncher.exe'
+   $launcherExe = 'C:\Users\samwo\OneDrive\Desktop\MyTools\FullStackDeveloperTool\publish\agent-follow-up-notes-20261006\FullStackLauncher.exe'
    codex mcp add fullStackLauncher -- $launcherExe --agent-mcp
    codex mcp list
    ```
@@ -58,8 +58,10 @@ CRM instructions require restarting the verified Local API and every configured 
 | Tool | Purpose |
 | --- | --- |
 | `launcher_projects` | Configured projects, root paths, archive state, reservation status. |
-| `launcher_git_connections` | Project repositories, current branch, active connection, credential-free URLs and stable identities. Local metadata only; authentication is not checked. |
-| `launcher_record_git_changes` | Save a completed-task summary as one brief Caveman sentence in one bullet for the active connection and branch; requires a project session, no service lease. Never stages, commits or pushes. |
+| `launcher_git_connections` | All discovered project repositories, each repository's actual branch, active connection, credential-free URLs and stable identities. Local metadata only; authentication is not checked. |
+| `launcher_record_git_changes` | Save one repository-specific summary for the specified checkout's active connection and actual branch. Call separately for each changed repo; requires a project session, no service lease. Never stages, commits or pushes. |
+| `launcher_project_notes` | Read saved notes and follow-up provenance for one configured project; no project session required. Never changes notes or queues. |
+| `launcher_save_follow_up_note` | Save a suggested next prompt and context as a project note with known provenance and a durable retry receipt; requires an active project session, no service lease. Never queues or starts work. |
 | `launcher_services` | Configured services, cached process/HTTP state, URLs, ports, API environment selection. |
 | `launcher_service_status` | Fresh process and HTTP check for one service. |
 | `launcher_recent_activity` | Recent launcher lifecycle messages for one service. |
@@ -76,18 +78,55 @@ CRM instructions require restarting the verified Local API and every configured 
 | `launcher_release_project` | Release a held lease. |
 | `launcher_service_action` | Start, stop, or restart a configured service; an agent restart shows and broadcasts the fixed warning. |
 
+## Suggested follow-up notes
+
+After completing work, an agent can save potential next tasks discovered during that work to the project's **Notes**. These are reviewable suggestions. The person decides whether to edit, discard, or add a note to the queue through the existing controls. Saving a note never creates or enables a queue item, enables the queue, starts a task, or authorizes service actions. This routine does not authorize the agent to carry out its suggested work.
+
+Use this completion workflow:
+
+1. Call `launcher_projects` and `launcher_services` and match the actual checkout to the most specific configured project root or service working folder. Use that project's returned ID and registered session. Dashboard selection, prompt keywords, and similarly named projects do not establish ownership. No service reservation is needed to inspect or save notes.
+2. Save only useful issues or opportunities supported by evidence from the task. Read `launcher_project_notes` with `projectId` when useful to avoid duplicate suggestions. This read needs no project session. Continue with `nextOffset` when the response has more notes; a response may contain fewer notes than the requested limit to fit its size bound. One coordinating agent includes discoveries from delegated work once. Do not create speculative tasks simply to populate the list.
+3. Call `launcher_save_follow_up_note` with `projectId`, `sessionToken`, `updateId`, `name`, `prompt`, and `context`. The prompt must stand alone in a future chat. Write prompts and context in normal English, covering the observed issue or opportunity, relevant files or known page, completed work that led to the suggestion, verification evidence and limits, and the next task's clear scope. Keep secrets and unrelated private information out of the note.
+4. Include optional `sourceTaskId`, `sourcePrompt`, `pageUrl`, and `pageTitle` only when known from the actual task or captured page. A source prompt can preserve the request that led to the work; it is provenance rather than the proposed next task. Never guess a chat ID, page URL, or page title, and never imply a screenshot proves captured HTML/CSS. The dashboard generates the creation timestamp and retains the original registered agent identity.
+5. Use a stable unique `updateId` for each suggestion. If a response is lost, retry with that ID and exactly the same payload. A changed payload under the same ID is rejected; a different suggestion needs a new ID. Only a successful save response confirms that the note was persisted; the response includes the owning project ID, name, and root path. Heartbeat the session as usual and unregister any task-owned session when finished.
+
+Notes, queue entries, and task history display only for the selected project's stable ID. The Notes window title names that project. Switching projects preserves drafts but ignores late queue replies and operation feedback from the previous project. Agent saves do not switch the dashboard project or add their notes to another project's workspace.
+
+For example, after observing an actual failure during a completed page update, the tool payload could be:
+
+```json
+{
+  "projectId": "<returned project ID>",
+  "sessionToken": "<active project session token>",
+  "updateId": "<actual task ID>:follow-up-1",
+  "name": "Fix keyboard focus after closing the settings dialog",
+  "prompt": "Fix keyboard focus after closing the settings dialog. During the completed page styling update, Escape closed the dialog but did not return focus to its Settings button. Inspect the dialog close handler and focus restoration in the page component. Preserve the existing layout and saving behavior. Verify opening, saving, canceling, and closing with Escape, including keyboard-only navigation. Report the checks performed and any remaining limits.",
+  "context": "The page styling update is complete. Browser verification reproduced the missing focus return after Escape; saving behavior was unchanged. No production deployment was performed."
+}
+```
+
+The example describes a hypothetical observation; agents must substitute facts from their actual task. Include actual paths and known page details when they help the next task. Do not add unknown provenance fields merely to match an example.
+
+Notes, follow-up provenance, and retry receipts live in `%LOCALAPPDATA%\FullStackLauncher\project-tasks.json`, or the resolved custom settings filename plus `.project-tasks.json`. They remain separate from launcher settings and published defaults. Follow-up receipts were introduced in version 7; the current version 8 also retains queue delay settings. Task store version 8 reads versions 1 through 7 in memory and writes version 8 only during a normal atomic save. Older dashboards reject version 8 rather than dropping follow-up receipts or queue delay settings. Existing queue settings, notes, images, captured source, task receipts, and drafts must survive migration.
+
+Durable follow-up receipts survive visible note deletion. An identical retry confirms the original save outcome and does not recreate a deleted note; editing a visible note does not rewrite its original save receipt. Writes retain the existing locking, atomic replacement, and draft conflict checks. If a draft conflicts with an incoming note save, keep the draft available for explicit review rather than silently discarding it.
+
+Both the dashboard and MCP adapter need the updated build. If the project is not configured, the dashboard is unavailable, or the tool is missing, disclose that the suggestion was not saved. Do not invent IDs, edit `project-tasks.json` directly, change project settings, or queue work as a fallback.
+
 ## Agent change summaries
 
 Git discovery includes the configured project and service folders plus immediate child repositories under the project root. A database source repository at `<project root>\ORKidsDatabase`, alongside the API and frontend folders, needs its own `.git` file or directory but does not need a launcher service registration. Its SQL, stored procedures, and table schema remain ordinary source files. The bounded child scan checks `ORKidsDatabase` explicitly and skips linked child folders or linked `.git` metadata; it does not recursively search descendants or open a database connection.
 
-The Git workspace's **Select which repo**, the **Repo** selector in the **Next commit** settings cog, and `launcher_git_connections` share this discovery. Git preselects the current Next commit repository; returning from Git selects the repository opened there in Next commit. `launcher_record_git_changes` repeats the same discovery and validates the current repository, branch, and active connection before saving a report.
+The Git workspace's **Select which repo**, the **Repo** selector in the **Next commit** settings cog, and `launcher_git_connections` share this discovery. The Next commit picker displays the repository, its actual branch, and pending update count, and remembers the selected repository for each project during the session. Git preselects the current Next commit repository; returning from Git selects the repository opened there in Next commit. `launcher_record_git_changes` repeats the same discovery and validates the current repository, branch, and active connection before saving a report.
 
 After completing a source update:
 
-1. Call `launcher_projects` and match the repository's configured project/root or service folder. Call `launcher_git_connections` with that `projectId`. Use the returned repository whose `repositoryRoot` matches the checkout you changed. Never substitute another checkout or linked worktree.
+1. Resolve every changed file to its owning Git checkout. Call `launcher_projects` and match the most specific configured project/root or service folder. Call `launcher_git_connections` with that `projectId`. Match each changed checkout to its returned `repositoryRoot`; the response also identifies the owning project name and root. Never choose a repository from dashboard selection or API/frontend labels, or substitute another checkout or linked worktree.
 2. Use its current `branch` and `activeConnectionId`, and the matching connection's `connectionId`. Discovery prefers the explicit remote selected in the WPF Git workspace. With no saved choice, it uses the current branch's upstream or the only configured connection. An ambiguous or stale choice requires selection in the WPF Git workspace; do not guess. Discovery does not contact GitHub/Azure DevOps, read credentials, or prove authentication/push permission.
-3. Register or reuse an active session for this project. Call `launcher_record_git_changes` with `projectId`, `sessionToken`, `repositoryId`, `connectionId`, `branch`, `updateId`, and `bullets`. A service reservation is not needed. Use a stable unique update ID, such as `task-id:completed-update-1`, no more than 100 characters. Retry the same content with the same ID. Reusing an ID for different content is rejected; retrying an already consumed report does not enqueue it again.
-4. Submit exactly one bullet without a bullet prefix, logs, code blocks, secrets, or unsupported claims. Send exactly one bullet containing one short sentence in Caveman full style. Start with an action verb and describe the main completed result. Drop filler and unnecessary articles; preserve meaning and technical accuracy. Aim for 80 characters or fewer; never exceed 120. No extra sentences, detail lists, or changelog. Omit file paths, class names, method names, internal IDs, and implementation detail unless essential to understand the change. Keep detailed reasoning and validation in the task report. For example: "Shorten commit text." This commit-message style overrides the Caveman skill's normal-prose default for persisted text. The coordinating agent reports its work and delegated changes once; separate tasks submit separate reports. Heartbeat an existing long-lived session as usual and unregister when finished. Only a successful tool response confirms that the report was queued.
+3. Register or reuse an active session for this project. Call `launcher_record_git_changes` separately for every changed repository with its own `repositoryId`, `connectionId`, actual `branch`, repository-specific `bullets`, and the project's `projectId` and `sessionToken`. Leave unchanged repos alone. A service reservation is not needed. Use a distinct stable update ID for each repository report, such as `task-id:api-update-1`, no more than 100 characters. Retry the same content and scope with the same ID. Reusing an ID for different content or branch/connection is rejected. If a save outcome is uncertain, keep the original ID, content, and scope for retries; never move the report to a new branch after a switch. Refresh discovery and verify change ownership before reporting new work. If the original scope is unavailable, disclose the unresolved save instead of duplicating it elsewhere. Retrying an already consumed report does not enqueue it again. The save receipt returns the owning project name/root, repository root, remote name, and branch so callers can verify routing.
+4. Submit exactly one bullet per call without a bullet prefix, logs, code blocks, secrets, or unsupported claims. Send exactly one short sentence in Caveman full style describing that repository's main completed result. Start with an action verb. Drop filler and unnecessary articles; preserve meaning and technical accuracy. Aim for 80 characters or fewer; never exceed 120. No extra sentences, detail lists, or changelog. Omit file paths, class names, method names, internal IDs, and implementation detail unless essential to understand the change. Keep detailed reasoning and validation in the task report. For example: "Shorten commit text." This commit-message style overrides the Caveman skill's normal-prose default for persisted text. The coordinating agent reports its work and delegated changes once per changed repository; separate tasks submit separate reports. Heartbeat an existing long-lived session as usual and unregister when finished. Only a successful tool response confirms that a report was queued.
+
+For a project with API, frontend, and database repos on `feature/api`, `feature/ui`, and `feature/db`, an API-only change creates one report in the API checkout on `feature/api`. A task that also changes SQL creates a second report in the database checkout on `feature/db`. The frontend receives no report unless its files changed. Each repository's Next commit and Git review use only that repository's current branch and selected connection; custom drafts and read status remain isolated across repositories.
 
 Example `bullets`:
 
@@ -114,6 +153,8 @@ The updated ledger reads version 1 without changing it. Its next real save write
 The ledger lives in the checkout's Git metadata as `launcher-agent-changes.json`, outside tracked source and launcher settings. Linked worktrees have separate ledgers. Writes are locked and atomic; unsupported or damaged files are preserved. Only the exact reviewed entries are marked included after a confirmed new local commit. Cancellation, failed commits, and push-only retries retain pending reports. A later push failure does not requeue reports already included in a confirmed local commit. Reports arriving after review remain pending for the next review. If saving inclusion fails after Git commits, the app reports that failure and retains the reports for manual review. The ledger is bounded to 10,000 retained report receipts and 16 MiB; it fails visibly at capacity instead of dropping retry history.
 
 Both the running dashboard and the stdio MCP adapter must use the updated build. After replacing or changing the executable, restart the dashboard through its normal close flow and reconnect the Codex MCP server. Older connected adapters do not gain tools automatically. If tools are missing or the dashboard is unavailable, disclose that the summary was not queued; do not write another project's ledger or silently stage/commit/push instead.
+
+October 6, 2026 verification: Release build passed with zero warnings/errors and single-file publishing succeeded. Manual calls through the staged dashboard and real stdio MCP adapter discovered API/frontend/database child repositories on three distinct branches, including the database without a service. An API-only save created no frontend/database ledger. Separate saves stayed in their owning checkout/branch; unchanged retries created no duplicates. Changed retry content, another repository's connection, another project's session, and a stale branch were rejected. No commits, pushes, or remote authentication were exercised. Native picker, project-switch, and custom-draft interaction remain unverified because the review window could not be activated.
 
 ## Coordination and safety
 

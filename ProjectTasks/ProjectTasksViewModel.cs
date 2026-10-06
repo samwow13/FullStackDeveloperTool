@@ -1,5 +1,6 @@
 using System.Collections.ObjectModel;
 using System.ComponentModel;
+using System.Globalization;
 using System.IO;
 using System.Runtime.CompilerServices;
 using System.Text;
@@ -17,6 +18,7 @@ public sealed class ProjectTasksViewModel : INotifyPropertyChanged, IDisposable
     private readonly CodexModelCatalog _catalog = new();
     private readonly CancellationTokenSource _lifetime = new();
     private readonly Dictionary<string, NoteDraft> _drafts = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, string> _queueDelayDrafts = new(StringComparer.Ordinal);
     private readonly Func<string, IReadOnlyList<ProjectApplicationState>>? _applicationStates;
     private ProjectTaskData _data;
     private ProjectProfile? _project;
@@ -65,6 +67,7 @@ public sealed class ProjectTasksViewModel : INotifyPropertyChanged, IDisposable
         ToggleItemCommand = new TaskPanelCommand(ToggleQueueItem, () => CanEdit && SelectedQueue != null);
         RefreshModelsCommand = new TaskPanelCommand(async () => await RefreshModelsAsync(), () => !_loadingModels);
         UseCodexDefaultCommand = new TaskPanelCommand(UseCodexDefault, () => CanChooseDefaultModel && Models.Any(x => x.IsDefault));
+        SaveQueueDelayCommand = new TaskPanelCommand(SaveQueueDelay, () => CanEdit && _project != null && _queueDelayDrafts.ContainsKey(_project.Id));
         EnableAutoRunCommand = new TaskPanelCommand(async () => await SendQueueCommandAsync("enable"), () => CanEnableAutoRun);
         PauseQueueCommand = new TaskPanelCommand(async () => await SendQueueCommandAsync("pause"), () => CanPauseQueue);
         ToggleGlobalPauseCommand = new TaskPanelCommand(async () => await SendQueueCommandAsync("pause-all", !_data.PauseAllQueues), () => _store.CanSave && !_queueCommandBusy);
@@ -179,6 +182,26 @@ public sealed class ProjectTasksViewModel : INotifyPropertyChanged, IDisposable
         !string.IsNullOrWhiteSpace(receipt.ThreadId) && !string.IsNullOrWhiteSpace(receipt.TurnId);
     public string DraftStatus => HasDrafts ? $"{_drafts.Count} unsaved draft(s) across projects. Save all drafts before leaving." : "All note changes saved locally.";
     public string EditorHeading => SelectedNote == null ? "New note" : "Edit note";
+    private ProjectTaskNote? EditorStoredNote => _data.Notes.FirstOrDefault(note => note.Id == _selectedNote?.Id);
+    public bool HasAgentSource => EditorStoredNote?.AgentSource != null;
+    public string EditorAgentOrigin => EditorStoredNote is { AgentSource: { } source } note
+        ? $"Agent suggestion · {note.CreatedAt.ToLocalTime():g} · {source.Author}" : "";
+    public string EditorAgentSourceDetails
+    {
+        get
+        {
+            if (EditorStoredNote?.AgentSource is not { } source) return "";
+            var text = new StringBuilder();
+            text.AppendLine($"Submission: {source.UpdateId}");
+            if (source.SourceTaskId.Length > 0) text.AppendLine($"Source task: {source.SourceTaskId}");
+            if (source.PageTitle.Length > 0) text.AppendLine($"Page: {source.PageTitle}");
+            if (source.PageUrl.Length > 0) text.AppendLine($"Page URL: {source.PageUrl}");
+            text.AppendLine().AppendLine("Original context:").AppendLine(source.Context);
+            if (source.SourcePrompt.Length > 0)
+                text.AppendLine().AppendLine("Source prompt:").AppendLine(source.SourcePrompt);
+            return text.ToString().TrimEnd();
+        }
+    }
     public string EditorImageCount => $"{EditorImages.Count} / {ProjectTaskNoteImage.MaximumCount} images";
     public string CompleteLabel => SelectedNote?.IsCompleted == true ? "Reopen note" : "Mark complete";
     public string ItemEnabledLabel => SelectedQueue?.Enabled == true ? "Disable item" : "Enable item";
@@ -202,6 +225,33 @@ public sealed class ProjectTasksViewModel : INotifyPropertyChanged, IDisposable
         }
     }
     public string EditorName { get => _editorName; set { _editorName = value; Changed(); CaptureDraft(); } }
+    public string QueueDelayMinutesText
+    {
+        get => _project != null && _queueDelayDrafts.TryGetValue(_project.Id, out var draft)
+            ? draft : SavedQueueDelayMinutes.ToString(CultureInfo.InvariantCulture);
+        set
+        {
+            if (_project == null || value == QueueDelayMinutesText) return;
+            if (value == SavedQueueDelayMinutes.ToString(CultureInfo.InvariantCulture))
+                _queueDelayDrafts.Remove(_project.Id);
+            else
+                _queueDelayDrafts[_project.Id] = value;
+            Changed();
+            Changed(nameof(QueueDelayStatus));
+            CommandManager.InvalidateRequerySuggested();
+        }
+    }
+    private int SavedQueueDelayMinutes => _data.Queues.FirstOrDefault(x => x.ProjectId == _project?.Id)?.DelayBetweenTasksMinutes ?? 0;
+    public string QueueDelayStatus => _project == null ? "Select a project to set its queue delay."
+        : !TryReadQueueDelay(out _) ? "Enter a whole number from 0 to 10080 minutes."
+        : _queueDelayDrafts.ContainsKey(_project.Id) ? "Unsaved delay. Select Save delay to apply it."
+        : SavedQueueDelayMinutes == 0 ? "Saved delay: 0 minutes (start immediately)."
+        : $"Saved delay: {SavedQueueDelayMinutes} minute{(SavedQueueDelayMinutes == 1 ? "" : "s")}.";
+
+    private bool TryReadQueueDelay(out int minutes) => int.TryParse(QueueDelayMinutesText.Trim(),
+        NumberStyles.None, CultureInfo.InvariantCulture, out minutes) &&
+        minutes is >= 0 and <= ProjectQueueConfiguration.MaximumDelayMinutes;
+
     public string EditorPrompt { get => _editorPrompt; set { _editorPrompt = value; Changed(); CaptureDraft(); } }
 
     public NoteRow? SelectedNote
@@ -301,6 +351,7 @@ public sealed class ProjectTasksViewModel : INotifyPropertyChanged, IDisposable
     public ICommand ToggleItemCommand { get; }
     public ICommand RefreshModelsCommand { get; }
     public ICommand UseCodexDefaultCommand { get; }
+    public ICommand SaveQueueDelayCommand { get; }
     public ICommand EnableAutoRunCommand { get; }
     public ICommand PauseQueueCommand { get; }
     public ICommand ToggleGlobalPauseCommand { get; }
@@ -725,27 +776,32 @@ public sealed class ProjectTasksViewModel : INotifyPropertyChanged, IDisposable
             if (_disposed) return false;
             if (!_store.CanSave)
             {
-                Feedback = reply is { Success: true }
-                    ? "The queue owner saved Delete, but the task store could not be refreshed. Reload to inspect the saved receipt."
-                    : _store.LoadWarning ?? "Task activity could not be refreshed.";
+                if (_project?.Id == projectId)
+                    Feedback = reply is { Success: true }
+                        ? "The queue owner saved Delete, but the task store could not be refreshed. Reload to inspect the saved receipt."
+                        : _store.LoadWarning ?? "Task activity could not be refreshed.";
+                else if (_store.LoadWarning is { } warning)
+                    Feedback = warning;
                 return false;
             }
             if (!data.Receipts.Any(receipt => receipt.AttemptId == attemptId &&
                     receipt.Purpose == ProjectTaskExecutionPurpose.QueueItem &&
                     receipt.Snapshot.ProjectId == projectId && receipt.ActivityDeletedAt is not null))
             {
-                Feedback = reply is { Success: true }
-                    ? "The queue owner reported Delete, but the saved receipt is unchanged. Reload and retry."
-                    : reply?.Message ?? "Task deletion was not saved. Reload and retry.";
+                if (_project?.Id == projectId)
+                    Feedback = reply is { Success: true }
+                        ? "The queue owner reported Delete, but the saved receipt is unchanged. Reload and retry."
+                        : reply?.Message ?? "Task deletion was not saved. Reload and retry.";
                 return false;
             }
             _data = data;
             RebuildRows(_selectedNote?.Id, _selectedQueue?.Id);
             var abandoned = data.Receipts.Any(receipt => receipt.AttemptId == attemptId &&
                 receipt.Snapshot.ProjectId == projectId && receipt.QueueAbandonedAt is not null);
-            Feedback = abandoned
-                ? "Task deleted from tracking. Its attempt will not retry. Queues are paused until you resume them; the saved outcome remains available in All attempts."
-                : "Task deleted from tracking. Its saved receipt and outcome remain available in All attempts.";
+            if (_project?.Id == projectId)
+                Feedback = abandoned
+                    ? "Task deleted from tracking. Its attempt will not retry. Queues are paused until you resume them; the saved outcome remains available in All attempts."
+                    : "Task deleted from tracking. Its saved receipt and outcome remain available in All attempts.";
             return true;
         }
         catch (OperationCanceledException) when (_lifetime.IsCancellationRequested)
@@ -758,10 +814,11 @@ public sealed class ProjectTasksViewModel : INotifyPropertyChanged, IDisposable
             if (!_disposed)
             {
                 Reload();
-                Feedback = ex is ArgumentException or InvalidOperationException ||
-                    ex is IOException && (ex.Message.StartsWith("An older queue owner", StringComparison.Ordinal) ||
-                        ex.Message.StartsWith("The queue owner is running", StringComparison.Ordinal)) ? ex.Message :
-                    "Task deletion was not saved. Check access to the task store, then reload and retry.";
+                if (_project?.Id == projectId)
+                    Feedback = ex is ArgumentException or InvalidOperationException ||
+                        ex is IOException && (ex.Message.StartsWith("An older queue owner", StringComparison.Ordinal) ||
+                            ex.Message.StartsWith("The queue owner is running", StringComparison.Ordinal)) ? ex.Message :
+                        "Task deletion was not saved. Check access to the task store, then reload and retry.";
             }
             return false;
         }
@@ -848,6 +905,7 @@ public sealed class ProjectTasksViewModel : INotifyPropertyChanged, IDisposable
         string? itemId = null, bool confirmedRetry = false)
     {
         if (_queueCommandBusy || (command != "pause-all" && _project == null)) return;
+        var projectId = _project?.Id;
         if (command == "stop")
         {
             if (attemptId is not null && !CanStopTask(attemptId))
@@ -863,10 +921,13 @@ public sealed class ProjectTasksViewModel : INotifyPropertyChanged, IDisposable
         try
         {
             var reply = await QueueOwnerClient.SendAsync(_store.StorePath, command,
-                _project?.Id, paused, startIfMissing: true, _lifetime.Token,
+                projectId, paused, startIfMissing: true, _lifetime.Token,
                 attemptId, confirmedNoActiveTask, itemId, confirmedRetry);
             if (_disposed) return;
             Reload();
+            // Refresh shared storage, but keep the owner's project-specific
+            // reply out of a workspace selected while the request was pending.
+            if (_project?.Id != projectId) return;
             _ownerMessage = reply.Message;
             _ownerUnavailable = !reply.Success;
             _ownerCanStopCurrent = reply.CanStopCurrent;
@@ -877,7 +938,7 @@ public sealed class ProjectTasksViewModel : INotifyPropertyChanged, IDisposable
         catch (OperationCanceledException) when (_lifetime.IsCancellationRequested) { }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or InvalidOperationException or System.Text.Json.JsonException)
         {
-            if (!_disposed) Feedback = ex.Message;
+            if (!_disposed && _project?.Id == projectId) Feedback = ex.Message;
         }
         finally
         {
@@ -935,7 +996,7 @@ public sealed class ProjectTasksViewModel : INotifyPropertyChanged, IDisposable
         catch (OperationCanceledException) when (_lifetime.IsCancellationRequested) { }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or System.Text.Json.JsonException)
         {
-            if (!_disposed)
+            if (!_disposed && _project?.Id == projectId)
             {
                 _ownerMessage = ex is IOException && ex.Message.StartsWith("An older queue owner", StringComparison.Ordinal)
                     ? ex.Message : "";
@@ -997,9 +1058,35 @@ public sealed class ProjectTasksViewModel : INotifyPropertyChanged, IDisposable
     private void SaveQueueDefaults(string model, string effort)
     {
         if (_project == null || !Models.Any(x => x.Id == model && x.SupportedReasoningEfforts.Any(e => e.Id == effort))) return;
+        SaveQueueConfiguration(queue =>
+        {
+            queue.DefaultModelId = model;
+            queue.DefaultReasoningEffort = effort;
+        }, "Codex model and thinking level saved for this queue. Future dispatch uses this selection, including existing pending items.", "Model and thinking level");
+    }
+
+    private void SaveQueueDelay()
+    {
+        if (!CanEdit || _project == null) return;
+        if (!TryReadQueueDelay(out var minutes))
+        {
+            Feedback = "Queue delay was not saved. Enter a whole number from 0 to 10080 minutes.";
+            return;
+        }
+        var projectId = _project.Id;
+        if (SaveQueueConfiguration(queue => queue.DelayBetweenTasksMinutes = minutes,
+            $"Queue delay saved: {minutes} minutes after successful completion. Any current wait uses the new delay.", "Queue delay"))
+        {
+            _queueDelayDrafts.Remove(projectId);
+            RefreshBindings();
+        }
+    }
+
+    private bool SaveQueueConfiguration(Action<ProjectQueueConfiguration> change, string savedMessage, string settingName)
+    {
+        if (_project == null) return false;
         var projectId = _project.Id;
         var folder = _folder;
-        const string savedMessage = "Codex model and thinking level saved for this queue. Future dispatch uses this selection, including existing pending items.";
         // The queue owner saves receipts independently. Refresh the optimistic
         // baseline before editing, then retry if it writes between load and save.
         for (var attempt = 0; attempt < 3; attempt++)
@@ -1007,9 +1094,9 @@ public sealed class ProjectTasksViewModel : INotifyPropertyChanged, IDisposable
             var latest = _store.Load();
             if (!_store.CanSave)
             {
-                Feedback = _store.LoadWarning ?? "Project tasks could not be loaded. Thinking level was not saved.";
+                Feedback = _store.LoadWarning ?? $"Project tasks could not be loaded. {settingName} was not saved.";
                 RefreshBindings();
-                return;
+                return false;
             }
             _data = latest;
             var candidate = ProjectTaskStore.Clone(latest);
@@ -1019,29 +1106,28 @@ public sealed class ProjectTasksViewModel : INotifyPropertyChanged, IDisposable
                 queue = new ProjectQueueConfiguration { ProjectId = projectId, AssignedFolder = folder };
                 candidate.Queues.Add(queue);
             }
-            queue.DefaultModelId = model;
-            queue.DefaultReasoningEffort = effort;
+            change(queue);
             try
             {
                 _store.Save(candidate);
                 _data = candidate;
                 RebuildRows(_selectedNote?.Id, _selectedQueue?.Id);
                 Feedback = savedMessage;
-                return;
+                return true;
             }
-            catch (InvalidOperationException ex) when (ex.Message.StartsWith(
-                "Project tasks changed in another launcher or editor.", StringComparison.Ordinal) && attempt < 2)
+            catch (ProjectTaskStoreConflictException) when (attempt < 2)
             {
                 // Retry with the owner's newest receipt and queue state.
             }
             catch (Exception ex) when (ex is ArgumentException or InvalidOperationException or IOException or UnauthorizedAccessException)
             {
                 Feedback = ex is ArgumentException or InvalidOperationException ? ex.Message :
-                    "Thinking level was not saved. Check access to the task store, then try again.";
+                    $"{settingName} was not saved. Check access to the task store, then try again.";
                 RebuildRows(_selectedNote?.Id, _selectedQueue?.Id);
-                return;
+                return false;
             }
         }
+        return false;
     }
 
     public Task LoadModelsAsync() => RefreshModelsAsync();
@@ -1142,7 +1228,7 @@ public sealed class ProjectTasksViewModel : INotifyPropertyChanged, IDisposable
             if (_project != null)
             {
                 foreach (var note in _data.Notes.Where(x => x.ProjectId == _project.Id && !x.IsArchived).OrderBy(x => x.Order).ThenBy(x => x.CreatedAt))
-                    Notes.Add(new(note.Id, note.ProjectId, note.Name, note.Prompt, note.IsCompleted, _data.QueueItems.Any(x => x.NoteId == note.Id), false, note.Images.Count));
+                    Notes.Add(new(note.Id, note.ProjectId, note.Name, note.Prompt, note.IsCompleted, _data.QueueItems.Any(x => x.NoteId == note.Id), false, note.Images.Count, note.AgentSource != null, note.CreatedAt));
                 foreach (var draft in _drafts.Values.Where(x => x.ProjectId == _project.Id && x.NoteId != null && !_data.Notes.Any(n => n.Id == x.NoteId)))
                     Notes.Add(new(draft.NoteId!, draft.ProjectId, string.IsNullOrWhiteSpace(draft.Name) ? "Recovered note draft" : draft.Name, draft.Prompt, false, false, true, draft.Images.Count));
                 foreach (var item in _data.QueueItems.Where(x => x.ProjectId == _project.Id).OrderBy(x => x.Order))
@@ -1351,11 +1437,12 @@ public sealed class ProjectTasksViewModel : INotifyPropertyChanged, IDisposable
     private sealed record NoteDraft(string ProjectId, string? NoteId, string Name, string Prompt, List<ProjectTaskNoteImage> Images);
 }
 
-public sealed record NoteRow(string Id, string ProjectId, string Name, string Prompt, bool IsCompleted, bool IsQueued, bool IsDraftOnly = false, int ImageCount = 0)
+public sealed record NoteRow(string Id, string ProjectId, string Name, string Prompt, bool IsCompleted, bool IsQueued, bool IsDraftOnly = false, int ImageCount = 0, bool IsAgentSuggestion = false, DateTimeOffset? CreatedAt = null)
 {
     public string Bullet => IsCompleted ? "✓" : "•";
     public string Detail => (IsDraftOnly ? "Recovered draft · save as a new note" : IsCompleted ? "Complete" : IsQueued ? "In queue" : "Note only") +
-        (ImageCount == 0 ? "" : $" · {ImageCount} image{(ImageCount == 1 ? "" : "s")}");
+        (ImageCount == 0 ? "" : $" · {ImageCount} image{(ImageCount == 1 ? "" : "s")}") +
+        (IsAgentSuggestion ? $" · Agent suggestion · {CreatedAt?.ToLocalTime():g}" : "");
     public string Preview => Prompt.Replace('\r', ' ').Replace('\n', ' ').Trim();
 }
 

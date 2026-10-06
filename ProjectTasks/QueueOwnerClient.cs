@@ -14,13 +14,16 @@ namespace FullStackLauncher.ProjectTasks;
 /// <summary>Versioned, current-user commands for the independent queue owner.</summary>
 internal static class QueueOwnerClient
 {
-    // Owner and dashboard must agree on the task-store schema before any queue
+    // Owner and dashboard must agree on queue behavior and task-store schema before any queue
     // command. Version 2 added receipt images; version 3 added guarded dismissal
     // for attempts with no recorded Codex submission. Version 4 requires exact
     // retry identities and retained task activity presentation fields. Version 5
     // records explicit deletion/abandonment separately from verified review.
     // Version 6 protects saved browser source and its per-image prompt choice.
-    internal const int ProtocolVersion = 6;
+    // Version 7 retains agent follow-up provenance and retry receipts.
+    // Version 8 enforces the saved delay between confirmed queue completions.
+    // Version 9 requires a live dashboard's Long Running Task permit for dispatch.
+    internal const int ProtocolVersion = 9;
     private const string OlderOwnerMessage =
         "An older queue owner is still running. Automatic replacement requires a verified idle status and exact process identity. Exit it from the Full Stack Launcher queue tray icon, then reopen Notes & queue.";
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
@@ -61,7 +64,7 @@ internal static class QueueOwnerClient
                 if (!IsOwnerMutexHeld(storePath)) throw new IOException(OlderOwnerMessage);
 
                 LegacyStatus? idle = null;
-                foreach (var version in new[] { 5, 4, 3, 2 })
+                foreach (var version in new[] { 8, 7, 6, 5, 4, 3, 2 })
                 {
                     var status = await TryLegacyStatusAsync(storePath, version, cancellationToken);
                     if (status is null) continue;
@@ -78,7 +81,7 @@ internal static class QueueOwnerClient
 
                 StopVerifiedIdleOwner(storePath, idle);
                 // Store.Save performs an optimistic conflict check and writes the
-                // migrated v6 snapshot only after the old process has exited.
+                // migrated snapshot only after the old process has exited.
                 MigrateStoreAfterReplacement(storePath);
             }, cancellationToken);
         }

@@ -1,0 +1,88 @@
+<Window x:Class="FullStackLauncher.DeveloperToolsConfigurationWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="Tool configuration" Icon="pack://application:,,,/Assets/launcher.ico" Width="690" Height="460" MinWidth="600" MinHeight="360"
+        WindowStartupLocation="CenterOwner" ShowInTaskbar="False" UseLayoutRounding="True"
+        Background="{DynamicResource BackgroundBrush}" Foreground="{DynamicResource TextBrush}" FontFamily="Segoe UI">
+    <Window.Resources>
+        <Style TargetType="TabItem">
+            <Setter Property="Foreground" Value="{DynamicResource TextBrush}"/>
+            <Setter Property="Template"><Setter.Value>
+                <ControlTemplate TargetType="TabItem">
+                    <Border x:Name="Frame" Background="#1B2432" BorderBrush="Transparent" BorderThickness="1" CornerRadius="6" Padding="12,7" Margin="0,0,8,0">
+                        <ContentPresenter ContentSource="Header" TextElement.Foreground="{TemplateBinding Foreground}"/>
+                    </Border>
+                    <ControlTemplate.Triggers>
+                        <Trigger Property="IsSelected" Value="True"><Setter TargetName="Frame" Property="Background" Value="#203C3B"/><Setter TargetName="Frame" Property="BorderBrush" Value="#397767"/></Trigger>
+                        <Trigger Property="IsMouseOver" Value="True"><Setter TargetName="Frame" Property="Background" Value="#243444"/></Trigger>
+                        <Trigger Property="IsKeyboardFocused" Value="True"><Setter TargetName="Frame" Property="BorderBrush" Value="{DynamicResource AccentBrush}"/></Trigger>
+                    </ControlTemplate.Triggers>
+                </ControlTemplate>
+            </Setter.Value></Setter>
+        </Style>
+        <Style TargetType="TabControl">
+            <Setter Property="Template"><Setter.Value>
+                <ControlTemplate TargetType="TabControl">
+                    <Grid>
+                        <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="*"/></Grid.RowDefinitions>
+                        <TabPanel IsItemsHost="True" Margin="0,0,0,12" KeyboardNavigation.TabIndex="1"/>
+                        <Border Grid.Row="1" Background="{DynamicResource CardBrush}" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1" CornerRadius="8" Padding="12">
+                            <ContentPresenter x:Name="PART_SelectedContentHost" ContentSource="SelectedContent"/>
+                        </Border>
+                    </Grid>
+                </ControlTemplate>
+            </Setter.Value></Setter>
+        </Style>
+        <Style x:Key="CompactToolRow" TargetType="ListBoxItem" BasedOn="{StaticResource {x:Type ListBoxItem}}">
+            <Setter Property="Padding" Value="8,7"/><Setter Property="Margin" Value="0,0,0,2"/>
+        </Style>
+    </Window.Resources>
+    <Grid Margin="22">
+        <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="*"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
+        <Grid Margin="0,0,0,16">
+            <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+            <TextBlock Text="Tool configuration" FontSize="18" FontWeight="SemiBold" VerticalAlignment="Center"/>
+            <Button Grid.Column="1" Content="Credentials…" Click="ManageCredentials_Click" Padding="10,6" AutomationProperties.Name="Manage tool credential profiles"/>
+        </Grid>
+        <TabControl x:Name="ToolTabs" Grid.Row="1" SelectionChanged="ToolTabs_SelectionChanged" AutomationProperties.Name="Tool configuration views">
+            <TabItem Header="Saved tools" AutomationProperties.Name="Saved tools">
+                <Grid>
+                    <Grid.RowDefinitions><RowDefinition Height="*"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
+                    <Grid>
+                        <ListBox x:Name="SavedToolsList" SelectionChanged="SavedToolsList_SelectionChanged" ItemContainerStyle="{StaticResource CompactToolRow}" AutomationProperties.Name="Configured developer tools">
+                            <ListBox.ItemTemplate><DataTemplate><TextBlock Text="{Binding Name}" TextTrimming="CharacterEllipsis" ToolTip="{Binding Name}"/></DataTemplate></ListBox.ItemTemplate>
+                        </ListBox>
+                        <TextBlock x:Name="EmptySavedHint" Text="No saved tools" Foreground="{DynamicResource MutedBrush}" HorizontalAlignment="Center" VerticalAlignment="Center" IsHitTestVisible="False"/>
+                    </Grid>
+                    <WrapPanel Grid.Row="1" Margin="0,12,0,0">
+                        <Button x:Name="EditToolButton" Content="Edit…" Click="EditTool_Click" IsEnabled="False" Padding="12,7" Margin="0,0,8,0" AutomationProperties.Name="Edit selected tool"/>
+                        <Button x:Name="ViewCommandButton" Content="View command…" Click="ViewCommand_Click" IsEnabled="False" Padding="12,7" Margin="0,0,8,0" AutomationProperties.Name="View selected tool command"/>
+                        <Button x:Name="RemoveToolButton" Content="Remove" Click="RemoveTool_Click" IsEnabled="False" Padding="12,7" Style="{StaticResource DangerButton}" AutomationProperties.Name="Remove selected tool"/>
+                    </WrapPanel>
+                </Grid>
+            </TabItem>
+            <TabItem x:Name="InstalledAppsTab" Header="Installed apps" AutomationProperties.Name="Installed desktop apps"
+                     ToolTip="Finds installed desktop apps from Start Menu shortcuts and registered application paths.">
+                <Grid>
+                    <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="*"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
+                    <DockPanel Margin="0,0,0,10">
+                        <Label DockPanel.Dock="Left" Content="_Search" Target="{Binding ElementName=InstalledSearchInput}" VerticalAlignment="Center" Foreground="{DynamicResource MutedBrush}" Padding="0,0,10,0"/>
+                        <TextBox x:Name="InstalledSearchInput" TextChanged="InstalledSearch_TextChanged" PreviewKeyDown="InstalledSearch_KeyDown" MinHeight="32" AutomationProperties.Name="Search installed desktop apps" ToolTip="Search app names or installation paths."/>
+                    </DockPanel>
+                    <TextBlock x:Name="InstalledStatusText" Grid.Row="1" Foreground="{DynamicResource MutedBrush}" TextWrapping="Wrap" Margin="0,0,0,8" Visibility="Collapsed" AutomationProperties.LiveSetting="Polite"/>
+                    <ListBox x:Name="InstalledAppsList" Grid.Row="2" SelectionChanged="InstalledAppsList_SelectionChanged" PreviewKeyDown="InstalledApps_KeyDown" ItemContainerStyle="{StaticResource CompactToolRow}" AutomationProperties.Name="Installed desktop apps, alphabetical">
+                        <ListBox.ItemTemplate><DataTemplate><TextBlock Text="{Binding Name}" TextTrimming="CharacterEllipsis" ToolTip="{Binding FileName}"/></DataTemplate></ListBox.ItemTemplate>
+                    </ListBox>
+                    <Grid Grid.Row="3" Margin="0,12,0,0">
+                        <Button x:Name="RefreshInstalledButton" Content="Refresh" Click="RefreshInstalled_Click" Padding="12,7" HorizontalAlignment="Left" AutomationProperties.Name="Refresh installed apps"/>
+                        <Button x:Name="AddInstalledButton" Content="Add selected…" Click="AddInstalled_Click" IsEnabled="False" Padding="12,7" HorizontalAlignment="Right" AutomationProperties.Name="Add selected installed app"/>
+                    </Grid>
+                </Grid>
+            </TabItem>
+        </TabControl>
+        <StackPanel Grid.Row="2" Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,16,0,0">
+            <Button Content="Cancel" IsCancel="True" MinWidth="90" Margin="0,0,10,0"/>
+            <Button Content="Done" Click="Done_Click" IsDefault="True" MinWidth="90" Style="{StaticResource PrimaryButton}" ToolTip="Keep these changes in the tool list. Save tools applies them to your library."/>
+        </StackPanel>
+    </Grid>
+</Window>

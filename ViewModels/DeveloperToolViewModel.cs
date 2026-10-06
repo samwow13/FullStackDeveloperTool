@@ -8,14 +8,20 @@ public sealed class DeveloperToolViewModel(DeveloperTool tool) : ObservableObjec
     private DeveloperToolTarget? _target;
     private string _detail = "Finding shortcut…";
     private bool _opening;
+    private bool _isDetailsExpanded;
     public DeveloperTool Profile { get; } = tool;
     public string Name => Profile.Name;
-    public string Label => Profile.Kind == "Website" ? "Website" : Profile.Kind == "PgAdmin" ? "Database administration" : "Desktop app";
+    public string Label => Profile.Kind.Equals("Website", StringComparison.OrdinalIgnoreCase) ? "Website" : "Desktop app";
     public string Detail => _detail;
     public string Status => _opening ? "Opening…" : _target is not null ? "Ready" : "Set location";
     public bool CanOpen => _target is not null && !_opening;
     public DeveloperToolTarget? Target => _target;
     public bool IsOpening { get => _opening; set { _opening = value; Update(); } }
+    public bool IsDetailsExpanded
+    {
+        get => _isDetailsExpanded;
+        set { if (_isDetailsExpanded == value) return; _isDetailsExpanded = value; Changed(); }
+    }
     public void SetTarget(DeveloperToolTarget? target, string? error = null)
     {
         _target = target;

@@ -1,10 +1,8 @@
 using System.Collections.ObjectModel;
 using System.IO;
 using System.Windows;
-using System.Windows.Controls;
 using FullStackLauncher.Models;
 using FullStackLauncher.Services;
-using Microsoft.Win32;
 
 namespace FullStackLauncher;
 
@@ -12,6 +10,7 @@ public partial class DeveloperToolsWindow : Window
 {
     private readonly string _settingsDirectory;
     private readonly ObservableCollection<DeveloperTool> _tools;
+    private readonly IReadOnlyList<DeveloperTool> _savedTools;
     public List<DeveloperTool> Result { get; private set; }
 
     public DeveloperToolsWindow(IEnumerable<DeveloperTool> tools, string settingsDirectory)
@@ -19,135 +18,53 @@ public partial class DeveloperToolsWindow : Window
         InitializeComponent();
         _settingsDirectory = Path.GetFullPath(settingsDirectory);
         Result = tools.Select(Clone).ToList();
+        _savedTools = Result.Select(Clone).ToArray();
         _tools = new ObservableCollection<DeveloperTool>(Result);
-        SettingsDirectoryHint.Text = $"Relative executable paths start at: {_settingsDirectory}";
         ToolsList.ItemsSource = _tools;
-        ToolsList.SelectedItem = _tools.FirstOrDefault();
-        UpdateSelection();
+        UpdateEmptyState();
+        Width = Math.Min(Width, SystemParameters.WorkArea.Width);
+        MaxHeight = SystemParameters.WorkArea.Height;
+        Loaded += (_, _) => AddDesktopButton.Focus();
     }
 
-    private void ToolsList_SelectionChanged(object sender, SelectionChangedEventArgs e) => UpdateSelection();
-
-    private void UpdateSelection()
+    private void AddApplication_Click(object sender, RoutedEventArgs e)
     {
-        if (ToolForm == null) return;
-        var tool = ToolsList.SelectedItem as DeveloperTool;
-        ToolForm.DataContext = tool;
-        ToolForm.Visibility = tool == null ? Visibility.Collapsed : Visibility.Visible;
-        EmptyToolsHint.Visibility = tool == null ? Visibility.Visible : Visibility.Collapsed;
-        RemoveToolButton.IsEnabled = tool != null;
-        UpdateTargetHint();
+        var picker = new InstalledDesktopAppsWindow { Owner = this };
+        if (picker.ShowDialog() != true || picker.Result is not { } app) return;
+        AddTool(new DeveloperTool { Name = app.Name, Kind = "Application", Target = app.FileName });
     }
-
-    private void ToolName_LostFocus(object sender, RoutedEventArgs e) => ToolsList.Items.Refresh();
-
-    private void KindSelector_SelectionChanged(object sender, SelectionChangedEventArgs e) => UpdateTargetHint();
-
-    private void UpdateTargetHint()
-    {
-        if (TargetLabel == null || TargetHint == null || BrowseTargetButton == null) return;
-        var kind = KindSelector.SelectedValue as string;
-        BrowseTargetButton.Visibility = kind == "Website" ? Visibility.Collapsed : Visibility.Visible;
-        switch (kind)
-        {
-            case "PgAdmin":
-                TargetLabel.Text = "pgAdmin executable override (optional)";
-                TargetHint.Text = "Leave this blank to find your installed pgAdmin 4 automatically. " +
-                    "It opens pgAdmin's own desktop/login window, so you do not need to track a changing local port.";
-                break;
-            case "Website":
-                TargetLabel.Text = "Website URL";
-                TargetHint.Text = "Use a full http:// or https:// address. For pgAdmin hosted on a server, " +
-                    "save its login page URL here. The link opens in your default browser.";
-                break;
-            default:
-                TargetLabel.Text = "Application executable";
-                TargetHint.Text = "Choose an existing .exe file. Relative paths and environment variables such as " +
-                    "%LOCALAPPDATA% or %ProgramFiles% are supported. Enter the file path without command-line arguments.";
-                break;
-        }
-    }
-
-    private void AddApplication_Click(object sender, RoutedEventArgs e) => AddTool(new DeveloperTool
-    {
-        Name = "New desktop app", Kind = "Application"
-    });
 
     private void AddWebsite_Click(object sender, RoutedEventArgs e) => AddTool(new DeveloperTool
     {
-        Name = "New website", Kind = "Website", Target = "https://"
+        Name = "", Kind = "Website", Target = "https://"
     });
-
-    private void AddPgAdmin_Click(object sender, RoutedEventArgs e)
-    {
-        var tool = DeveloperTool.PgAdmin();
-        tool.Id = Guid.NewGuid().ToString("N");
-        AddTool(tool);
-    }
 
     private void AddTool(DeveloperTool tool)
     {
-        while (_tools.Any(existing => existing.Id.Equals(tool.Id, StringComparison.OrdinalIgnoreCase)))
-            tool.Id = Guid.NewGuid().ToString("N");
-        _tools.Add(tool);
-        ToolsList.SelectedItem = tool;
-        ToolsList.ScrollIntoView(tool);
+        var editor = new DeveloperToolEditorWindow(tool, _settingsDirectory, isNew: true, tools: _savedTools.Concat(_tools).ToArray()) { Owner = this };
+        if (editor.ShowDialog() != true) return;
+        var candidate = Clone(editor.Result);
+        while (_tools.Any(existing => existing.Id.Equals(candidate.Id, StringComparison.OrdinalIgnoreCase)))
+            candidate.Id = Guid.NewGuid().ToString("N");
+        _tools.Add(candidate);
+        ToolsList.SelectedItem = candidate;
+        ToolsList.ScrollIntoView(candidate);
+        UpdateEmptyState();
     }
 
-    private void RemoveTool_Click(object sender, RoutedEventArgs e)
+    private void Configuration_Click(object sender, RoutedEventArgs e)
     {
-        if (ToolsList.SelectedItem is not DeveloperTool tool) return;
-        var index = ToolsList.SelectedIndex;
-        _tools.Remove(tool);
-        if (_tools.Count > 0) ToolsList.SelectedIndex = Math.Min(index, _tools.Count - 1);
-        UpdateSelection();
+        var configuration = new DeveloperToolsConfigurationWindow(_tools, _settingsDirectory, _savedTools) { Owner = this };
+        if (configuration.ShowDialog() != true) return;
+        _tools.Clear();
+        foreach (var tool in configuration.Result) _tools.Add(Clone(tool));
+        UpdateEmptyState();
     }
 
-    private void BrowseTarget_Click(object sender, RoutedEventArgs e)
+    private void UpdateEmptyState()
     {
-        if (ToolsList.SelectedItem is not DeveloperTool tool) return;
-        var dialog = new OpenFileDialog
-        {
-            Title = tool.Kind == "PgAdmin" ? "Choose pgAdmin4.exe" : "Choose an application executable",
-            Filter = "Windows applications (*.exe)|*.exe",
-            CheckFileExists = true, Multiselect = false
-        };
-        try
-        {
-            if (!string.IsNullOrWhiteSpace(tool.Target))
-            {
-                var path = Path.GetFullPath(Environment.ExpandEnvironmentVariables(tool.Target.Trim()), _settingsDirectory);
-                var directory = Path.GetDirectoryName(path);
-                if (Directory.Exists(directory)) dialog.InitialDirectory = directory;
-                if (File.Exists(path)) dialog.FileName = path;
-            }
-        }
-        catch (Exception ex) when (ex is ArgumentException or NotSupportedException or IOException) { }
-        if (dialog.ShowDialog(this) != true) return;
-        tool.Target = PortableExecutablePath(dialog.FileName);
-        // Configuration models intentionally have no UI notifications.
-        ToolForm.DataContext = null;
-        ToolForm.DataContext = tool;
-        UpdateTargetHint();
-    }
-
-    private string PortableExecutablePath(string executable)
-    {
-        var fullPath = Path.GetFullPath(executable);
-        var settingsPrefix = _settingsDirectory.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar) + Path.DirectorySeparatorChar;
-        if (fullPath.StartsWith(settingsPrefix, StringComparison.OrdinalIgnoreCase))
-            return Path.GetRelativePath(_settingsDirectory, fullPath);
-        var environmentRoots = new[] { "LOCALAPPDATA", "APPDATA", "ProgramFiles", "ProgramFiles(x86)", "USERPROFILE" }
-            .Select(name => (Name: name, Root: Environment.GetEnvironmentVariable(name)))
-            .Where(entry => !string.IsNullOrWhiteSpace(entry.Root))
-            .OrderByDescending(entry => entry.Root!.Length);
-        foreach (var entry in environmentRoots)
-        {
-            var prefix = Path.GetFullPath(entry.Root!).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar) + Path.DirectorySeparatorChar;
-            if (fullPath.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
-                return $"%{entry.Name}%{Path.DirectorySeparatorChar}{fullPath[prefix.Length..]}";
-        }
-        return Path.GetRelativePath(_settingsDirectory, fullPath);
+        EmptyToolsHint.Visibility = _tools.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
+        ValidationText.Visibility = Visibility.Collapsed;
     }
 
     private void Save_Click(object sender, RoutedEventArgs e)
@@ -170,12 +87,10 @@ public partial class DeveloperToolsWindow : Window
         }
         catch (Exception ex) when (ex is ArgumentException or InvalidOperationException or IOException or UnauthorizedAccessException or NotSupportedException)
         {
-            MessageBox.Show(this, ex.Message, "Check developer tools", MessageBoxButton.OK, MessageBoxImage.Warning);
+            ValidationText.Text = ex.Message;
+            ValidationText.Visibility = Visibility.Visible;
         }
     }
 
-    private static DeveloperTool Clone(DeveloperTool tool) => new()
-    {
-        Id = tool.Id, Name = tool.Name, Kind = tool.Kind, Target = tool.Target
-    };
+    private static DeveloperTool Clone(DeveloperTool tool) => tool.Clone();
 }

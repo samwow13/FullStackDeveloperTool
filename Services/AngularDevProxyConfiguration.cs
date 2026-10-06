@@ -10,6 +10,7 @@ public sealed class AngularDevProxyConfiguration
 {
     private readonly List<FileChange> _changes = [];
     public int UpdatedFileCount => _changes.Count;
+    internal IReadOnlyList<string> ChangedFilePaths => _changes.Select(change => change.Path).ToArray();
     private static readonly JsonDocumentOptions JsonOptions = new()
     {
         CommentHandling = JsonCommentHandling.Skip, AllowTrailingCommas = true

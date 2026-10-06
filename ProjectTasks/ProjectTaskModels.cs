@@ -3,13 +3,16 @@ namespace FullStackLauncher.ProjectTasks;
 /// <summary>Local task content, kept separate from portable launcher and monitor settings.</summary>
 public sealed class ProjectTaskData
 {
-    public int Version { get; set; } = 6;
+    public int Version { get; set; } = 8;
     // Global pause is independent of each queue's explicit, default-off enablement.
     public bool PauseAllQueues { get; set; }
     public List<ProjectTaskNote> Notes { get; set; } = [];
     public List<ProjectQueueItem> QueueItems { get; set; } = [];
     public List<ProjectQueueConfiguration> Queues { get; set; } = [];
     public List<ProjectTaskExecutionReceipt> Receipts { get; set; } = [];
+    // Suggestion receipts survive deletion so a repeated submission never
+    // restores a note the user removed or duplicates a previous suggestion.
+    public List<AgentFollowUpNoteReceipt> AgentFollowUpReceipts { get; set; } = [];
 }
 
 public sealed class ProjectTaskNote
@@ -24,6 +27,43 @@ public sealed class ProjectTaskNote
     public bool IsArchived { get; set; }
     public DateTimeOffset CreatedAt { get; set; } = DateTimeOffset.UtcNow;
     public DateTimeOffset UpdatedAt { get; set; } = DateTimeOffset.UtcNow;
+    public AgentFollowUpNoteSource? AgentSource { get; set; }
+}
+
+/// <summary>Agent-authored work for human review, without queue execution settings.</summary>
+public sealed record AgentFollowUpNoteRequest
+{
+    public string ProjectId { get; init; } = "";
+    public string UpdateId { get; init; } = "";
+    public string Name { get; init; } = "";
+    public string Prompt { get; init; } = "";
+    public string Context { get; init; } = "";
+    public string SourceTaskId { get; init; } = "";
+    public string SourcePrompt { get; init; } = "";
+    public string PageUrl { get; init; } = "";
+    public string PageTitle { get; init; } = "";
+}
+
+/// <summary>Original provenance; edits to the suggested note do not rewrite it.</summary>
+public sealed record AgentFollowUpNoteSource
+{
+    public string UpdateId { get; init; } = "";
+    public string Author { get; init; } = "";
+    public string Context { get; init; } = "";
+    public string SourceTaskId { get; init; } = "";
+    public string SourcePrompt { get; init; } = "";
+    public string PageUrl { get; init; } = "";
+    public string PageTitle { get; init; } = "";
+}
+
+/// <summary>An immutable submission identity retained independently of its note.</summary>
+public sealed record AgentFollowUpNoteReceipt
+{
+    public string NoteId { get; init; } = "";
+    public AgentFollowUpNoteRequest Request { get; init; } = new();
+    public string Author { get; init; } = "";
+    public string PayloadHash { get; init; } = "";
+    public DateTimeOffset CreatedAt { get; init; }
 }
 
 /// <summary>An image owned by one note and saved atomically with its text.</summary>
@@ -68,6 +108,7 @@ public enum ProjectQueueItemState { Pending, Starting, Running, Completed, Faile
 
 public sealed class ProjectQueueConfiguration
 {
+    public const int MaximumDelayMinutes = 10_080;
     public string ProjectId { get; set; } = "";
     // Assignment is explicit and durable. Selecting or renaming a project must
     // not change this folder or enable a queue.
@@ -77,6 +118,8 @@ public sealed class ProjectQueueConfiguration
     // model/effort choice and the runner must validate it before submission.
     public string DefaultModelId { get; set; } = "";
     public string DefaultReasoningEffort { get; set; } = "";
+    // Measured from confirmed completion, never from submission or task start.
+    public int DelayBetweenTasksMinutes { get; set; }
     public ProjectTaskIdentity? ExternalPredecessor { get; set; }
     // Exact read-only observed terminal completion, not a semantic success claim.
     public DateTimeOffset? ExternalPredecessorSatisfiedAt { get; set; }

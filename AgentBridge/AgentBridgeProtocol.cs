@@ -23,10 +23,19 @@ internal sealed class AgentBridgeRequest
     public string? ConnectionId { get; set; }
     public string? Branch { get; set; }
     public string? UpdateId { get; set; }
+    public string? Name { get; set; }
+    public string? Prompt { get; set; }
+    public string? Context { get; set; }
+    public string? SourceTaskId { get; set; }
+    public string? SourcePrompt { get; set; }
+    public string? PageUrl { get; set; }
+    public string? PageTitle { get; set; }
     public string[]? Bullets { get; set; }
     public int? Limit { get; set; }
+    public int? Offset { get; set; }
     public int? WaitSeconds { get; set; }
     public long? SinceSequence { get; set; }
+    public long? HandoffDeadlineUnixMilliseconds { get; set; }
 }
 
 internal sealed record AgentBridgeResponse(bool Ok, object? Data = null, string? Error = null)
@@ -38,6 +47,8 @@ internal sealed record AgentBridgeResponse(bool Ok, object? Data = null, string?
 internal static class AgentBridgeProtocol
 {
     internal static readonly JsonSerializerOptions Json = new(JsonSerializerDefaults.Web);
+    internal const int MaximumRequestCharacters = 1_048_576;
+    internal const int MaximumResponseCharacters = 262_144;
 
     internal static string PipeName(string settingsPath)
     {
@@ -54,6 +65,9 @@ internal static class AgentBridgeProtocol
     {
         try
         {
+            var payload = JsonSerializer.Serialize(request, Json);
+            if (payload.Length > MaximumRequestCharacters)
+                return AgentBridgeResponse.Failure("Launcher bridge request exceeds the supported size. Shorten the supplied prompt or context and retry.");
             using var pipe = new NamedPipeClientStream(".", PipeName(settingsPath), PipeDirection.InOut,
                 PipeOptions.Asynchronous | PipeOptions.CurrentUserOnly);
             using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
@@ -61,9 +75,9 @@ internal static class AgentBridgeProtocol
             await pipe.ConnectAsync(1500, timeout.Token);
             using var reader = new StreamReader(pipe, new UTF8Encoding(false), leaveOpen: true);
             using var writer = new StreamWriter(pipe, new UTF8Encoding(false), leaveOpen: true) { AutoFlush = true };
-            await writer.WriteLineAsync(JsonSerializer.Serialize(request, Json));
+            await writer.WriteLineAsync(payload);
             var line = await reader.ReadLineAsync(timeout.Token);
-            if (line is null || line.Length > 262_144)
+            if (line is null || line.Length > MaximumResponseCharacters)
                 return AgentBridgeResponse.Failure("Launcher bridge returned no valid response.");
             return JsonSerializer.Deserialize<AgentBridgeResponse>(line, Json)
                 ?? AgentBridgeResponse.Failure("Launcher bridge returned no valid response.");

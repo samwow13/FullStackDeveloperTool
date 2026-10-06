@@ -3,12 +3,15 @@ using System.Diagnostics;
 using System.IO;
 using System.Runtime.InteropServices;
 using System.Security;
+using System.Text;
 using System.Text.RegularExpressions;
 using FullStackLauncher.Models;
+using Microsoft.Win32;
+using Microsoft.Win32.SafeHandles;
 
 namespace FullStackLauncher.Services;
 
-public sealed record DeveloperToolTarget(string FileName, bool IsWebsite, string Description);
+public sealed record DeveloperToolTarget(string FileName, bool IsWebsite, string Description, string? Browser = null);
 public sealed record ServiceEditorTarget(string Name, string FileName);
 
 /// <summary>
@@ -27,7 +30,8 @@ public static class DeveloperToolLauncher
         if (tool.Kind.Equals("Website", StringComparison.OrdinalIgnoreCase))
         {
             var uri = ValidateWebsite(tool.Target);
-            return new(uri.AbsoluteUri, true, $"Website · {uri.Host}");
+            var browser = tool.WebsiteBrowser is { } browserId ? WebsiteBrowserLauncher.Resolve(browserId) : null;
+            return new(uri.AbsoluteUri, true, $"Website · {uri.Host}" + (browser is null ? "" : $" · {browser.Name}"), tool.WebsiteBrowser);
         }
 
         var automaticPgAdmin = tool.Kind.Equals("PgAdmin", StringComparison.OrdinalIgnoreCase)
@@ -47,10 +51,26 @@ public static class DeveloperToolLauncher
             throw new ArgumentException("Give this tool a name without line breaks or control characters.");
         if (string.IsNullOrWhiteSpace(tool.Kind))
             throw new ArgumentException($"Choose a kind for '{tool.Name}': PgAdmin, Application, or Website.");
+        WebsiteBrowserLauncher.ValidateBrowserId(tool.WebsiteBrowser);
+        if (!tool.Kind.Equals("Website", StringComparison.OrdinalIgnoreCase) && tool.WebsiteBrowser is not null)
+            throw new ArgumentException("Browser choices apply only to website tools.");
+        if (tool.CredentialProfileId is not null)
+        {
+            if (!Guid.TryParseExact(tool.CredentialProfileId, "N", out var credentialId) || credentialId == Guid.Empty)
+                throw new ArgumentException("Choose a valid saved credential profile.");
+            tool.CredentialProfileId = credentialId.ToString("N");
+        }
+        foreach (var selector in new[] { tool.WebsiteUsernameSelector, tool.WebsitePasswordSelector })
+            if (selector is not null && (selector.Length > 1024 || ContainsControlCharacters(selector)))
+                throw new ArgumentException("Website field selectors must be at most 1,024 characters without control characters.");
+        if (!tool.Kind.Equals("Website", StringComparison.OrdinalIgnoreCase)
+            && (!string.IsNullOrWhiteSpace(tool.WebsiteUsernameSelector) || !string.IsNullOrWhiteSpace(tool.WebsitePasswordSelector)))
+            throw new ArgumentException("Login field selectors apply only to websites.");
 
         if (tool.Kind.Equals("Website", StringComparison.OrdinalIgnoreCase))
         {
             ValidateWebsite(tool.Target);
+            if (requireExistingFile && tool.WebsiteBrowser is { } browserId) WebsiteBrowserLauncher.Resolve(browserId);
             return;
         }
         var pgAdmin = tool.Kind.Equals("PgAdmin", StringComparison.OrdinalIgnoreCase);
@@ -76,7 +96,7 @@ public static class DeveloperToolLauncher
         {
             // Validate again because callers can construct DeveloperToolTarget directly.
             var uri = ValidateWebsite(target.FileName);
-            using var browser = Process.Start(new ProcessStartInfo(uri.AbsoluteUri) { UseShellExecute = true });
+            WebsiteBrowserLauncher.Open(uri.AbsoluteUri, target.Browser);
             return;
         }
 
@@ -95,7 +115,10 @@ public static class DeveloperToolLauncher
     /// Finds supported folder-opening editors using known install locations and executable names
     /// on PATH. Discovery never starts applications or changes the saved developer-tool library.
     /// </summary>
-    public static IReadOnlyList<ServiceEditorTarget> FindInstalledEditors()
+    public static IReadOnlyList<ServiceEditorTarget> FindInstalledEditors() =>
+        FindInstalledEditors(CancellationToken.None, localPathsOnly: false);
+
+    private static IReadOnlyList<ServiceEditorTarget> FindInstalledEditors(CancellationToken cancellationToken, bool localPathsOnly)
     {
         (string Name, string Executable, string[] InstallFolders)[] editors =
         [
@@ -111,12 +134,15 @@ public static class DeveloperToolLauncher
         var pathDirectories = EditorPathDirectories().ToArray();
         foreach (var editor in editors)
         {
+            cancellationToken.ThrowIfCancellationRequested();
             foreach (var candidate in EditorCandidates(editor.Executable, editor.InstallFolders, installRoots, pathDirectories)
                 .Distinct(StringComparer.OrdinalIgnoreCase))
             {
                 try
                 {
+                    cancellationToken.ThrowIfCancellationRequested();
                     var executable = ResolveApplicationPath(candidate, AppContext.BaseDirectory);
+                    if (localPathsOnly && !InstalledDesktopAppDiscovery.IsLocalPathWithoutReparsePoints(executable, cancellationToken)) continue;
                     if (!File.Exists(executable)) continue;
                     if (foundPaths.Add(executable)) installed.Add(new(editor.Name, executable));
                     break;
@@ -126,6 +152,101 @@ public static class DeveloperToolLauncher
         }
         return installed;
     }
+
+    /// <summary>
+    /// Finds registered desktop executables, supported installations, and local Start Menu apps.
+    /// Shortcuts requiring arguments or indirect/non-executable targets are excluded.
+    /// Reads metadata only; never starts applications or changes saved tools.
+    /// </summary>
+    public static IReadOnlyList<ServiceEditorTarget> FindInstalledDesktopTools() =>
+        FindInstalledDesktopTools(CancellationToken.None);
+
+    public static IReadOnlyList<ServiceEditorTarget> FindInstalledDesktopTools(CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        var installed = new List<ServiceEditorTarget>();
+        try { installed.AddRange(FindInstalledEditors(cancellationToken, localPathsOnly: true)); }
+        catch (Exception ex) when (IsExpectedDesktopDiscoveryFailure(ex)) { }
+        cancellationToken.ThrowIfCancellationRequested();
+        var foundPaths = new HashSet<string>(installed.Select(tool => tool.FileName), StringComparer.OrdinalIgnoreCase);
+        try
+        {
+            var pgAdmin = FindPgAdmin();
+            if (!string.IsNullOrWhiteSpace(pgAdmin))
+            {
+                var executable = ResolveApplicationPath(pgAdmin, AppContext.BaseDirectory);
+                if (foundPaths.Add(executable)) installed.Add(new("pgAdmin 4", executable));
+            }
+        }
+        catch (Exception ex) when (ex is ArgumentException || IsExpectedDesktopDiscoveryFailure(ex)) { }
+        cancellationToken.ThrowIfCancellationRequested();
+        AddRegisteredDesktopTools(installed, foundPaths, cancellationToken);
+        foreach (var shortcut in InstalledDesktopAppDiscovery.FindStartMenuApps(
+            target => ResolveApplicationPath(target, AppContext.BaseDirectory), cancellationToken))
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            if (foundPaths.Add(shortcut.FileName)) installed.Add(shortcut);
+            else
+            {
+                var index = installed.FindIndex(tool => tool.FileName.Equals(shortcut.FileName, StringComparison.OrdinalIgnoreCase));
+                if (index >= 0 && installed[index].Name.Equals(Path.GetFileNameWithoutExtension(installed[index].FileName), StringComparison.OrdinalIgnoreCase))
+                    installed[index] = shortcut;
+            }
+        }
+        return installed.Where(tool => InstalledDesktopAppDiscovery.IsLocalPathWithoutReparsePoints(tool.FileName, cancellationToken))
+            .OrderBy(tool => tool.Name, StringComparer.OrdinalIgnoreCase)
+            .ThenBy(tool => tool.FileName, StringComparer.OrdinalIgnoreCase).ToArray();
+    }
+
+    private static void AddRegisteredDesktopTools(List<ServiceEditorTarget> installed, HashSet<string> foundPaths, CancellationToken cancellationToken)
+    {
+        if (!OperatingSystem.IsWindows()) return;
+        const string appPaths = @"Software\Microsoft\Windows\CurrentVersion\App Paths";
+        foreach (var hive in new[] { RegistryHive.CurrentUser, RegistryHive.LocalMachine })
+            foreach (var view in new[] { RegistryView.Registry32, RegistryView.Registry64 })
+            {
+                try
+                {
+                    cancellationToken.ThrowIfCancellationRequested();
+                    using var root = RegistryKey.OpenBaseKey(hive, view);
+                    using var registrations = root.OpenSubKey(appPaths, writable: false);
+                    if (registrations is null) continue;
+                    for (uint index = 0; index < 512; index++)
+                    {
+                        cancellationToken.ThrowIfCancellationRequested();
+                        // Registry subkey names are limited to 255 characters. Enumerate one at a
+                        // time so the discovery limit also bounds name enumeration, not just reads.
+                        var name = new StringBuilder(256);
+                        var nameLength = (uint)name.Capacity;
+                        var error = EnumRegistrySubKey(registrations.Handle, index, name, ref nameLength,
+                            IntPtr.Zero, IntPtr.Zero, IntPtr.Zero, IntPtr.Zero);
+                        if (error == 259) break; // ERROR_NO_MORE_ITEMS
+                        if (error != 0) throw new Win32Exception(error);
+                        if (!name.ToString().EndsWith(".exe", StringComparison.OrdinalIgnoreCase)) continue;
+                        try
+                        {
+                            using var registration = registrations.OpenSubKey(name.ToString(), writable: false);
+                            if (registration?.GetValue(null, null, RegistryValueOptions.DoNotExpandEnvironmentNames)
+                                is not string target) continue;
+                            target = target.Trim();
+                            if (target.Length >= 2 && target[0] == '"' && target[^1] == '"')
+                                target = target[1..^1];
+                            if (!Path.IsPathFullyQualified(Environment.ExpandEnvironmentVariables(target))) continue;
+                            var executable = ResolveApplicationPath(target, AppContext.BaseDirectory);
+                            if (InstalledDesktopAppDiscovery.IsLocalPathWithoutReparsePoints(executable, cancellationToken)
+                                && File.Exists(executable) && foundPaths.Add(executable))
+                                installed.Add(new(Path.GetFileNameWithoutExtension(executable), executable));
+                        }
+                        catch (Exception ex) when (ex is ArgumentException || IsExpectedDesktopDiscoveryFailure(ex)) { }
+                    }
+                }
+                catch (Exception ex) when (IsExpectedDesktopDiscoveryFailure(ex)) { }
+            }
+    }
+
+    private static bool IsExpectedDesktopDiscoveryFailure(Exception exception) =>
+        exception is IOException or UnauthorizedAccessException or SecurityException or NotSupportedException
+        || exception is Win32Exception { NativeErrorCode: 2 or 3 or 5 or 6 or 1018 };
 
     /// <summary>
     /// Opens a service folder in an explicitly selected application. Send the folder even when
@@ -365,6 +486,9 @@ public static class DeveloperToolLauncher
     }
 
     private delegate bool EnumWindowsCallback(IntPtr window, IntPtr parameter);
+    [DllImport("advapi32.dll", EntryPoint = "RegEnumKeyExW", CharSet = CharSet.Unicode, ExactSpelling = true)]
+    private static extern int EnumRegistrySubKey(SafeRegistryHandle key, uint index, StringBuilder name,
+        ref uint nameLength, IntPtr reserved, IntPtr className, IntPtr classLength, IntPtr lastWriteTime);
     [DllImport("user32.dll")] [return: MarshalAs(UnmanagedType.Bool)] private static extern bool EnumWindows(EnumWindowsCallback callback, IntPtr parameter);
     [DllImport("user32.dll")] [return: MarshalAs(UnmanagedType.Bool)] private static extern bool IsWindowVisible(IntPtr window);
     [DllImport("user32.dll")] private static extern IntPtr GetWindow(IntPtr window, uint command);

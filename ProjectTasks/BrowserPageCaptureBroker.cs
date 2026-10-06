@@ -1,7 +1,11 @@
+using System.Buffers;
+using System.ComponentModel;
 using System.IO;
 using System.Net;
 using System.Net.Sockets;
 using System.Net.WebSockets;
+using System.Runtime.InteropServices;
+using System.Security;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
@@ -18,6 +22,9 @@ internal enum BrowserSiteOpenState { Opened, AlreadyOpen, Unavailable }
 
 /// <summary>A bounded, URL-free outcome; tab contents are never requested by site opening.</summary>
 internal sealed record BrowserSiteOpenResult(BrowserSiteOpenState State, string Status);
+
+/// <summary>A value-free result of an explicit website shortcut login fill.</summary>
+internal sealed record BrowserLoginFillResult(bool Filled, string Status);
 
 /// <summary>
 /// Receives live page source from the separately installed browser extension.
@@ -59,6 +66,131 @@ internal static class BrowserPageCaptureBroker
             // The eventual site request reports a bounded, value-free failure.
         }
     }
+
+    /// <summary>
+    /// Opens a website shortcut and fills its main-frame login form without invoking submission.
+    /// Credentials are sent to exactly one authenticated browser only after its preflight.
+    /// An explicit browser limits selection to that browser's paired profiles.
+    /// </summary>
+    public static async Task<BrowserLoginFillResult> FillWebsiteLoginAsync(
+        string url, string profileId, string? usernameSelector, string? passwordSelector,
+        CancellationToken cancellationToken, string? browser = null)
+    {
+        if (browser is not (null or "chrome" or "msedge"))
+            return LoginUnavailable("Saved website browser is unsupported. Choose Chrome, Edge, or Automatic in tool configuration.");
+        if (!TryLoginOrigin(url, out var origin) || string.IsNullOrWhiteSpace(profileId) ||
+            (usernameSelector?.Length ?? 0) > 1024 || (passwordSelector?.Length ?? 0) > 1024)
+            return LoginUnavailable("Website login requires a valid HTTPS address (or loopback HTTP) and saved credentials.");
+        try { GetSecret(); EnsureListening(); }
+        catch (Exception error) when (error is IOException or UnauthorizedAccessException or CryptographicException)
+        { return LoginUnavailable("Browser pairing could not be read. Review browser extension setup."); }
+        if (_startupError != null)
+            return LoginUnavailable("Browser connection could not start. Review browser extension setup.");
+
+        using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        timeout.CancelAfter(TimeSpan.FromSeconds(30));
+        var acquired = false;
+        BrowserConnection? connection = null;
+        var requestId = Guid.NewGuid().ToString("N");
+        var selectedName = browser == "chrome" ? "Chrome" : "Edge";
+        bool MatchesSelectedBrowser(BrowserConnection item) => item.IsOpen && item.SupportsLoginFilling &&
+            (browser == null || item.Browser == browser);
+        try
+        {
+            await CaptureGate.WaitAsync(timeout.Token);
+            acquired = true;
+            var deadline = DateTime.UtcNow.AddSeconds(browser == null ? 3 : 10);
+            var attemptedBrowserStart = false;
+            do
+            {
+                lock (Gate)
+                {
+                    var capable = Connections.Where(MatchesSelectedBrowser).ToArray();
+                    if (capable.Length > 1)
+                        return LoginUnavailable(browser == null
+                            ? "More than one paired browser profile can fill logins. Close extra profiles and retry."
+                            : $"More than one paired {selectedName} profile can fill logins. Close extra {selectedName} profiles and retry.");
+                    connection = capable.SingleOrDefault();
+                }
+                if (connection != null) break;
+                if (browser != null && !attemptedBrowserStart)
+                {
+                    attemptedBrowserStart = true;
+                    try
+                    {
+                        // Start only the selected browser, with no URL or credentials.
+                        // Its authenticated extension owns choosing/opening the login tab.
+                        await Task.Run(() => WebsiteBrowserLauncher.Start(browser), timeout.Token);
+                        deadline = DateTime.UtcNow.AddSeconds(10);
+                    }
+                    catch (Exception error) when (error is Win32Exception or InvalidOperationException or
+                        IOException or UnauthorizedAccessException or ArgumentException)
+                    {
+                        return LoginUnavailable($"{selectedName} could not be started. Check its installation and browser selection, then retry.");
+                    }
+                }
+                await Task.Delay(100, timeout.Token);
+            } while (DateTime.UtcNow < deadline);
+            if (connection == null)
+                return LoginUnavailable(browser == null
+                    ? "Install, reload and pair the browser extension in one Chrome or Edge profile, then retry."
+                    : $"{selectedName} did not connect. Open {selectedName}, then install, reload and pair the extension in one {selectedName} profile and retry.");
+
+            // Read only the user-selected profile. Never enumerate credentials or send them
+            // in inventory, capture, page context, status, settings, or tab URLs.
+            using var credentials = ToolCredentialStore.Read(profileId);
+            if (credentials.Profile.Kind != "Website" ||
+                !TryLoginOrigin(credentials.Profile.Origin, out var savedOrigin) || savedOrigin != origin)
+                return LoginUnavailable("Saved website credentials do not match this website origin. Edit the shortcut or credential profile.");
+            if (credentials.Profile.UserName.Length is < 1 or > 1024 || credentials.Password.Length is < 1 or > 4096)
+                return LoginUnavailable("Saved website credentials are unavailable or exceed the supported field limits.");
+
+            var ready = await connection.PreflightLoginAsync(requestId, url, origin,
+                usernameSelector, passwordSelector, timeout.Token);
+            if (ready.State != "ready") return LoginResult(ready.State);
+            lock (Gate)
+            {
+                if (!MatchesSelectedBrowser(connection) || Connections.Count(MatchesSelectedBrowser) != 1 ||
+                    !Connections.Contains(connection))
+                    return LoginUnavailable(browser == null
+                        ? "Browser profiles changed before login filling. Close extra profiles and retry."
+                        : $"{selectedName} profiles changed before login filling. Close extra {selectedName} profiles and retry.");
+            }
+            var result = await connection.FillLoginAsync(requestId, credentials.Profile.UserName,
+                credentials.Password, timeout.Token);
+            return LoginResult(result.State);
+        }
+        catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+        { return LoginUnavailable("Website login timed out. Open its login page and retry."); }
+        catch (Exception error) when (error is TimeoutException or IOException or WebSocketException or
+            InvalidOperationException or CryptographicException or UnauthorizedAccessException or ArgumentException or ToolCredentialStoreException)
+        { return LoginUnavailable("Website login could not read credentials or complete the browser request. Review configuration and retry."); }
+        finally
+        {
+            if (connection != null)
+            {
+                using var cancelTimeout = new CancellationTokenSource(TimeSpan.FromMilliseconds(750));
+                try { await connection.SendAsync(new { type = "cancelLoginFill", requestId }, cancelTimeout.Token); }
+                catch (Exception error) when (error is OperationCanceledException or IOException or WebSocketException or InvalidOperationException) { }
+            }
+            if (acquired) CaptureGate.Release();
+        }
+    }
+
+    private static BrowserLoginFillResult LoginUnavailable(string status) => new(false, status);
+    private static BrowserLoginFillResult LoginResult(string state) => state switch
+    {
+        "filled" => new(true, "Website login fields filled."),
+        "selectors-needed" => LoginUnavailable("Login fields are missing or ambiguous. Configure username and password CSS selectors, then retry."),
+        "unsafe-form" => LoginUnavailable("Login form has an unsafe or cross-origin submission destination. Password was not filled."),
+        "origin-changed" => LoginUnavailable("Website redirected or changed origin. Save credentials for its exact login origin before retrying."),
+        "tab-ambiguous" => LoginUnavailable("Several tabs match this website. Close extra matching tabs and retry."),
+        "expired" => LoginUnavailable("Website login preparation expired. Open its login page and retry."),
+        _ => LoginUnavailable("Website login could not access a ready main-frame form. Check extension site access and retry.")
+    };
+
+    private static bool TryLoginOrigin(string? value, out string origin) =>
+        ToolCredentialStore.TryWebsiteOrigin(value, out origin);
 
     /// <summary>
     /// Checks every authenticated Chrome/Edge profile before opening one local site tab.
@@ -390,7 +522,8 @@ internal static class BrowserPageCaptureBroker
                     !VerifyReady(ReadString(ready.RootElement, "signature"), serverNonce)) return;
 
                 var connection = new BrowserConnection(browser, socket,
-                    ReadInt(hello.RootElement, "siteOpenVersion") == 1);
+                    ReadInt(hello.RootElement, "siteOpenVersion") == 1,
+                    ReadInt(hello.RootElement, "loginFillVersion") == 1);
                 lock (Gate) { Connections.Add(connection); _connectionRevision++; _siteOpenCancellation?.Cancel(); }
                 try
                 {
@@ -402,6 +535,7 @@ internal static class BrowserPageCaptureBroker
                         {
                             case "captureResult": connection.Complete(message.RootElement); break;
                             case "siteResult": connection.CompleteSite(message.RootElement); break;
+                            case "loginFillResult": connection.CompleteLogin(message.RootElement); break;
                             case "siteInventoryChanged": connection.InventoryChanged(message.RootElement); break;
                         }
                     }
@@ -513,8 +647,9 @@ internal static class BrowserPageCaptureBroker
     }
 
     private sealed record SiteResponse(string State, int WindowCount, long Revision);
+    private sealed record LoginResponse(string State);
 
-    private sealed class BrowserConnection(string browser, WebSocket socket, bool supportsSiteOpening)
+    private sealed class BrowserConnection(string browser, WebSocket socket, bool supportsSiteOpening, bool supportsLoginFilling)
     {
         private readonly SemaphoreSlim _sendGate = new(1, 1);
         private readonly object _siteGate = new();
@@ -525,10 +660,14 @@ internal static class BrowserPageCaptureBroker
         private string? _siteRequestId;
         private TaskCompletionSource<SiteResponse>? _sitePending;
         private long _siteRevision;
+        private string? _loginRequestId;
+        private string? _loginPhase;
+        private TaskCompletionSource<LoginResponse>? _loginPending;
 
         public string Browser { get; } = browser;
         public bool IsOpen => socket.State == WebSocketState.Open;
         public bool SupportsSiteOpening { get; } = supportsSiteOpening;
+        public bool SupportsLoginFilling { get; } = supportsLoginFilling;
         public long SiteRevision => Interlocked.Read(ref _siteRevision);
         public event Action? SiteChanged;
 
@@ -546,6 +685,127 @@ internal static class BrowserPageCaptureBroker
             await _sendGate.WaitAsync(cancellationToken);
             try { await SendJsonAsync(socket, message, cancellationToken); }
             finally { _sendGate.Release(); }
+        }
+
+        public async Task<LoginResponse> PreflightLoginAsync(string requestId, string url, string origin,
+            string? usernameSelector, string? passwordSelector, CancellationToken cancellationToken)
+        {
+            var completion = BeginLoginRequest(requestId, "prepare");
+            try
+            {
+                await SendAsync(new
+                {
+                    type = "prepareLoginFill", requestId, url, origin,
+                    usernameSelector = usernameSelector?.Trim() ?? "",
+                    passwordSelector = passwordSelector?.Trim() ?? "",
+                    notAfterUtc = DateTimeOffset.UtcNow.AddSeconds(20).ToUnixTimeMilliseconds()
+                }, cancellationToken);
+                return await completion.Task.WaitAsync(TimeSpan.FromSeconds(21), cancellationToken);
+            }
+            finally { ClearLoginRequest(requestId, completion); }
+        }
+
+        public async Task<LoginResponse> FillLoginAsync(string requestId, string username,
+            SecureString password, CancellationToken cancellationToken)
+        {
+            var completion = BeginLoginRequest(requestId, "fill");
+            try
+            {
+                await _sendGate.WaitAsync(cancellationToken);
+                try
+                {
+                    // Serialize directly from the temporary unmanaged SecureString buffer.
+                    // Never create a managed password string; erase all serialized bytes.
+                    // Capacity covers the enforced limits even with six-byte JSON escapes,
+                    // preventing resize copies and a stream writer's separate pooled buffer.
+                    var output = new ArrayBufferWriter<byte>(40_000);
+                    try
+                    {
+                        using (var writer = new Utf8JsonWriter(output))
+                        {
+                            writer.WriteStartObject();
+                            writer.WriteString("type", "fillPreparedLogin");
+                            writer.WriteString("requestId", requestId);
+                            writer.WriteString("username", username);
+                            WriteSecurePassword(writer, password);
+                            writer.WriteNumber("notAfterUtc", DateTimeOffset.UtcNow.AddSeconds(5).ToUnixTimeMilliseconds());
+                            writer.WriteEndObject();
+                        }
+                        await socket.SendAsync(output.WrittenMemory,
+                            WebSocketMessageType.Text, true, cancellationToken);
+                    }
+                    finally
+                    {
+                        if (MemoryMarshal.TryGetArray(output.WrittenMemory, out var bytes) && bytes.Array != null)
+                            CryptographicOperations.ZeroMemory(bytes.Array);
+                    }
+                }
+                finally { _sendGate.Release(); }
+                return await completion.Task.WaitAsync(TimeSpan.FromSeconds(6), cancellationToken);
+            }
+            finally { ClearLoginRequest(requestId, completion); }
+        }
+
+        private static unsafe void WriteSecurePassword(Utf8JsonWriter writer, SecureString password)
+        {
+            var pointer = Marshal.SecureStringToGlobalAllocUnicode(password);
+            byte[]? encoded = null;
+            try
+            {
+                // Escape every UTF-16 code unit into an owned, bounded JSON string.
+                // Utf8JsonWriter's string APIs may return secret escape buffers to an
+                // uncleared shared pool; raw UTF-8 avoids that separate escape path.
+                var characters = new ReadOnlySpan<char>((void*)pointer, password.Length);
+                encoded = new byte[checked(characters.Length * 6 + 2)];
+                const string hexadecimal = "0123456789abcdef";
+                var index = 0;
+                encoded[index++] = (byte)'"';
+                foreach (var character in characters)
+                {
+                    encoded[index++] = (byte)'\\';
+                    encoded[index++] = (byte)'u';
+                    encoded[index++] = (byte)hexadecimal[(character >> 12) & 15];
+                    encoded[index++] = (byte)hexadecimal[(character >> 8) & 15];
+                    encoded[index++] = (byte)hexadecimal[(character >> 4) & 15];
+                    encoded[index++] = (byte)hexadecimal[character & 15];
+                }
+                encoded[index] = (byte)'"';
+                // Quotes, backslashes, controls and surrogate code units all follow
+                // the same explicit \uXXXX encoding; no input validation or parsing
+                // is needed for these exclusively generated JSON string bytes.
+                writer.WritePropertyName("password");
+                writer.WriteRawValue(encoded, skipInputValidation: true);
+            }
+            finally
+            {
+                if (encoded != null) CryptographicOperations.ZeroMemory(encoded);
+                Marshal.ZeroFreeGlobalAllocUnicode(pointer);
+            }
+        }
+
+        private TaskCompletionSource<LoginResponse> BeginLoginRequest(string requestId, string phase)
+        {
+            var completion = new TaskCompletionSource<LoginResponse>(TaskCreationOptions.RunContinuationsAsynchronously);
+            lock (_siteGate) { _loginRequestId = requestId; _loginPhase = phase; _loginPending = completion; }
+            return completion;
+        }
+
+        private void ClearLoginRequest(string requestId, TaskCompletionSource<LoginResponse> completion)
+        {
+            lock (_siteGate)
+                if (_loginRequestId == requestId && _loginPending == completion)
+                { _loginRequestId = null; _loginPhase = null; _loginPending = null; }
+        }
+
+        public void CompleteLogin(JsonElement result)
+        {
+            var state = ReadString(result, "status");
+            if (state is not ("ready" or "filled" or "selectors-needed" or "unsafe-form" or
+                "origin-changed" or "tab-ambiguous" or "expired")) state = "unavailable";
+            lock (_siteGate)
+                if (_loginPending != null && ReadString(result, "requestId") == _loginRequestId &&
+                    ReadString(result, "phase") == _loginPhase)
+                    _loginPending.TrySetResult(new LoginResponse(state));
         }
 
         public async Task<SiteResponse> RequestSiteAsync(string type, string url, long? expectedRevision,
@@ -668,6 +928,7 @@ internal static class BrowserPageCaptureBroker
         {
             _pending?.TrySetResult(Unavailable("Browser source connection closed before capture finished."));
             lock (_siteGate) _sitePending?.TrySetResult(new SiteResponse("unavailable", 0, -1));
+            lock (_siteGate) _loginPending?.TrySetResult(new LoginResponse("unavailable"));
         }
 
         private static bool MatchesWindowBounds(JsonElement result, BrowserWindowBounds expected)

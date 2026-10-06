@@ -15,8 +15,10 @@ let connecting = false;
 let challenge = '';
 let pairingCode = '';
 let siteBusy = false;
+let loginBusy = false;
 let siteRevision = 0;
 const siteOperations = new Map();
+const loginOperations = new Map();
 
 const browserName = /Edg\//.test(navigator.userAgent) ? 'msedge' : 'chrome';
 
@@ -46,6 +48,8 @@ function closeSocket() {
   proofTimer = null;
   authenticated = false;
   captureBusy = false;
+  for (const operation of loginOperations.values()) operation.canceled = true;
+  loginOperations.clear();
   if (socket) {
     const old = socket;
     socket = null;
@@ -79,7 +83,7 @@ async function connect() {
       challenge = base64(crypto.getRandomValues(new Uint8Array(32)));
       next.send(JSON.stringify({
         type: 'hello', version: 1, browser: browserName,
-        extensionId: chrome.runtime.id, challenge, siteOpenVersion: 1
+        extensionId: chrome.runtime.id, challenge, siteOpenVersion: 1, loginFillVersion: 1
       }));
       proofTimer = setTimeout(() => {
         if (!authenticated && socket === next) next.close();
@@ -129,6 +133,7 @@ async function signClientProof(serverNonce) {
 async function handleMessage(connection, raw) {
   let message;
   try { message = JSON.parse(raw); } catch { connection.close(); return; }
+  raw = null;
   if (!authenticated) {
     if (!await verifyServerProof(message)) { connection.close(); return; }
     if (socket !== connection) return;
@@ -147,13 +152,42 @@ async function handleMessage(connection, raw) {
     return;
   }
   if (message?.type === 'capture') {
-    if (captureBusy || siteBusy) {
+    if (captureBusy || siteBusy || loginBusy || loginOperations.size) {
       sendResult(connection, message.requestId, 'unavailable', '', '', '', '', ['Another capture is still running.']);
       return;
     }
     captureBusy = true;
     try { await captureForRequest(connection, message); }
     finally { captureBusy = false; }
+    return;
+  }
+  if (message?.type === 'cancelLoginFill') {
+    const operation = loginOperations.get(message.requestId);
+    if (operation) {
+      operation.canceled = true;
+      loginOperations.delete(message.requestId);
+      void clearPreparedLogin(operation);
+    }
+    return;
+  }
+  if (message?.type === 'prepareLoginFill' || message?.type === 'fillPreparedLogin') {
+    if (captureBusy || siteBusy || loginBusy ||
+        (message.type === 'prepareLoginFill' && loginOperations.size)) {
+      message.username = '';
+      message.password = '';
+      sendLoginResult(connection, message.requestId, 'unavailable',
+        message.type === 'prepareLoginFill' ? 'prepare' : 'fill');
+      return;
+    }
+    loginBusy = true;
+    try {
+      if (message.type === 'prepareLoginFill') await prepareLoginForRequest(connection, message);
+      else await fillLoginForRequest(connection, message);
+    } finally {
+      message.username = '';
+      message.password = '';
+      loginBusy = false;
+    }
     return;
   }
   if (message?.type === 'cancelSiteOpen') {
@@ -166,7 +200,7 @@ async function handleMessage(connection, raw) {
     return;
   }
   if (message?.type === 'siteInventory' || message?.type === 'ensureSiteOpen') {
-    if (captureBusy || siteBusy) {
+    if (captureBusy || siteBusy || loginBusy || loginOperations.size) {
       sendSiteResult(connection, message.requestId, 'unavailable', 0, siteRevision);
       return;
     }
@@ -180,6 +214,274 @@ function sendSiteResult(connection, requestId, status, windowCount, revision) {
   if (socket !== connection || !authenticated || connection.readyState !== WebSocket.OPEN) return;
   // No tab URLs, titles, HTML, or CSS leave the browser during this operation.
   connection.send(JSON.stringify({ type: 'siteResult', requestId, status, windowCount, revision }));
+}
+
+function sendLoginResult(connection, requestId, status, phase = 'fill') {
+  if (socket !== connection || !authenticated || connection.readyState !== WebSocket.OPEN) return;
+  // Login outcomes are fixed tokens. No field values, URLs or page content return.
+  const allowed = ['ready', 'filled', 'selectors-needed', 'unsafe-form', 'origin-changed',
+    'tab-ambiguous', 'expired'];
+  connection.send(JSON.stringify({ type: 'loginFillResult', requestId, phase,
+    status: allowed.includes(status) ? status : 'unavailable' }));
+}
+
+function loginSite(value) {
+  if (typeof value !== 'string' || value.length > 4096 || /[\u0000-\u001f\u007f\\]/.test(value)) return null;
+  try {
+    const url = new URL(value);
+    if (!['https:', 'http:'].includes(url.protocol) || url.username || url.password ||
+        (url.protocol === 'http:' && !['localhost', '127.0.0.1', '[::1]'].includes(url.hostname.toLowerCase()))) return null;
+    return { href: url.href, origin: url.origin };
+  } catch { return null; }
+}
+
+function loginConnectionReady(connection, operation) {
+  return socket === connection && authenticated && connection.readyState === WebSocket.OPEN &&
+    !operation.canceled && Date.now() < operation.notAfterUtc;
+}
+
+async function clearPreparedLogin(operation) {
+  if (!Number.isInteger(operation.tabId) || typeof operation.documentId !== 'string') return;
+  try {
+    await chrome.scripting.executeScript({
+      target: { tabId: operation.tabId, documentIds: [operation.documentId] }, world: 'ISOLATED',
+      func: inspectOrFillLoginPage,
+      args: [operation.origin, '', '', operation.fieldToken, operation.notAfterUtc, 'clear', '', '']
+    });
+  } catch { /* The tab or document may already have gone away. */ }
+}
+
+async function prepareLoginForRequest(connection, request) {
+  const requestId = typeof request.requestId === 'string' ? request.requestId : '';
+  const site = loginSite(request.url);
+  const selectorsValid = ['usernameSelector', 'passwordSelector'].every(name =>
+    typeof request[name] === 'string' && request[name].length <= 1024);
+  if (!/^[a-zA-Z0-9-]{1,128}$/.test(requestId) || !site || request.origin !== site.origin ||
+      !selectorsValid || !Number.isSafeInteger(request.notAfterUtc) ||
+      request.notAfterUtc <= Date.now() || request.notAfterUtc > Date.now() + 25000) {
+    sendLoginResult(connection, requestId, 'unavailable', 'prepare');
+    return;
+  }
+  const operation = { connection, canceled: false, tabId: null, documentId: null,
+    origin: site.origin, usernameSelector: request.usernameSelector,
+    passwordSelector: request.passwordSelector, notAfterUtc: request.notAfterUtc,
+    fieldToken: base64(crypto.getRandomValues(new Uint8Array(32))) };
+  loginOperations.set(requestId, operation);
+  const expiryTimer = setTimeout(() => {
+    operation.canceled = true;
+    if (loginOperations.get(requestId) === operation) loginOperations.delete(requestId);
+    void clearPreparedLogin(operation);
+  }, Math.max(1, operation.notAfterUtc - Date.now()));
+  operation.expiryTimer = expiryTimer;
+  const stop = async status => {
+    if (loginOperations.get(requestId) === operation) loginOperations.delete(requestId);
+    clearTimeout(expiryTimer);
+    await clearPreparedLogin(operation);
+    sendLoginResult(connection, requestId, status, 'prepare');
+  };
+  try {
+    const tabs = await chrome.tabs.query({});
+    if (!loginConnectionReady(connection, operation) || tabs.length > 10000) { await stop('unavailable'); return; }
+    // Prefer the saved login URL; an existing same-origin tab is allowed only
+    // when unique. Never select an arbitrary browser profile or matching tab.
+    const matching = tabs.filter(tab => loginSite(tab.url)?.origin === site.origin &&
+      (!tab.pendingUrl || loginSite(tab.pendingUrl)?.origin === site.origin));
+    const exact = matching.filter(tab => loginSite(tab.url)?.href === site.href);
+    const candidates = exact.length ? exact : matching;
+    if (candidates.length > 1) { await stop('tab-ambiguous'); return; }
+    let tab = candidates[0];
+    operation.created = !tab;
+    if (!tab) tab = await chrome.tabs.create({ url: site.href, active: true });
+    if (!Number.isInteger(tab.id) || !loginConnectionReady(connection, operation)) { await stop('unavailable'); return; }
+    operation.tabId = tab.id;
+    operation.windowId = tab.windowId;
+    await chrome.tabs.update(tab.id, { active: true });
+    await chrome.windows.update(tab.windowId, { focused: true });
+    while (loginConnectionReady(connection, operation)) {
+      tab = await chrome.tabs.get(operation.tabId);
+      const current = loginSite(tab.url);
+      const pending = tab.pendingUrl ? loginSite(tab.pendingUrl) : null;
+      if ((current && current.origin !== site.origin) || (tab.pendingUrl && pending?.origin !== site.origin) ||
+          (!current && (!operation.created || tab.status === 'complete'))) {
+        await stop('origin-changed'); return;
+      }
+      if (tab.status === 'complete' && !tab.pendingUrl) break;
+      await new Promise(resolve => setTimeout(resolve, 100));
+    }
+    if (!loginConnectionReady(connection, operation)) { await stop('expired'); return; }
+    const results = await chrome.scripting.executeScript({
+      target: { tabId: operation.tabId, frameIds: [0] }, world: 'ISOLATED',
+      func: inspectOrFillLoginPage,
+      args: [operation.origin, operation.usernameSelector, operation.passwordSelector,
+        operation.fieldToken, operation.notAfterUtc, 'prepare', '', '']
+    });
+    if (results.length !== 1 || results[0].frameId !== 0 ||
+        typeof results[0].documentId !== 'string' || !loginConnectionReady(connection, operation)) {
+      await stop('unavailable'); return;
+    }
+    operation.documentId = results[0].documentId;
+    if (results[0].result !== 'ready') { await stop(results[0].result); return; }
+    tab = await chrome.tabs.get(operation.tabId);
+    const currentWindow = await chrome.windows.get(operation.windowId);
+    if (loginSite(tab.url)?.origin !== operation.origin || tab.pendingUrl || tab.status !== 'complete' ||
+        !tab.active || tab.windowId !== operation.windowId || !currentWindow.focused) {
+      await stop('origin-changed'); return;
+    }
+    if (!loginConnectionReady(connection, operation)) { await stop('expired'); return; }
+    sendLoginResult(connection, requestId, 'ready', 'prepare');
+  } catch { await stop('unavailable'); }
+}
+
+async function fillLoginForRequest(connection, request) {
+  const requestId = typeof request.requestId === 'string' ? request.requestId : '';
+  const operation = loginOperations.get(requestId);
+  let args = null;
+  try {
+    if (!operation || operation.connection !== connection || !loginConnectionReady(connection, operation) ||
+        !Number.isSafeInteger(request.notAfterUtc) || request.notAfterUtc <= Date.now() ||
+        request.notAfterUtc > Date.now() + 6000 ||
+        typeof request.username !== 'string' || request.username.length < 1 || request.username.length > 1024 ||
+        typeof request.password !== 'string' || request.password.length < 1 || request.password.length > 4096 ||
+        typeof operation.documentId !== 'string') {
+      sendLoginResult(connection, requestId, 'expired'); return;
+    }
+    const tab = await chrome.tabs.get(operation.tabId);
+    const currentWindow = await chrome.windows.get(operation.windowId);
+    if (loginSite(tab.url)?.origin !== operation.origin || tab.pendingUrl || tab.status !== 'complete' ||
+        !tab.active || tab.windowId !== operation.windowId || !currentWindow.focused ||
+        !loginConnectionReady(connection, operation)) {
+      sendLoginResult(connection, requestId, 'origin-changed'); return;
+    }
+    args = [operation.origin, operation.usernameSelector, operation.passwordSelector, operation.fieldToken,
+      Math.min(operation.notAfterUtc, request.notAfterUtc), 'fill', request.username, request.password];
+    // documentIds binds the fill to the exact main-frame document preflighted
+    // before the launcher released credentials. Never fall back to MAIN world.
+    const results = await chrome.scripting.executeScript({
+      target: { tabId: operation.tabId, documentIds: [operation.documentId] }, world: 'ISOLATED',
+      func: inspectOrFillLoginPage, args
+    });
+    if (results.length !== 1 || results[0].frameId !== 0 || results[0].documentId !== operation.documentId) {
+      sendLoginResult(connection, requestId, 'unavailable'); return;
+    }
+    sendLoginResult(connection, requestId, results[0].result);
+  } catch { sendLoginResult(connection, requestId, 'unavailable'); }
+  finally {
+    request.username = '';
+    request.password = '';
+    if (args) { args[6] = ''; args[7] = ''; args = null; }
+    if (operation) {
+      clearTimeout(operation.expiryTimer);
+      if (loginOperations.get(requestId) === operation) loginOperations.delete(requestId);
+      await clearPreparedLogin(operation);
+    }
+  }
+}
+
+// Serialized into the main frame's isolated extension world. Prepared state
+// contains only field references and an expiry, never username/password values.
+function inspectOrFillLoginPage(expectedOrigin, usernameSelector, passwordSelector,
+  fieldToken, notAfterUtc, phase, username, password) {
+  const stateName = '__fullStackLauncherPreparedLoginV1';
+  let states = globalThis[stateName];
+  if (!(states instanceof Map)) {
+    states = new Map();
+    Object.defineProperty(globalThis, stateName, { value: states, configurable: true });
+  }
+  if (phase === 'clear') { states.delete(fieldToken); return 'unavailable'; }
+  const validDocument = () => window === window.top && location.origin === expectedOrigin &&
+    document.readyState !== 'loading' && Date.now() < notAfterUtc;
+  const editable = input => input instanceof HTMLInputElement && input.isConnected &&
+    !input.disabled && !input.readOnly && !input.matches(':disabled') && !input.hidden &&
+    !input.closest('[inert]') && input.getBoundingClientRect().width > 0 &&
+    input.getBoundingClientRect().height > 0 && getComputedStyle(input).display !== 'none' &&
+    getComputedStyle(input).visibility === 'visible' && getComputedStyle(input).opacity !== '0';
+  const validUsername = input => editable(input) && ['text', 'email'].includes(input.type);
+  const validPassword = input => editable(input) && input.type === 'password' &&
+    !input.autocomplete.toLowerCase().split(/\s+/).includes('new-password');
+  const sameOriginAction = value => {
+    try {
+      const action = new URL(value, document.baseURI);
+      return action.origin === expectedOrigin && !action.username && !action.password &&
+        ['http:', 'https:'].includes(action.protocol);
+    } catch { return false; }
+  };
+  const safeForm = form => {
+    if (!(form instanceof HTMLFormElement) || !form.isConnected || form.method.toLowerCase() !== 'post' ||
+        !sameOriginAction(form.action || location.href) ||
+        (form.target && !['_self', '_top'].includes(form.target.toLowerCase())) || form.elements.length > 5000) return false;
+    for (const element of form.elements) {
+      if (element.hasAttribute('formaction') && !sameOriginAction(element.formAction)) return false;
+      if (element.hasAttribute('formmethod') && element.formMethod.toLowerCase() !== 'post') return false;
+      if (element.hasAttribute('formtarget') && !['_self', '_top'].includes(element.formTarget.toLowerCase())) return false;
+    }
+    return true;
+  };
+  const singleSelector = (selector, predicate) => {
+    const found = document.querySelectorAll(selector);
+    return found.length === 1 && predicate(found[0]) ? found[0] : null;
+  };
+  let prepared = null;
+  try {
+    if (location.origin !== expectedOrigin || window !== window.top) return 'origin-changed';
+    if (!validDocument()) return 'expired';
+    let passwordField;
+    let usernameField;
+    if (passwordSelector) passwordField = singleSelector(passwordSelector, validPassword);
+    else {
+      const inputs = document.querySelectorAll('input[type="password"]');
+      if (inputs.length > 5000) return 'selectors-needed';
+      const passwords = [...inputs].filter(validPassword);
+      passwordField = passwords.length === 1 ? passwords[0] : null;
+    }
+    if (!passwordField?.form) return 'selectors-needed';
+    const form = passwordField.form;
+    if (usernameSelector) usernameField = singleSelector(usernameSelector, validUsername);
+    else {
+      const inputs = [...form.elements].filter(validUsername);
+      const preferred = inputs.filter(input => input.autocomplete.toLowerCase().split(/\s+/)
+        .some(value => ['username', 'email'].includes(value)) || input.type === 'email');
+      const choices = preferred.length ? preferred : inputs;
+      usernameField = choices.length === 1 ? choices[0] : null;
+    }
+    if (!usernameField || usernameField.form !== form) return 'selectors-needed';
+    if (!safeForm(form)) return 'unsafe-form';
+    if (phase === 'prepare') {
+      states.set(fieldToken, { usernameField, passwordField, form, expectedOrigin, notAfterUtc });
+      setTimeout(() => states.delete(fieldToken), Math.max(1, notAfterUtc - Date.now()));
+      return 'ready';
+    }
+    prepared = states.get(fieldToken);
+    states.delete(fieldToken);
+    if (phase !== 'fill' || !prepared || prepared.expectedOrigin !== expectedOrigin ||
+        prepared.usernameField !== usernameField || prepared.passwordField !== passwordField ||
+        prepared.form !== form || Date.now() >= prepared.notAfterUtc) return 'expired';
+    if (typeof username !== 'string' || typeof password !== 'string' || !username || !password ||
+        username.length > 1024 || password.length > 4096 ||
+        (usernameField.maxLength >= 0 && username.length > usernameField.maxLength) ||
+        (passwordField.maxLength >= 0 && password.length > passwordField.maxLength)) return 'selectors-needed';
+    const setValue = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set;
+    if (typeof setValue !== 'function') return 'unavailable';
+    // No submit(), requestSubmit(), button clicks or keyboard events are used.
+    setValue.call(usernameField, username);
+    usernameField.dispatchEvent(new Event('input', { bubbles: true }));
+    usernameField.dispatchEvent(new Event('change', { bubbles: true }));
+    // Page input handlers may replace fields, redirect, or change form actions.
+    // Revalidate every boundary before assigning the password.
+    if (!validDocument()) return 'origin-changed';
+    if (!validUsername(usernameField) || !validPassword(passwordField) ||
+        usernameField.form !== form || passwordField.form !== form) return 'selectors-needed';
+    if (!safeForm(form)) return 'unsafe-form';
+    setValue.call(passwordField, password);
+    passwordField.dispatchEvent(new Event('input', { bubbles: true }));
+    passwordField.dispatchEvent(new Event('change', { bubbles: true }));
+    return 'filled';
+  } catch { return 'selectors-needed'; }
+  finally {
+    username = '';
+    password = '';
+    prepared = null;
+    if (phase === 'fill') states.delete(fieldToken);
+  }
 }
 
 function localSite(value) {
