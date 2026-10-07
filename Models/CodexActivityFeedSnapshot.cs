@@ -35,10 +35,15 @@ public sealed record CodexActivityAgent(
     public bool IsRecent => IsSleeping || IsFailed;
     public bool IsSubagent => !string.IsNullOrWhiteSpace(ParentId);
     public bool ConfirmingCompletion { get; init; }
+    // Family state can be Running solely because a child is working. Retain the
+    // readable member state for counts without changing the chat-card projection.
+    public AgentRunState? OwnState { get; init; }
+    public bool? OwnCompletionConfirmed { get; init; }
     public bool HasFailedChildren { get; init; }
     public bool HasInputBlockedChildren { get; init; }
     public bool CanDismiss { get; init; }
     public string? ActivityIdentity { get; init; }
+    public DateTimeOffset? ActivityStartedAt { get; init; }
     public string? FeedbackIdentity { get; init; }
     public string? Model { get; init; }
     public string? ReasoningEffort { get; init; }

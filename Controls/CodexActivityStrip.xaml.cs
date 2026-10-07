@@ -103,6 +103,7 @@ public partial class CodexActivityStrip : UserControl, INotifyPropertyChanged
     public event PropertyChangedEventHandler? PropertyChanged;
     public event RoutedEventHandler? WatcherRequested;
     public event RoutedEventHandler? StartAgentRequested;
+    public event Action<CodexActivityFeedSnapshot>? AllProjectsSnapshotChanged;
 
     public CodexActivityStrip()
     {
@@ -261,6 +262,11 @@ public partial class CodexActivityStrip : UserControl, INotifyPropertyChanged
             // A failed read must stop the typing animation and never imply successful completion.
             _readFailed = true;
             _initializing = false;
+            AllProjectsSnapshotChanged?.Invoke((_allProjectsSnapshot ?? CodexActivityFeedSnapshot.Initial) with
+            {
+                IsAvailable = false,
+                StatusText = "Local Codex activity could not be read. The launcher will retry automatically."
+            });
             foreach (var agent in Agents) agent.MarkUnavailable();
             NotifyView();
         }
@@ -278,6 +284,7 @@ public partial class CodexActivityStrip : UserControl, INotifyPropertyChanged
     private void Apply(CodexActivityFeedSnapshot snapshot)
     {
         _allProjectsSnapshot = snapshot;
+        AllProjectsSnapshotChanged?.Invoke(snapshot);
         ApplyProject(snapshot.ForProject(_selectedProjectId, _selectedProjectName));
     }
 

@@ -1,5 +1,25 @@
 # Codex launch and command access
 
+## Start Agent fails before sending
+
+On first use, **Start Agent** loads the effective access configuration for the selected project through an owned native App Server connection. It initializes the connection, then sends `config/read` with the project folder as `cwd`. Model discovery follows that lookup. These operations create no chat and submit no prompt.
+
+Older Launcher diagnostics replace an unclassified RPC error with advice to open an exact chat. That advice is misleading at this stage because the composer has not created a chat. Startup failures now retain the operation (`initialize`, `config/read`, or `model/list`), numeric RPC code when reported, and fixed setup guidance. Raw server messages, configuration values, and credentials remain private. Failed access discovery still blocks submission; Launcher never guesses a permission mode or broadens access to get past the failure.
+
+The reported work-machine failure was not reproduced on this machine. Its installed `codex-cli 0.162.0-alpha.2` accepts the project-scoped configuration lookup with both stable and experimental initialization. This does not establish compatibility or configuration health on the work machine.
+
+Possible machine differences include an older native executable found first on `PATH`, different user/project/managed configuration, and an already-saved access preference on the working machine that bypasses default discovery. These are investigation leads, not confirmed causes. Launcher selects a native `codex.exe`; a terminal's npm command shim can resolve differently.
+
+On the failing machine, collect the updated red startup error and the following non-secret output under the same Windows account:
+
+```powershell
+Get-Command codex -All | Select-Object CommandType, Source
+codex --version
+codex login status
+```
+
+Do not share tokens, credential files, or raw configuration. Compare the selected native installation and reported RPC operation/code before changing settings or attempting another submission.
+
 ## October 7, 2026 investigation
 
 The Luna **Implement next step** task reached Codex after **Start Queue**. Its first command failed before process startup with `helper_unknown_error: setup refresh had errors`. This was not a failed Notes save or a missing Launcher MCP connection.

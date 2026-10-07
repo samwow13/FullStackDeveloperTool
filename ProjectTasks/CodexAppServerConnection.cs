@@ -19,12 +19,14 @@ internal sealed class CodexAppServerConnection : IAsyncDisposable
     private const int ImageMaximumBufferedCharacters = 72 * 1024 * 1024;
     internal const string UnavailableMessage = "Codex connection is unavailable. Check installation, sign-in, model access, and configuration in Codex.";
     internal const string IncompatibleMessage = "Codex returned an unsupported response. Update Codex and try again.";
+    internal const string NotFoundMessage = "Codex was not found. Install the Windows Codex app or add a native codex.exe to PATH, then reopen the launcher.";
     private readonly Process _process;
     private readonly int _maximumLineLength;
     private readonly int _maximumBufferedCharacters;
     private readonly CancellationTokenSource _lifetime = new();
     private readonly SemaphoreSlim _writeLock = new(1, 1);
-    private readonly ConcurrentDictionary<int, TaskCompletionSource<JsonElement>> _requests = new();
+    private sealed record PendingRequest(string Method, TaskCompletionSource<JsonElement> Completion);
+    private readonly ConcurrentDictionary<int, PendingRequest> _requests = new();
     private readonly Channel<(JsonElement Message, int Length)> _notifications = Channel.CreateBounded<(JsonElement, int)>(
         new BoundedChannelOptions(512) { SingleReader = true, SingleWriter = true, FullMode = BoundedChannelFullMode.Wait });
     private readonly Task _reader;
@@ -85,7 +87,7 @@ internal sealed class CodexAppServerConnection : IAsyncDisposable
         ThrowIfUnavailable();
         var id = Interlocked.Increment(ref _requestId);
         var completion = new TaskCompletionSource<JsonElement>(TaskCreationOptions.RunContinuationsAsynchronously);
-        if (!_requests.TryAdd(id, completion))
+        if (!_requests.TryAdd(id, new PendingRequest(method, completion)))
             throw new InvalidOperationException(IncompatibleMessage);
         try
         {
@@ -179,12 +181,12 @@ internal sealed class CodexAppServerConnection : IAsyncDisposable
                 {
                     var code = error.ValueKind == JsonValueKind.Object && error.TryGetProperty("code", out var codeValue)
                         && codeValue.ValueKind == JsonValueKind.Number && codeValue.TryGetInt32(out var parsed) ? parsed : 0;
-                    pending.TrySetException(new CodexRequestException(code, error));
+                    pending.Completion.TrySetException(new CodexRequestException(code, error, pending.Method));
                 }
                 else if (root.TryGetProperty("result", out var result) && result.ValueKind == JsonValueKind.Object)
-                    pending.TrySetResult(result.Clone());
+                    pending.Completion.TrySetResult(result.Clone());
                 else
-                    pending.TrySetException(new InvalidOperationException(IncompatibleMessage));
+                    pending.Completion.TrySetException(new InvalidOperationException(IncompatibleMessage));
             }
         }
         catch (Exception ex)
@@ -194,7 +196,7 @@ internal sealed class CodexAppServerConnection : IAsyncDisposable
                 : new IOException(UnavailableMessage);
             Interlocked.CompareExchange(ref _failure, safe, null);
             foreach (var request in _requests.Values)
-                request.TrySetException(safe);
+                request.Completion.TrySetException(safe);
             _notifications.Writer.TryComplete(safe);
         }
     }
@@ -271,7 +273,7 @@ internal sealed class CodexAppServerConnection : IAsyncDisposable
                 if (candidate is not null) return candidate;
             }
         }
-        throw new InvalidOperationException("Codex was not found. Install the Windows Codex app or add a native codex.exe to PATH, then reopen the launcher.");
+        throw new InvalidOperationException(NotFoundMessage);
     }
 
     private static string? ExecutableIn(string directory)
@@ -330,9 +332,15 @@ internal sealed class CodexInteractionRequiredException(string? method = null) :
     _ => "Codex requested approval, input, or a client tool. Open Codex to review it; Full Stack Launcher did not approve or answer the request."
 }) { }
 
-internal sealed class CodexRequestException(int code, JsonElement error) : InvalidOperationException(code switch
+internal sealed class CodexRequestException(int code, JsonElement error, string? method = null)
+    : InvalidOperationException(method is "initialize" or "config/read" or "model/list"
+        ? CodexFailureDetails.Describe(error, method)
+        : code switch
 {
     -32601 or -32602 => CodexAppServerConnection.IncompatibleMessage,
     -32001 => "Codex is busy. Wait briefly and explicitly try again.",
     _ => CodexFailureDetails.Describe(error)
-}) { }
+})
+{
+    internal int Code { get; } = code;
+}

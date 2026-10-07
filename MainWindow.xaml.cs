@@ -105,6 +105,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         VisibleProjectItems.Filter = item => item is ProjectViewModel project && project.IsArchived == ShowArchivedProjects;
         InitializeComponent();
         InitializeSidebarAutoHide();
+        InitializeProjectAgentActivity();
         InitializeSectionsMenu();
         InitializeNextCommitSettings();
         _consoleTimer.Tick += (_, _) => FlushConsoleOutput();
@@ -231,6 +232,8 @@ public partial class MainWindow : Window, INotifyPropertyChanged
             finally { _refreshingProjectList = false; }
             return;
         }
+        if (ProjectList.SelectedValue is ProjectProfile selected)
+            AcknowledgeProjectAgentCompletion(selected.Id);
         await ShowSelectedProjectAsync(ProjectList.SelectedValue as ProjectProfile);
     }
 

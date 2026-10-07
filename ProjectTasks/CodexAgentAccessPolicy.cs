@@ -16,11 +16,19 @@ public static class CodexAgentAccessPolicy
     {
         using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         timeout.CancelAfter(TimeSpan.FromSeconds(30));
-        await using var connection = await CodexAppServerConnection.StartAsync(folder, timeout.Token)
-            .ConfigureAwait(false);
-        // The composer presents an explicit access choice before submission.
-        return await LoadConfiguredDefaultAsync(connection, folder, timeout.Token,
-            requireSupportedMode: false).ConfigureAwait(false);
+        try
+        {
+            await using var connection = await CodexAppServerConnection.StartAsync(folder, timeout.Token)
+                .ConfigureAwait(false);
+            // The composer presents an explicit access choice before submission.
+            return await LoadConfiguredDefaultAsync(connection, folder, timeout.Token,
+                requireSupportedMode: false).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { throw; }
+        catch (Exception ex)
+        {
+            throw new InvalidOperationException(CodexFailureDetails.DescribeAccessLookup(ex));
+        }
     }
 
     internal static async Task<CodexAgentAccessMode> LoadConfiguredDefaultAsync(

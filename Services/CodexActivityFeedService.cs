@@ -470,10 +470,13 @@ public sealed partial class CodexActivityFeedService
                 agent.LatestTurnId, agent.ParentId, tracked.ObservedAt,
                 agent.CompletedAt ?? tracked.TerminalObservedAt, detail, waitingForChildren && !unknownChild)
                 { SummarySource = source, ConfirmingCompletion = confirming && state == AgentRunState.Waiting,
+                    OwnState = tracked.Missing ? AgentRunState.Unknown : agent.State,
+                    OwnCompletionConfirmed = !tracked.Missing && agent.State == AgentRunState.Completed && IsSettled(tracked),
                     HasFailedChildren = failedChildren && state == AgentRunState.Failed,
                     HasInputBlockedChildren = inputBlockedChildren && state == AgentRunState.NeedsInput,
                     CanDismiss = IsSettled(tracked) && !HasUnresolvedDescendant(agent.Id),
                     ActivityIdentity = ActivityIdentity(agent),
+                    ActivityStartedAt = agent.ActivityStartedAt,
                     FeedbackIdentity = feedbackIdentity,
                     Model = agent.Model,
                     ReasoningEffort = agent.ReasoningEffort,
@@ -556,7 +559,10 @@ public sealed partial class CodexActivityFeedService
             title + "\n" + root.ProjectPath + "\nParent chat metadata anchors newly observed subagent work.")
         {
             SummarySource = "Chat title",
+            OwnState = IsSuppressed(root) ? AgentRunState.Unknown : root.State,
+            OwnCompletionConfirmed = false,
             ActivityIdentity = ActivityIdentity(root),
+            ActivityStartedAt = root.ActivityStartedAt,
             Model = root.Model,
             ReasoningEffort = root.ReasoningEffort
         };

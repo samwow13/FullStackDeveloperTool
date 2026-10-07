@@ -14,10 +14,13 @@ internal static class CodexFailureDetails
     private const int MaximumValues = 64;
     private const int MaximumStringCharacters = 4096;
 
-    internal static string Describe(JsonElement error)
+    internal static string Describe(JsonElement error, string? method = null)
     {
         var evidence = new FailureEvidence();
         Inspect(error, evidence, 0);
+
+        if (method is "initialize" or "config/read" or "model/list")
+            return DescribeSetup(method, evidence);
 
         if (evidence.FileInUse && (evidence.SandboxRuntime || evidence.SetupRefreshFailed || evidence.HelperUnknownError))
             return "Windows sandbox runtime files are in use (os error 32). Wait for the owning process to release those files, then explicitly retry. No command startup was confirmed.";
@@ -34,6 +37,62 @@ internal static class CodexFailureDetails
             -32001 => "Codex is busy (-32001). Wait briefly and explicitly try again.",
             _ => "Codex reported an error without a recognized safe failure category. Open the exact chat to review details; retain its task and turn IDs before any new attempt."
         };
+    }
+
+    private static string DescribeSetup(string method, FailureEvidence evidence)
+    {
+        // Only fixed operation names, numeric codes and recognized categories
+        // leave this boundary. Never expose the server's message or config data.
+        var operation = method switch
+        {
+            "initialize" => "Codex connection initialization",
+            "config/read" => "Codex access configuration lookup",
+            _ => "Codex model discovery"
+        };
+        var code = evidence.RpcCode is { } value ? $"; RPC error {value}" : "; no RPC code reported";
+        var reason = evidence.RpcCode switch
+        {
+            -32600 => "Codex rejected the protocol request.",
+            -32601 => "This Codex version does not support the requested method.",
+            -32602 => "Codex rejected the request parameters.",
+            -32001 => "Codex is busy. Wait briefly before refreshing.",
+            _ => evidence.Category is { } category
+                ? $"Codex reported failure category {category}."
+                : "Codex did not report a recognized failure category."
+        };
+        if (evidence.FileInUse && (evidence.SandboxRuntime || evidence.SetupRefreshFailed || evidence.HelperUnknownError))
+            reason = "Windows sandbox runtime files are in use (os error 32). Wait for the owning process to release those files.";
+        else if (evidence.SetupRefreshFailed)
+            reason = "Windows sandbox setup refresh failed. Check Codex sandbox setup.";
+        else if (evidence.HelperUnknownError)
+            reason = "Codex Windows command helper failed (helper_unknown_error). Check Codex sandbox setup.";
+        var guidance = method switch
+        {
+            "initialize" => "Check the installed native Codex version and Launcher compatibility, then refresh.",
+            "config/read" => "Check the selected project folder, Codex configuration, and installed native Codex version, then refresh.",
+            _ => "Check Codex sign-in, model access, connectivity, and installed native Codex version, then refresh."
+        };
+        return $"{operation} failed ({method}{code}). {reason} {guidance} This check created no chat and submitted no prompt.";
+    }
+
+    internal static string DescribeAccessLookup(Exception exception)
+    {
+        if (exception is CodexRequestException) return exception.Message;
+        var reason = exception switch
+        {
+            InvalidOperationException when exception.Message is CodexAppServerConnection.NotFoundMessage
+                or CodexAppServerConnection.UnavailableMessage or CodexAppServerConnection.IncompatibleMessage => exception.Message,
+            CodexInteractionRequiredException => "Codex requested approval or input during configuration lookup. Launcher cannot answer that request.",
+            Win32Exception native => $"The Codex process could not start (Windows error {native.NativeErrorCode}). Check installation and executable access.",
+            UnauthorizedAccessException or System.Security.SecurityException =>
+                "Launcher could not access the Codex executable or selected project folder. Check local permissions.",
+            JsonException => "Codex returned malformed configuration data. Check Codex and Launcher compatibility.",
+            OperationCanceledException => "The configuration lookup timed out or was canceled. Check Codex responsiveness.",
+            IOException => "The Codex connection closed or local configuration storage was unavailable. Check local setup.",
+            ArgumentException or NotSupportedException => "The Codex executable or selected project folder could not be used. Check local setup.",
+            _ => "Check Codex installation, the selected project folder, and configuration compatibility."
+        };
+        return $"Codex access configuration lookup failed (config/read). {reason} Refresh after resolving it. This check created no chat and submitted no prompt.";
     }
 
     internal static string Describe(Exception exception)

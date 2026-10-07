@@ -1,4 +1,5 @@
 using FullStackLauncher.Models;
+using FullStackLauncher.Services;
 
 namespace FullStackLauncher.ViewModels;
 
@@ -9,6 +10,7 @@ public sealed class ProjectViewModel(ProjectProfile profile, IReadOnlyList<Servi
     private IReadOnlyList<ProjectBranchViewModel> _branches =
         [new("Checking branch…", "Reading Git information from the project and service folders.")];
     private bool _isDetailsExpanded;
+    private ProjectAgentActivity _agentActivity;
 
     public ProjectProfile Profile { get; } = profile;
     public string Name => Profile.Name;
@@ -25,6 +27,18 @@ public sealed class ProjectViewModel(ProjectProfile profile, IReadOnlyList<Servi
     public bool IsArchived => Profile.IsArchived;
     public IReadOnlyList<ServiceViewModel> Services => _services;
     public IReadOnlyList<ProjectBranchViewModel> Branches => _branches;
+    public int RunningAgentCount => _agentActivity.RunningCount;
+    public bool HasUnreadAgentCompletion => _agentActivity.HasUnreadCompletion;
+    public string AgentActivityDescription
+    {
+        get
+        {
+            if (!_agentActivity.HasSnapshot) return "Checking Codex agent activity.";
+            var count = $"{RunningAgentCount} {(RunningAgentCount == 1 ? "agent" : "agents")} running.";
+            return (_agentActivity.IsAvailable ? count : "Last observed: " + count) +
+                (HasUnreadAgentCompletion ? " Completed agent work; click this project to review." : "");
+        }
+    }
     public bool IsDetailsExpanded
     {
         get => _isDetailsExpanded;
@@ -36,6 +50,16 @@ public sealed class ProjectViewModel(ProjectProfile profile, IReadOnlyList<Servi
         if (_branches.SequenceEqual(branches)) return;
         _branches = branches;
         Changed(nameof(Branches));
+    }
+
+    public void UpdateAgentActivity(ProjectAgentActivity activity)
+    {
+        if (_agentActivity == activity) return;
+        var previous = _agentActivity;
+        _agentActivity = activity;
+        if (previous.RunningCount != activity.RunningCount) Changed(nameof(RunningAgentCount));
+        if (previous.HasUnreadCompletion != activity.HasUnreadCompletion) Changed(nameof(HasUnreadAgentCompletion));
+        Changed(nameof(AgentActivityDescription));
     }
 
     public void RefreshName()

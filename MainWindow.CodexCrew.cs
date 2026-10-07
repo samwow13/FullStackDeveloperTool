@@ -13,6 +13,7 @@ public partial class MainWindow
             new[] { _store.ResolveRoot(project) }.Concat(project.Services.Select(service =>
                 _store.ResolveWorkingDirectory(project, service))).Distinct(StringComparer.OrdinalIgnoreCase).ToArray())).ToArray();
         CodexCrewPanel.SetProjectScope(SelectedProject?.Id, SelectedProject?.Name, scopes);
+        RefreshProjectAgentActivity();
     }
 
     public int CodexCrewVisibleAgents
