@@ -1101,6 +1101,8 @@
             </Grid>
             <controls:CodexActivityStrip x:Name="CodexCrewPanel" Grid.Row="4" Margin="0,14,0,0" VisibleAgents="{Binding CodexCrewVisibleAgents, Mode=TwoWay}"
                                          AccountUsage="{Binding CodexAccountUsage}"
+                                         CanStartAgent="{Binding CanStartAgent}"
+                                         StartAgentRequested="StartCodexAgent_Click"
                                          ThoughtBubblesEnabled="{Binding CodexCrewThoughtBubblesEnabled, Mode=TwoWay}"
                                          ThoughtBubbleSeconds="{Binding CodexCrewThoughtBubbleSeconds, Mode=TwoWay}"
                                          WatcherRequested="CodexAlerts_Click"/>

@@ -11,11 +11,17 @@ namespace FullStackLauncher.ProjectTasks;
 /// <summary>An owned, hidden native App Server child; never a connection to the desktop daemon.</summary>
 internal sealed class CodexAppServerConnection : IAsyncDisposable
 {
-    private const int MaximumLineLength = 1024 * 1024;
-    private const int MaximumBufferedCharacters = 8 * 1024 * 1024;
+    private const int DefaultMaximumLineLength = 1024 * 1024;
+    private const int DefaultMaximumBufferedCharacters = 8 * 1024 * 1024;
+    // A chat permits 24 MB of image bytes (32 MB in base64). Responses may
+    // contain those images again; retain bounded room for text and JSON syntax.
+    private const int ImageMaximumLineLength = 36 * 1024 * 1024;
+    private const int ImageMaximumBufferedCharacters = 72 * 1024 * 1024;
     internal const string UnavailableMessage = "Codex connection is unavailable. Check installation, sign-in, model access, and configuration in Codex.";
     internal const string IncompatibleMessage = "Codex returned an unsupported response. Update Codex and try again.";
     private readonly Process _process;
+    private readonly int _maximumLineLength;
+    private readonly int _maximumBufferedCharacters;
     private readonly CancellationTokenSource _lifetime = new();
     private readonly SemaphoreSlim _writeLock = new(1, 1);
     private readonly ConcurrentDictionary<int, TaskCompletionSource<JsonElement>> _requests = new();
@@ -28,15 +34,17 @@ internal sealed class CodexAppServerConnection : IAsyncDisposable
     private int _bufferedCharacters;
     private int _disposed;
 
-    private CodexAppServerConnection(Process process)
+    private CodexAppServerConnection(Process process, bool includeImagePayloads)
     {
         _process = process;
+        _maximumLineLength = includeImagePayloads ? ImageMaximumLineLength : DefaultMaximumLineLength;
+        _maximumBufferedCharacters = includeImagePayloads ? ImageMaximumBufferedCharacters : DefaultMaximumBufferedCharacters;
         _reader = ReadMessagesAsync();
         _stderrDrain = DrainErrorAsync();
     }
 
     public static async Task<CodexAppServerConnection> StartAsync(string folder, CancellationToken token,
-        bool experimentalApi = false)
+        bool experimentalApi = false, bool includeImagePayloads = false)
     {
         token.ThrowIfCancellationRequested();
         var process = new Process();
@@ -46,7 +54,7 @@ internal sealed class CodexAppServerConnection : IAsyncDisposable
             process.StartInfo = CreateStartInfo(FindExecutable(), folder);
             if (!process.Start())
                 throw new InvalidOperationException(UnavailableMessage);
-            connection = new CodexAppServerConnection(process);
+            connection = new CodexAppServerConnection(process, includeImagePayloads);
             var parameters = new Dictionary<string, object>
             {
                 ["clientInfo"] = new
@@ -111,7 +119,7 @@ internal sealed class CodexAppServerConnection : IAsyncDisposable
     private async Task SendAsync(object message, CancellationToken token, Action? beforeSend = null)
     {
         var serialized = JsonSerializer.Serialize(message);
-        if (serialized.Length > MaximumLineLength)
+        if (serialized.Length > _maximumLineLength)
             throw new InvalidOperationException(IncompatibleMessage);
         await _writeLock.WaitAsync(token).ConfigureAwait(false);
         try
@@ -129,7 +137,7 @@ internal sealed class CodexAppServerConnection : IAsyncDisposable
     {
         try
         {
-            var reader = new JsonLineReader(_process.StandardOutput);
+            var reader = new JsonLineReader(_process.StandardOutput, _maximumLineLength);
             while (!_lifetime.IsCancellationRequested)
             {
                 var line = await reader.ReadLineAsync(_lifetime.Token).ConfigureAwait(false);
@@ -153,10 +161,10 @@ internal sealed class CodexAppServerConnection : IAsyncDisposable
                             id = serverId.Clone(),
                             error = new { code = -32601, message = "This client does not support server requests." }
                         }, _lifetime.Token).ConfigureAwait(false);
-                        throw new CodexInteractionRequiredException();
+                        throw new CodexInteractionRequiredException(method.GetString());
                     }
                     var buffered = Interlocked.Add(ref _bufferedCharacters, line.Length);
-                    if (buffered > MaximumBufferedCharacters || !_notifications.Writer.TryWrite((root.Clone(), line.Length)))
+                    if (buffered > _maximumBufferedCharacters || !_notifications.Writer.TryWrite((root.Clone(), line.Length)))
                         throw new InvalidOperationException(IncompatibleMessage);
                     continue;
                 }
@@ -171,7 +179,7 @@ internal sealed class CodexAppServerConnection : IAsyncDisposable
                 {
                     var code = error.ValueKind == JsonValueKind.Object && error.TryGetProperty("code", out var codeValue)
                         && codeValue.ValueKind == JsonValueKind.Number && codeValue.TryGetInt32(out var parsed) ? parsed : 0;
-                    pending.TrySetException(new CodexRequestException(code));
+                    pending.TrySetException(new CodexRequestException(code, error));
                 }
                 else if (root.TryGetProperty("result", out var result) && result.ValueKind == JsonValueKind.Object)
                     pending.TrySetResult(result.Clone());
@@ -283,7 +291,7 @@ internal sealed class CodexAppServerConnection : IAsyncDisposable
         catch (Exception ex) when (ex is InvalidOperationException or Win32Exception or AggregateException) { }
     }
 
-    private sealed class JsonLineReader(StreamReader reader)
+    private sealed class JsonLineReader(StreamReader reader, int maximumLineLength)
     {
         private readonly char[] _buffer = new char[4096];
         private int _position;
@@ -302,19 +310,29 @@ internal sealed class CodexAppServerConnection : IAsyncDisposable
                 }
                 var character = _buffer[_position++];
                 if (character == '\n') return line.ToString().TrimEnd('\r');
-                if (line.Length >= MaximumLineLength) throw new InvalidOperationException(IncompatibleMessage);
+                if (line.Length >= maximumLineLength) throw new InvalidOperationException(IncompatibleMessage);
                 line.Append(character);
             }
         }
     }
 }
 
-internal sealed class CodexInteractionRequiredException() : InvalidOperationException(
-    "Codex requested approval, input, or a client tool. Open Codex to review it; Full Stack Launcher did not approve or answer the request.") { }
+internal sealed class CodexInteractionRequiredException(string? method = null) : InvalidOperationException(method switch
+{
+    "item/commandExecution/requestApproval" or "execCommandApproval" =>
+        "Codex requested command approval, but Launcher cannot answer approval prompts. Open this chat in Codex to review and continue. Launcher did not approve the command.",
+    "item/fileChange/requestApproval" or "applyPatchApproval" =>
+        "Codex requested file-change approval, but Launcher cannot answer approval prompts. Open this chat in Codex to review and continue. Launcher did not approve the change.",
+    "item/permissions/requestApproval" =>
+        "Codex requested additional permissions, but Launcher cannot answer permission prompts. Open this chat in Codex to review and continue. Launcher did not grant permissions.",
+    "item/tool/requestUserInput" or "mcpServer/elicitation/request" =>
+        "Codex requested input that Launcher cannot answer. Open this chat in Codex to review and continue. Launcher did not answer the request.",
+    _ => "Codex requested approval, input, or a client tool. Open Codex to review it; Full Stack Launcher did not approve or answer the request."
+}) { }
 
-internal sealed class CodexRequestException(int code) : InvalidOperationException(code switch
+internal sealed class CodexRequestException(int code, JsonElement error) : InvalidOperationException(code switch
 {
     -32601 or -32602 => CodexAppServerConnection.IncompatibleMessage,
     -32001 => "Codex is busy. Wait briefly and explicitly try again.",
-    _ => CodexAppServerConnection.UnavailableMessage
+    _ => CodexFailureDetails.Describe(error)
 }) { }

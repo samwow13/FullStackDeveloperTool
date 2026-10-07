@@ -35,6 +35,7 @@ public sealed class CodexConnectionViewModel : INotifyPropertyChanged, IDisposab
         Folder = folder;
         _data = _store.Load();
         RefreshModelsCommand = new TaskPanelCommand(async () => await RefreshModelsAsync(), () => !IsBusy);
+        CheckCommandsCommand = new TaskPanelCommand(async () => await CheckCommandsAsync(), () => !IsBusy);
         RunCommand = new TaskPanelCommand(async () => await RunAsync(), () => CanRun);
         StopCommand = new TaskPanelCommand(async () => await StopAsync(), () => IsBusy && !_stopping);
         ReloadCommand = new TaskPanelCommand(Reload, () => !IsBusy);
@@ -90,12 +91,29 @@ public sealed class CodexConnectionViewModel : INotifyPropertyChanged, IDisposab
     }
 
     public ICommand RefreshModelsCommand { get; }
+    public ICommand CheckCommandsCommand { get; }
     public ICommand RunCommand { get; }
     public ICommand StopCommand { get; }
     public ICommand ReloadCommand { get; }
     public ICommand ConfirmAssociationCommand { get; }
     public ICommand NotVisibleCommand { get; }
     public ICommand RecordReviewCommand { get; }
+
+    private async Task CheckCommandsAsync()
+    {
+        if (IsBusy) return;
+        _busy = true;
+        _stopping = false;
+        using var check = CancellationTokenSource.CreateLinkedTokenSource(_lifetime.Token);
+        _discoveryCancellation = check;
+        Status = "Checking command access before task creation…";
+        try
+        {
+            var result = await CodexCommandAccessDiagnostic.CheckAsync(Folder, check.Token);
+            Status = result.Summary;
+        }
+        finally { _discoveryCancellation = null; _busy = false; _stopping = false; Refresh(); }
+    }
 
     private async Task RefreshModelsAsync()
     {
@@ -172,7 +190,7 @@ public sealed class CodexConnectionViewModel : INotifyPropertyChanged, IDisposab
             SaveUpdate(new CodexCheckUpdate(result.State, result.Folder, result.ModelId, result.ReasoningEffort,
                 result.ThreadId, result.TurnId, result.Summary, result.InstructionSourcePaths, result.TerminalConfirmed));
             Status = result.State == CodexCheckState.Completed
-                ? "Connection check completed. Verify this exact task's location in the Codex desktop app and record what you observe below. Automatic execution remains unavailable."
+                ? "Connection check completed. Verify this exact task's location in the Codex desktop app and record what you observe below."
                 : result.Summary;
         }
         catch (Exception ex)

@@ -3,7 +3,7 @@ namespace FullStackLauncher.ProjectTasks;
 /// <summary>Local task content, kept separate from portable launcher and monitor settings.</summary>
 public sealed class ProjectTaskData
 {
-    public int Version { get; set; } = 8;
+    public int Version { get; set; } = 9;
     // Global pause is independent of each queue's explicit, default-off enablement.
     public bool PauseAllQueues { get; set; }
     public List<ProjectTaskNote> Notes { get; set; } = [];
@@ -42,6 +42,10 @@ public sealed record AgentFollowUpNoteRequest
     public string SourcePrompt { get; init; } = "";
     public string PageUrl { get; init; } = "";
     public string PageTitle { get; init; } = "";
+    // API-only input. Normalize it into Prompt before saving/hashing so older
+    // queue owners retain the existing schema and legacy receipt hashes.
+    [System.Text.Json.Serialization.JsonIgnore]
+    public string? Summary { get; init; }
 }
 
 /// <summary>Original provenance; edits to the suggested note do not rewrite it.</summary>
@@ -102,6 +106,10 @@ public sealed class ProjectQueueItem
     public string ReasoningEffort { get; set; } = "";
     public ProjectQueueItemState State { get; set; } = ProjectQueueItemState.Pending;
     public string? LastAttemptId { get; set; }
+    // Empty for user-authored queue entries. The predecessor is a durable
+    // deduplication key even if an automatic continuation is later removed.
+    public string AutomaticLoopChainId { get; set; } = "";
+    public string AutomaticLoopPredecessorAttemptId { get; set; } = "";
 }
 
 public enum ProjectQueueItemState { Pending, Starting, Running, Completed, Failed, Interrupted, NeedsAttention, Recovering }
@@ -120,6 +128,15 @@ public sealed class ProjectQueueConfiguration
     public string DefaultReasoningEffort { get; set; } = "";
     // Measured from confirmed completion, never from submission or task start.
     public int DelayBetweenTasksMinutes { get; set; }
+    public bool AutomaticLoopEnabled { get; set; }
+    public string AutomaticLoopFolder { get; set; } = "";
+    public string AutomaticLoopModelId { get; set; } = "gpt-6-luna";
+    public string AutomaticLoopReasoningEffort { get; set; } = "high";
+    public string AutomaticLoopAppGoal { get; set; } = "";
+    public DateTimeOffset? AutomaticLoopEnabledAt { get; set; }
+    public string AutomaticLoopChainId { get; set; } = "";
+    public string AutomaticLoopSeedAttemptId { get; set; } = "";
+    public string AutomaticLoopLastGeneratedAttemptId { get; set; } = "";
     public ProjectTaskIdentity? ExternalPredecessor { get; set; }
     // Exact read-only observed terminal completion, not a semantic success claim.
     public DateTimeOffset? ExternalPredecessorSatisfiedAt { get; set; }
@@ -154,6 +171,15 @@ public sealed record ProjectTaskDispatchSnapshot
     // Frozen summary from the exact prior successful queue attempt, if any.
     // This is agent-reported context, not independent proof of correctness.
     public string PredecessorHandoff { get; init; } = "";
+    // A frozen chain boundary prevents an old active task from seeding a newly
+    // enabled loop. Continuations retain app intent without resuming a thread.
+    public string AutomaticLoopChainId { get; init; } = "";
+    public bool AutomaticLoopSeedEligible { get; init; }
+    public string AutomaticLoopSeedAttemptId { get; init; } = "";
+    public string AutomaticLoopPredecessorAttemptId { get; init; } = "";
+    public string AutomaticLoopAppGoal { get; init; } = "";
+    public string AutomaticLoopSeedPrompt { get; init; } = "";
+    public string AutomaticLoopPreviousResult { get; init; } = "";
 }
 
 /// <summary>

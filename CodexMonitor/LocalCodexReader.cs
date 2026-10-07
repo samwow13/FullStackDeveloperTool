@@ -291,12 +291,26 @@ public sealed class LocalCodexReader
                     (lifecycle?.ActivityIdentity is { } lifecycleIdentity &&
                      lifecycleIdentity.StartsWith("turn:", StringComparison.Ordinal) && lifecycleIdentity.Length > 5
                         ? lifecycleIdentity[5..] : null);
+                // The thread selection is the current saved Codex choice. Older
+                // stores may omit it; the observed turn context is a bounded fallback.
+                if ((thread.Model is null || thread.ReasoningEffort is null) &&
+                    (state is AgentRunState.Running or AgentRunState.Waiting or AgentRunState.NeedsInput ||
+                     retained?.Contains(thread.Id) == true || activeAncestors.Contains(thread.Id)))
+                {
+                    try { lifecycle ??= ReadRolloutLifecycle(thread.RolloutPath, thread.HasUserEvent); }
+                    catch (Exception exception) when (IsReadFailure(exception))
+                    { /* Display metadata must not invalidate an otherwise readable status. */ }
+                }
+                var matchingSelection = lifecycle is not null &&
+                    (latestTurnId is null || lifecycle.SelectionTurnId == latestTurnId);
                 snapshots[key].Add(new AgentSnapshot(thread.Id, thread.Title, thread.ProjectPath, state,
                     thread.ParentId, latestTurnId, projected?.CompletedAt)
                 {
                     ActivityIdentity = latestTurnId is { Length: > 0 } turnId
                         ? "turn:" + turnId : lifecycle?.ActivityIdentity,
-                    ActivityStartedAt = projected?.StartedAt ?? lifecycle?.StartedAt
+                    ActivityStartedAt = projected?.StartedAt ?? lifecycle?.StartedAt,
+                    Model = thread.Model ?? (matchingSelection ? lifecycle?.Model : null),
+                    ReasoningEffort = thread.ReasoningEffort ?? (matchingSelection ? lifecycle?.ReasoningEffort : null)
                 });
             }
 
@@ -423,8 +437,12 @@ public sealed class LocalCodexReader
         EnsureDatabaseVersion("thread_history", 1);
         EnsureDatabaseVersion("queue", 1);
         using var database = new NativeSqlite(Path.Combine(_codexHome, "state_5.sqlite"));
+        var columns = database.Query("PRAGMA table_info(threads)")
+            .Select(row => row[1]).ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var modelColumn = columns.Contains("model") ? "model" : "NULL";
+        var effortColumn = columns.Contains("reasoning_effort") ? "reasoning_effort" : "NULL";
         // Deliberately omit first_user_message, preview, and all content tables.
-        var rows = database.Query("SELECT id, cwd, source, rollout_path, archived, substr(COALESCE(NULLIF(name, ''), title), 1, 160), has_user_event FROM threads");
+        var rows = database.Query($"SELECT id, cwd, source, rollout_path, archived, substr(COALESCE(NULLIF(name, ''), title), 1, 160), has_user_event, {modelColumn}, {effortColumn} FROM threads");
         var result = new List<ThreadMetadata>(rows.Count);
         foreach (var row in rows)
         {
@@ -439,7 +457,8 @@ public sealed class LocalCodexReader
             }
 
             result.Add(new ThreadMetadata(Required(row[0]), NormalizePath(Required(row[1])),
-                row[5] ?? "Codex task", parentId, Required(row[3]), row[4] != "0", guardian, row[6] != "0"));
+                row[5] ?? "Codex task", parentId, Required(row[3]), row[4] != "0", guardian, row[6] != "0",
+                ReadSelectionValue(row[7]), ReadSelectionValue(row[8])));
         }
 
         return result;
@@ -448,14 +467,15 @@ public sealed class LocalCodexReader
     private RolloutObservation ReadRolloutLifecycle(string rolloutPath, bool hasUserEvent)
     {
         // Older/migrated tasks may have no thread_turns projection. Inspect only
-        // lifecycle discriminator fields in a bounded tail; never materialize
-        // prompt, message, reasoning, or tool payload strings.
+        // lifecycle and model-selection fields in a bounded tail; never
+        // materialize prompt, message, reasoning, or tool payload strings.
         var path = NormalizePath(rolloutPath);
         if (!IsWithin(path, _codexHome) || !File.Exists(path))
             return new(AgentRunState.Unknown, null, null);
 
         var file = new FileInfo(path);
-        if (_rolloutCache.TryGetValue(path, out var cached) && cached.Length == file.Length && cached.Modified == file.LastWriteTimeUtc &&
+        if (_rolloutCache.TryGetValue(path, out var cached) && cached.Observation.State != AgentRunState.Unknown &&
+            cached.Length == file.Length && cached.Modified == file.LastWriteTimeUtc &&
             !(cached.Observation.State == AgentRunState.Idle && hasUserEvent))
             return cached.Observation;
 
@@ -475,6 +495,10 @@ public sealed class LocalCodexReader
         var state = AgentRunState.Unknown;
         string? activityIdentity = null;
         DateTimeOffset? startedAt = null;
+        string? model = null;
+        string? reasoningEffort = null;
+        string? selectionTurnId = null;
+        var sawSelection = false;
         var idleCandidate = !hasUserEvent && offset == 0 && count == bytes.Length && count > 0;
         var malformed = false;
         var pendingQuestions = new Dictionary<string, string>(StringComparer.Ordinal);
@@ -502,6 +526,18 @@ public sealed class LocalCodexReader
 
             idleCandidate &= record.RecordType is "session_meta" or "realtime_item";
             var lifecycleType = record.RecordType == "event_msg" ? record.PayloadType : null;
+            if (record.RecordType == "turn_context")
+            {
+                if (!sawSelection || selectionTurnId != record.TurnId)
+                {
+                    model = null;
+                    reasoningEffort = null;
+                }
+                sawSelection = true;
+                selectionTurnId = record.TurnId;
+                model = record.Model ?? model;
+                reasoningEffort = record.ReasoningEffort ?? reasoningEffort;
+            }
             if (record.RecordType == "turn_context" || lifecycleType is "task_started" or "task_complete" or "turn_aborted")
                 pendingQuestions.Clear();
             if (record.RecordType == "response_item" && record.PayloadType == "function_call" &&
@@ -551,7 +587,12 @@ public sealed class LocalCodexReader
         var modifiedBefore = file.LastWriteTimeUtc;
         file.Refresh();
         if (file.Length != lengthBefore || file.LastWriteTimeUtc != modifiedBefore)
-            return new(AgentRunState.Unknown, null, null);
+            return new(AgentRunState.Unknown, null, null)
+            {
+                Model = cached?.Observation.Model,
+                ReasoningEffort = cached?.Observation.ReasoningEffort,
+                SelectionTurnId = cached?.Observation.SelectionTurnId
+            };
 
         // A bounded tail can lose the start marker. Null is deliberately not new
         // activity evidence; never substitute file length or modification time.
@@ -562,13 +603,31 @@ public sealed class LocalCodexReader
         }
         else if (activityIdentity is not null && cached is not null && cached.Observation.ActivityIdentity == activityIdentity)
             startedAt ??= cached.Observation.StartedAt;
-        var observation = new RolloutObservation(state, activityIdentity, startedAt);
+        if (malformed || lineStart != count || count != bytes.Length)
+        {
+            model = null;
+            reasoningEffort = null;
+            sawSelection = false;
+        }
+        if (cached is not null && (!sawSelection || selectionTurnId == cached.Observation.SelectionTurnId))
+        {
+            model ??= cached.Observation.Model;
+            reasoningEffort ??= cached.Observation.ReasoningEffort;
+            if (!sawSelection) selectionTurnId = cached.Observation.SelectionTurnId;
+        }
+        var observation = new RolloutObservation(state, activityIdentity, startedAt)
+        {
+            Model = model,
+            ReasoningEffort = reasoningEffort,
+            SelectionTurnId = selectionTurnId
+        };
         if (!malformed && lineStart == count && count == bytes.Length)
             observation = observation with { PendingQuestionTurns = pendingQuestions.Values.ToHashSet(StringComparer.Ordinal) };
 
         // Revisit Unknown even without a file change: a brand-new empty voice
         // session must pass the quiet period before it can be classified as idle.
-        if (state != AgentRunState.Unknown || observation.PendingQuestionTurns.Count > 0)
+        if (state != AgentRunState.Unknown || observation.PendingQuestionTurns.Count > 0 ||
+            observation.Model is not null || observation.ReasoningEffort is not null)
             _rolloutCache[path] = new RolloutCache(file.Length, file.LastWriteTimeUtc, observation);
         return observation;
     }
@@ -582,6 +641,8 @@ public sealed class LocalCodexReader
         string? toolName = null;
         string? callId = null;
         string? toolTurnId = null;
+        string? model = null;
+        string? reasoningEffort = null;
         DateTimeOffset? timestamp = null;
         while (reader.Read())
         {
@@ -611,6 +672,8 @@ public sealed class LocalCodexReader
                     var isName = reader.ValueTextEquals("name"u8);
                     var isCallId = reader.ValueTextEquals("call_id"u8);
                     var isMetadata = reader.ValueTextEquals("internal_chat_message_metadata_passthrough"u8);
+                    var isModel = reader.ValueTextEquals("model"u8);
+                    var isEffort = reader.ValueTextEquals("effort"u8) || reader.ValueTextEquals("reasoning_effort"u8);
                     if (!reader.Read())
                         throw new JsonException();
                     if (isPayloadType && reader.TokenType == JsonTokenType.String)
@@ -630,8 +693,13 @@ public sealed class LocalCodexReader
                             else reader.Skip();
                         }
                     }
-                    else if (isTurnId && reader.TokenType == JsonTokenType.String && recordType == "event_msg" &&
-                             payloadType is "task_started" or "task_complete" or "turn_aborted")
+                    else if (isModel && reader.TokenType == JsonTokenType.String && recordType == "turn_context")
+                        model = ReadSelectionValue(reader.GetString());
+                    else if (isEffort && reader.TokenType == JsonTokenType.String && recordType == "turn_context")
+                        reasoningEffort = ReadSelectionValue(reader.GetString());
+                    else if (isTurnId && reader.TokenType == JsonTokenType.String &&
+                             (recordType == "turn_context" || recordType == "event_msg" &&
+                              payloadType is "task_started" or "task_complete" or "turn_aborted"))
                         turnId = reader.GetString();
                     else
                         reader.Skip();
@@ -646,7 +714,8 @@ public sealed class LocalCodexReader
         var isLifecycle = recordType == "event_msg" &&
             payloadType is "task_started" or "task_complete" or "turn_aborted";
         return new LifecycleRecord(recordType, payloadType,
-            isLifecycle ? turnId : null, isLifecycle ? timestamp : null, toolName, callId, toolTurnId);
+            isLifecycle || recordType == "turn_context" ? turnId : null,
+            isLifecycle ? timestamp : null, toolName, callId, toolTurnId, model, reasoningEffort);
     }
 
     private static string? FindParent(JsonElement element)
@@ -735,6 +804,14 @@ public sealed class LocalCodexReader
 
     private static string Required(string? value) => string.IsNullOrWhiteSpace(value) ? throw Unavailable() : value;
 
+    private static string? ReadSelectionValue(string? value)
+    {
+        value = value?.Trim();
+        return value is { Length: > 0 and <= 128 } && value.All(character =>
+            char.IsAsciiLetterOrDigit(character) || character is '-' or '_' or '.' or '/' or ':')
+            ? value : null;
+    }
+
     private static DateTimeOffset? ReadTimestamp(string? value)
     {
         if (value is null)
@@ -752,15 +829,19 @@ public sealed class LocalCodexReader
     private static InvalidOperationException Unavailable() => new(
         "Codex local status data could not be read safely. Open Codex and verify the selected folder; completion is unconfirmed.");
 
-    private sealed record ThreadMetadata(string Id, string ProjectPath, string Title, string? ParentId, string RolloutPath, bool Archived, bool Guardian, bool HasUserEvent);
+    private sealed record ThreadMetadata(string Id, string ProjectPath, string Title, string? ParentId, string RolloutPath,
+        bool Archived, bool Guardian, bool HasUserEvent, string? Model, string? ReasoningEffort);
     private sealed record WatchedProject(string Key, string Path, int Order, HashSet<string> Repositories);
     private sealed record ProjectMatch(WatchedProject Project, int Kind, int Specificity);
     private sealed record TurnMetadata(AgentRunState State, string? TurnId, DateTimeOffset? CompletedAt, DateTimeOffset? StartedAt);
     private sealed record LifecycleRecord(string RecordType, string? PayloadType, string? TurnId, DateTimeOffset? Timestamp,
-        string? ToolName, string? CallId, string? ToolTurnId);
+        string? ToolName, string? CallId, string? ToolTurnId, string? Model, string? ReasoningEffort);
     private sealed record RolloutObservation(AgentRunState State, string? ActivityIdentity, DateTimeOffset? StartedAt)
     {
         public IReadOnlySet<string> PendingQuestionTurns { get; init; } = new HashSet<string>(StringComparer.Ordinal);
+        public string? Model { get; init; }
+        public string? ReasoningEffort { get; init; }
+        public string? SelectionTurnId { get; init; }
     }
     private sealed record PendingQuestion(long Ordinal, int Count)
     {

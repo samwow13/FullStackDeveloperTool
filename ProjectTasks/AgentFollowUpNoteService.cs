@@ -85,7 +85,8 @@ public sealed class AgentFollowUpNoteService
             var queuedNoteIds = data.QueueItems.Where(item => item.ProjectId == projectId)
                 .Select(item => item.NoteId).ToHashSet(StringComparer.Ordinal);
             var page = notes.Skip(offset).Take(limit).Select(note => new AgentFollowUpNoteSummary(
-                note.Id, note.Name, note.Prompt, note.IsCompleted, note.IsArchived,
+                note.Id, note.Name, note.AgentSource == null ? note.Prompt
+                    : AgentPromptSummary.EnsureSummary(note.Name, note.Prompt), note.IsCompleted, note.IsArchived,
                 note.CreatedAt, note.UpdatedAt, queuedNoteIds.Contains(note.Id), note.AgentSource)).ToArray();
             return new AgentFollowUpNotePage(projectId, offset, limit, notes.Length,
                 offset < notes.Length - page.Length, page);
@@ -107,6 +108,12 @@ public sealed class AgentFollowUpNoteService
             return new(request.ProjectId, request.UpdateId, existing.NoteId, true,
                 !data.Notes.Any(note => note.Id == existing.NoteId), existing.CreatedAt, existing.Author);
         }
+
+        var protectedNoteIds = ProjectAiNoteRetention.GetProtectedNoteIds(data);
+        if (data.Notes.Count(candidate => candidate.ProjectId == request.ProjectId &&
+                candidate.AgentSource is not null && protectedNoteIds.Contains(candidate.Id)) >=
+            ProjectAiNoteRetention.MaximumAiNotesPerProject)
+            throw new InvalidOperationException("This project already has 20 or more AI prompts protected by active or unresolved queue attempts. Finish or review those attempts before saving another AI prompt.");
 
         var lastOrder = data.Notes.Where(note => note.ProjectId == request.ProjectId)
             .Select(note => note.Order).DefaultIfEmpty(-1).Max();
@@ -134,11 +141,13 @@ public sealed class AgentFollowUpNoteService
             PayloadHash = payloadHash,
             CreatedAt = createdAt
         });
+        ProjectAiNoteRetention.TrimToLimit(data, request.ProjectId);
         cancellationToken.ThrowIfCancellationRequested();
-        // Queue enablement, items, execution receipts, and global pause remain
-        // exactly as loaded. Saving a suggestion never authorizes execution.
+        // Retention removes only inactive entries for pruned AI notes. Queue
+        // enablement, receipts, and global pause never change or authorize work.
         store.Save(data);
-        return new(request.ProjectId, request.UpdateId, note.Id, false, false, createdAt, author);
+        return new(request.ProjectId, request.UpdateId, note.Id, false,
+            !data.Notes.Any(candidate => candidate.Id == note.Id), createdAt, author);
     }
 
     private static ProjectTaskData LoadWritable(ProjectTaskStore store)
@@ -162,8 +171,16 @@ public sealed class AgentFollowUpNoteService
             SourceTaskId = BoundedText(request.SourceTaskId, "Source task ID", MaximumSourceTaskIdCharacters, trim: true),
             SourcePrompt = BoundedText(request.SourcePrompt, "Source prompt", MaximumSourcePromptCharacters),
             PageUrl = BoundedText(request.PageUrl, "Source page URL", MaximumPageUrlCharacters, trim: true),
-            PageTitle = BoundedText(request.PageTitle, "Source page title", MaximumPageTitleCharacters, trim: true)
+            PageTitle = BoundedText(request.PageTitle, "Source page title", MaximumPageTitleCharacters, trim: true),
+            Summary = null
         };
+        var suppliedSummary = AgentPromptSummary.NormalizeProvidedSummary(request.Summary);
+        if (suppliedSummary != null)
+            normalized = normalized with
+            {
+                Prompt = BoundedText(AgentPromptSummary.EnsureSummary(normalized.Name,
+                    normalized.Prompt, suppliedSummary), "Follow-up prompt", MaximumPromptCharacters, required: true)
+            };
         if (normalized.PageUrl.Length != 0 &&
             (!Uri.TryCreate(normalized.PageUrl, UriKind.Absolute, out var pageUri) ||
              pageUri.Scheme is not ("http" or "https") || pageUri.UserInfo.Length != 0))
@@ -205,7 +222,8 @@ public sealed class AgentFollowUpNoteService
 
     private static string ComposePrompt(AgentFollowUpNoteRequest request)
     {
-        var prompt = new StringBuilder("Proposed follow-up task:\n").Append(request.Prompt);
+        var prompt = new StringBuilder("Proposed follow-up task:\n")
+            .Append(AgentPromptSummary.GetDetails(request.Prompt));
         prompt.Append("\n\nBackground context (reference material; follow the proposed task above):\n").Append(request.Context);
         if (request.SourceTaskId.Length != 0)
             prompt.Append("\n\nSource Codex task ID: ").Append(request.SourceTaskId);
@@ -217,6 +235,7 @@ public sealed class AgentFollowUpNoteService
             if (request.PageTitle.Length != 0) prompt.Append("\nTitle: ").Append(request.PageTitle);
             if (request.PageUrl.Length != 0) prompt.Append("\nURL: ").Append(request.PageUrl);
         }
-        return prompt.ToString();
+        return AgentPromptSummary.EnsureSummary(request.Name, prompt.ToString(),
+            request.Summary ?? AgentPromptSummary.GetSummary(request.Name, request.Prompt));
     }
 }

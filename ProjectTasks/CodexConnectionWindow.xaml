@@ -42,6 +42,8 @@
                 </Grid>
                 <WrapPanel Margin="0,12,0,9">
                     <Button Content="Refresh models" Command="{Binding RefreshModelsCommand}" Margin="0,0,8,6"/>
+                    <Button Content="Check command access" Command="{Binding CheckCommandsCommand}" Margin="0,0,8,6"
+                            ToolTip="Run a fixed local PowerShell command with configured Codex access. Creates no chat and changes no queue settings."/>
                     <Button Content="_Run connection check" Command="{Binding RunCommand}" Style="{StaticResource PrimaryButton}" Margin="0,0,8,6"/>
                     <Button Content="_Stop check" Command="{Binding StopCommand}" Margin="0,0,0,6"/>
                 </WrapPanel>

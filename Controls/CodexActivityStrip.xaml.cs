@@ -1,6 +1,7 @@
 using System.Collections.ObjectModel;
 using System.ComponentModel;
 using System.IO;
+using System.Runtime.InteropServices;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Controls.Primitives;
@@ -14,7 +15,7 @@ using FullStackLauncher.Services;
 
 namespace FullStackLauncher.Controls;
 
-/// <summary>An in-memory view of local Codex work with explicit chat replies, independent of selected projects and alert preferences.</summary>
+/// <summary>A project-scoped view of globally tracked local Codex work, independent of alert preferences.</summary>
 public partial class CodexActivityStrip : UserControl, INotifyPropertyChanged
 {
     private const double CardGap = 8;
@@ -33,6 +34,8 @@ public partial class CodexActivityStrip : UserControl, INotifyPropertyChanged
         value => (int)value is >= 3 and <= 120);
     public static readonly DependencyProperty AccountUsageProperty = DependencyProperty.Register(
         nameof(AccountUsage), typeof(CodexAccountUsageSnapshot), typeof(CodexActivityStrip), new PropertyMetadata(null));
+    public static readonly DependencyProperty CanStartAgentProperty = DependencyProperty.Register(
+        nameof(CanStartAgent), typeof(bool), typeof(CodexActivityStrip), new PropertyMetadata(false));
 
     private readonly DispatcherTimer _timer = new(DispatcherPriority.Background) { Interval = TimeSpan.FromSeconds(3) };
     private readonly DispatcherTimer _bubbleTimer = new(DispatcherPriority.Background) { Interval = TimeSpan.FromMilliseconds(250) };
@@ -44,6 +47,7 @@ public partial class CodexActivityStrip : UserControl, INotifyPropertyChanged
     private bool _clearing;
     private bool _resetting;
     private string? _resetError;
+    private int _historyCopySequence;
     private bool _initializing = true;
     private bool _readFailed;
     private double _cardWidth = AutomaticCardWidth;
@@ -63,6 +67,7 @@ public partial class CodexActivityStrip : UserControl, INotifyPropertyChanged
     public bool ThoughtBubblesEnabled { get => (bool)GetValue(ThoughtBubblesEnabledProperty); set => SetValue(ThoughtBubblesEnabledProperty, value); }
     public int ThoughtBubbleSeconds { get => (int)GetValue(ThoughtBubbleSecondsProperty); set => SetValue(ThoughtBubbleSecondsProperty, value); }
     public CodexAccountUsageSnapshot? AccountUsage { get => (CodexAccountUsageSnapshot?)GetValue(AccountUsageProperty); set => SetValue(AccountUsageProperty, value); }
+    public bool CanStartAgent { get => (bool)GetValue(CanStartAgentProperty); set => SetValue(CanStartAgentProperty, value); }
     public double CardWidth => _cardWidth;
     public string ViewDescription => VisibleAgents == 0
         ? "Auto fits chat cards to the panel. Scroll to see more chats. Subagents stay inside their chat's card."
@@ -71,28 +76,33 @@ public partial class CodexActivityStrip : UserControl, INotifyPropertyChanged
             : $"Show up to {VisibleAgents} chat{(VisibleAgents == 1 ? "" : "s")} at once. Scroll to see more. Subagents stay inside their chat's card.";
 
     public ObservableCollection<ActivityCard> Agents { get; } = [];
-    public bool HasAgents => Agents.Count != 0;
+    public bool IsCodexNotRunning => !_readFailed && _snapshot?.IsCodexNotRunning == true;
+    public bool HasAgents => !IsCodexNotRunning && Agents.Count != 0;
     public bool IsEmpty => !HasAgents;
     public bool CanClear => !_clearing && !_resetting && Agents.Any(agent => agent.CanClear);
     public bool CanDismissCards => !_clearing && !_resetting && !_readFailed && _snapshot?.IsAvailable == true &&
         _feed is not null && _lifetime is not null;
     public bool GoodbyeWaveEnabled => SystemParameters.ClientAreaAnimation;
     public bool CanForceClear => !_initializing && !_clearing && !_resetting && _feed is not null;
-    public string? ActivityError => _resetError ?? (!_initializing && (_readFailed || _snapshot?.IsAvailable == false)
+    public string? ActivityError => _resetError ?? (!_initializing && !IsCodexNotRunning && (_readFailed || _snapshot?.IsAvailable == false)
         ? "Local Codex activity could not be read. The launcher will retry automatically." : null);
     public bool HasActivityError => !string.IsNullOrWhiteSpace(ActivityError);
     public string ActivityDetail => (_resetError ?? (_readFailed ? "Local Codex activity could not be read. The launcher will retry automatically."
         : _snapshot?.StatusText ?? "Reading local Codex activity without changing tasks."));
+    public string EmptyRobotState => IsCodexNotRunning ? "Unknown" : "Idle";
     public string EmptyTitle => _initializing ? "Waking up the crew…"
+        : IsCodexNotRunning ? "Codex isn't Running"
         : _readFailed || _snapshot?.IsAvailable != true ? "Activity unavailable"
         : _snapshot.UnknownCount > 0 ? "No confirmed active agents" : "Quiet keyboards";
     public string EmptyMessage => _initializing ? "Finding active chats and their agents."
+        : IsCodexNotRunning ? "Launcher stays open. Reopen Codex to resume tracking."
         : _readFailed || _snapshot?.IsAvailable != true ? "Keep Codex open. Local activity will reconnect automatically."
         : _snapshot.UnknownCount > 0 ? "Older chats have unknown status. Newly observed work appears here."
         : _snapshot.ResetAt is not null ? "Tracking reset. New chats and new turns will appear here."
         : "Your next Codex task will appear here.";
     public event PropertyChangedEventHandler? PropertyChanged;
     public event RoutedEventHandler? WatcherRequested;
+    public event RoutedEventHandler? StartAgentRequested;
 
     public CodexActivityStrip()
     {
@@ -142,6 +152,15 @@ public partial class CodexActivityStrip : UserControl, INotifyPropertyChanged
     {
         CloseMenus();
         WatcherRequested?.Invoke(this, e);
+    }
+
+    private void StartAgent_Click(object sender, RoutedEventArgs e)
+    {
+        e.Handled = true;
+        if (!CanStartAgent) return;
+        CloseMenus();
+        HideThoughtPopups();
+        StartAgentRequested?.Invoke(this, e);
     }
 
     private async void Strip_Loaded(object sender, RoutedEventArgs e)
@@ -215,6 +234,8 @@ public partial class CodexActivityStrip : UserControl, INotifyPropertyChanged
     {
         if (_refreshing || _clearing || _resetting || _lifetime is null) return;
         var token = _lifetime.Token;
+        var projects = _projects;
+        var scopeVersion = _projectScopeVersion;
         _refreshing = true;
         try
         {
@@ -226,9 +247,10 @@ public partial class CodexActivityStrip : UserControl, INotifyPropertyChanged
                     codexHome = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".codex");
                 _feed ??= new CodexActivityFeedService(codexHome,
                     new SettingsStore().SettingsPath + ".codex-crew-reset.json");
-                return _feed.ReadSnapshot(token);
+                return _feed.ReadSnapshot(projects, token);
             }, token);
             if (token.IsCancellationRequested) return;
+            if (scopeVersion != _projectScopeVersion) { _projectRefreshPending = true; return; }
             _readFailed = false;
             Apply(snapshot);
         }
@@ -242,10 +264,24 @@ public partial class CodexActivityStrip : UserControl, INotifyPropertyChanged
             foreach (var agent in Agents) agent.MarkUnavailable();
             NotifyView();
         }
-        finally { _refreshing = false; }
+        finally
+        {
+            _refreshing = false;
+            if (_projectRefreshPending && !token.IsCancellationRequested)
+            {
+                _projectRefreshPending = false;
+                _ = RefreshAsync();
+            }
+        }
     }
 
     private void Apply(CodexActivityFeedSnapshot snapshot)
+    {
+        _allProjectsSnapshot = snapshot;
+        ApplyProject(snapshot.ForProject(_selectedProjectId, _selectedProjectName));
+    }
+
+    private void ApplyProject(CodexActivityFeedSnapshot snapshot)
     {
         // Keep new messages queued while the dashboard is inactive; initial history stays suppressed.
         var showFeedback = _hasAppliedSnapshot && snapshot.IsAvailable;
@@ -254,6 +290,7 @@ public partial class CodexActivityStrip : UserControl, INotifyPropertyChanged
         _initializing = false;
         if (!snapshot.IsAvailable)
         {
+            HideThoughtPopups();
             foreach (var agent in Agents) agent.MarkUnavailable();
             NotifyView();
             return;
@@ -294,6 +331,8 @@ public partial class CodexActivityStrip : UserControl, INotifyPropertyChanged
         var feed = _feed;
         var lifetime = _lifetime;
         var token = lifetime.Token;
+        var projectId = _selectedProjectId;
+        if (projectId is null) return;
         _clearing = true;
         NotifyView();
         try
@@ -301,7 +340,7 @@ public partial class CodexActivityStrip : UserControl, INotifyPropertyChanged
             // Wait for an in-flight read before dismissal so its captured rows cannot reappear.
             while (_refreshing) await Task.Delay(40, token);
             if (token.IsCancellationRequested || !ReferenceEquals(lifetime, _lifetime)) return;
-            Apply(agentId is null ? feed.ClearRecent() : feed.DismissRecent(agentId, activityIdentity));
+            Apply(agentId is null ? feed.ClearRecent(projectId) : feed.DismissRecent(agentId, activityIdentity));
         }
         catch (OperationCanceledException) when (token.IsCancellationRequested) { }
         finally
@@ -420,7 +459,7 @@ public partial class CodexActivityStrip : UserControl, INotifyPropertyChanged
 
     private void UpdateBubbleTimer()
     {
-        if (IsLoaded && IsVisible && _hostWindow is { IsActive: true, WindowState: not WindowState.Minimized }
+        if (IsLoaded && IsVisible && HasAgents && _hostWindow is { IsActive: true, WindowState: not WindowState.Minimized }
             && (_hoverThoughtPopup is not null || Agents.Any(agent => agent.HasVisibleBubbles))) _bubbleTimer.Start();
         else _bubbleTimer.Stop();
         UpdateThoughtPopups();
@@ -472,6 +511,61 @@ public partial class CodexActivityStrip : UserControl, INotifyPropertyChanged
     private void PreviousThought_Click(object sender, RoutedEventArgs e) => NavigateThought(sender, -1);
     private void NextThought_Click(object sender, RoutedEventArgs e) => NavigateThought(sender, 1);
 
+    private async void CopyAgentHistory_Click(object sender, RoutedEventArgs e)
+    {
+        e.Handled = true;
+        if (sender is not FrameworkElement { DataContext: ActivityCard card } ||
+            _feed is null || _lifetime is null || !card.TryBeginHistoryCopy()) return;
+        var lifetime = _lifetime;
+        var lifetimeToken = lifetime.Token;
+        var feed = _feed;
+        var agentId = card.Id;
+        var copySequence = ++_historyCopySequence;
+        var title = SensitiveDataProtection.Redact(card.Title);
+        var popup = _thoughtPopups.FirstOrDefault(value => value.IsOpen && ReferenceEquals(value.DataContext, card));
+        if (popup is not null) BeginThoughtHover(popup);
+        using var copyCancellation = CancellationTokenSource.CreateLinkedTokenSource(lifetimeToken);
+        copyCancellation.CancelAfter(TimeSpan.FromSeconds(30));
+        var status = "";
+        try
+        {
+            var history = await Task.Run(() => feed.ReadChatHistory(agentId, copyCancellation.Token), copyCancellation.Token);
+            copyCancellation.Token.ThrowIfCancellationRequested();
+            if (!ReferenceEquals(lifetime, _lifetime)) return;
+            if (copySequence != _historyCopySequence)
+            {
+                status = "A newer copy request replaced this one.";
+                return;
+            }
+            var text = $"Agent: {title}{Environment.NewLine}Chat ID: {agentId}{Environment.NewLine}{Environment.NewLine}{history.Text}";
+            Clipboard.SetText(text);
+            status = history.SkippedRecords == 0
+                ? $"Copied {history.MessageCount:N0} messages."
+                : $"Copied {history.MessageCount:N0} messages; {history.SkippedRecords:N0} saved records skipped. Copy is partial.";
+        }
+        catch (OperationCanceledException) when (lifetimeToken.IsCancellationRequested) { }
+        catch (OperationCanceledException)
+        {
+            status = "Copy timed out. Clipboard was not changed. Try again.";
+        }
+        catch (ExternalException)
+        {
+            status = "Clipboard is busy. Try Copy again.";
+        }
+        catch (InvalidOperationException ex)
+        {
+            status = SensitiveDataProtection.Redact(ex.Message);
+        }
+        catch (Exception)
+        {
+            status = "Saved chat history could not be copied. Try again.";
+        }
+        finally
+        {
+            card.FinishHistoryCopy(status);
+        }
+    }
+
     private void ThoughtScroll_PreviewMouseWheel(object sender, MouseWheelEventArgs e)
     {
         if (sender is not ScrollViewer viewer) return;
@@ -512,7 +606,7 @@ public partial class CodexActivityStrip : UserControl, INotifyPropertyChanged
 
     private void BeginThoughtHover(Popup popup)
     {
-        if (popup.DataContext is not ActivityCard card || string.IsNullOrWhiteSpace(card.TaskSummary)) return;
+        if (popup.DataContext is not ActivityCard card || string.IsNullOrWhiteSpace(card.ThoughtBubbleText)) return;
         if (!ReferenceEquals(_hoverThoughtPopup, popup) || !ReferenceEquals(_hoverThoughtContext, card))
         {
             ClearThoughtHover();
@@ -590,7 +684,7 @@ public partial class CodexActivityStrip : UserControl, INotifyPropertyChanged
                 else _thoughtAnchorPositions.Remove(popup);
                 var hovered = ReferenceEquals(_hoverThoughtPopup, popup) && ReferenceEquals(popup.DataContext, _hoverThoughtContext);
                 var visible = show && popup.IsLoaded && popup.DataContext is ActivityCard { Animate: true } card &&
-                    !string.IsNullOrWhiteSpace(card.TaskSummary) &&
+                    !string.IsNullOrWhiteSpace(card.ThoughtBubbleText) &&
                     (hovered || (ThoughtBubblesEnabled && card.HasCurrentStatus && card.HasThoughtBubble)) &&
                     anchor is { IsLoaded: true, IsVisible: true } && IsThoughtAnchorVisible(anchor);
                 if (!visible || popup.Child is not FrameworkElement child)
@@ -673,6 +767,16 @@ public partial class CodexActivityStrip : UserControl, INotifyPropertyChanged
         candidate.Child.Width = Math.Min(300, maximumWidth);
         candidate.Card.SetThoughtBubbleMaxHeight(maximumBody);
         candidate.Child.Measure(new Size(candidate.Child.Width, double.PositiveInfinity));
+        // Copy feedback can wrap. Give its measured height room before clipping the message.
+        var availableHeight = Math.Max(above, below) / candidate.Dpi.DpiScaleY;
+        var overflow = candidate.Child.DesiredSize.Height - availableHeight;
+        if (overflow > 0)
+        {
+            maximumBody -= overflow;
+            if (maximumBody < 17) return null;
+            candidate.Card.SetThoughtBubbleMaxHeight(maximumBody);
+            candidate.Child.Measure(new Size(candidate.Child.Width, double.PositiveInfinity));
+        }
         var size = new Size(Math.Ceiling(candidate.Child.DesiredSize.Width * candidate.Dpi.DpiScaleX),
             Math.Ceiling(candidate.Child.DesiredSize.Height * candidate.Dpi.DpiScaleY));
         if (size.Width > candidate.WorkArea.Width || size.Height > candidate.WorkArea.Height || size.Height > Math.Max(above, below)) return null;
@@ -779,7 +883,7 @@ public partial class CodexActivityStrip : UserControl, INotifyPropertyChanged
 
     private void UpdateAnimations()
     {
-        var animate = IsLoaded && IsVisible && _lifetime is not null &&
+        var animate = IsLoaded && IsVisible && HasAgents && _lifetime is not null &&
             _hostWindow is { IsActive: true, WindowState: not WindowState.Minimized };
         var left = AgentScroller.HorizontalOffset;
         var right = left + AgentScroller.ViewportWidth;
@@ -823,9 +927,10 @@ public partial class CodexActivityStrip : UserControl, INotifyPropertyChanged
         private bool _thoughtBubbleTailAbove;
         private IReadOnlyList<CodexActivityMessage> _thoughtMessages = [];
         private string? _selectedThoughtIdentity;
-        private string? _bubbleSourceText;
-        private string _bubbleDisplayText = "";
+        private readonly Dictionary<string, (string Source, string Display)> _thoughtTextCache = new(StringComparer.Ordinal);
         private string _displaySummary = "";
+        private bool _copyingHistory;
+        private string _historyCopyStatus = "";
         public ActivityCard(CodexActivityAgent value, bool bubbleEnabled, int bubbleSeconds, bool showFeedback)
         {
             _value = value;
@@ -834,7 +939,7 @@ public partial class CodexActivityStrip : UserControl, INotifyPropertyChanged
             _bubbleEnabled = bubbleEnabled;
             _bubbleSeconds = bubbleSeconds;
             UpdateThoughtHistory();
-            if (showFeedback) ShowBubble(value.IsSubagent && value.IsRunning);
+            if (showFeedback) ShowBubble();
             UpdateSubagents(showFeedback);
         }
         public bool HasThoughtBubble => _bubbleRequestedAt is not null;
@@ -853,22 +958,16 @@ public partial class CodexActivityStrip : UserControl, INotifyPropertyChanged
                 return _thoughtMessages.Count - 1;
             }
         }
-        public string ThoughtBubbleText
-        {
-            get
-            {
-                var text = _thoughtMessages.Count == 0 ? _value.TaskSummary : _thoughtMessages[ThoughtMessageIndex].Text;
-                if (!string.Equals(_bubbleSourceText, text, StringComparison.Ordinal))
-                {
-                    _bubbleDisplayText = CodexBubbleTextFormatter.Format(text);
-                    _bubbleSourceText = text;
-                }
-                return _bubbleDisplayText;
-            }
-        }
+        public string ThoughtBubbleText => _thoughtMessages.Count == 0
+            ? _displaySummary : _thoughtMessages[ThoughtMessageIndex].Text;
         public bool CanShowPreviousThought => ThoughtMessageIndex > 0;
         public bool CanShowNextThought => _thoughtMessages.Count > 0 && ThoughtMessageIndex < _thoughtMessages.Count - 1;
         public string ThoughtMessagePosition => $"{Math.Max(1, ThoughtMessageIndex + 1)} / {Math.Max(1, _thoughtMessages.Count)}";
+        public bool CanCopyHistory => !_copyingHistory;
+        public string HistoryCopyButtonText => _copyingHistory ? "Copying…" : "Copy";
+        public string HistoryCopyMenuText => _copyingHistory ? "Copying…" : "Copy chat history";
+        public string HistoryCopyStatus => _historyCopyStatus;
+        public bool HasHistoryCopyStatus => _historyCopyStatus.Length > 0;
         public double ThoughtBubbleMaxHeight => _thoughtBubbleMaxHeight;
         public Thickness ThoughtBubbleTailMargin => new(_thoughtBubbleTailLeft, 0, 0, 0);
         public Dock ThoughtBubbleTailDock => _thoughtBubbleTailAbove ? Dock.Top : Dock.Bottom;
@@ -884,6 +983,16 @@ public partial class CodexActivityStrip : UserControl, INotifyPropertyChanged
         private AgentRunState EffectiveState => _unavailable ? AgentRunState.Unknown : _value.State;
         public string State => EffectiveState.ToString();
         public string StateText => _unavailable ? "Status unavailable" : _value.StateText;
+        public bool HasModel => !string.IsNullOrWhiteSpace(_value.Model);
+        public bool HasReasoningEffort => !string.IsNullOrWhiteSpace(_value.ReasoningEffort);
+        public bool HasModelSettings => HasModel || HasReasoningEffort;
+        public string ModelLabel => FormatModelLabel(_value.Model);
+        public string ModelDescription => $"Model: {_value.Model}";
+        public string ReasoningEffortLabel => FormatReasoningEffortLabel(_value.ReasoningEffort);
+        public string ReasoningEffortDescription => $"Thinking: {ReasoningEffortLabel}";
+        public string ReasoningEffortColor => ThinkingColor(_value.ReasoningEffort);
+        public string ReasoningEffortBackground => "#18" + ReasoningEffortColor[1..];
+        public string ReasoningEffortBorder => "#50" + ReasoningEffortColor[1..];
         public bool IsRunning => EffectiveState == AgentRunState.Running;
         public bool CanClear => !_unavailable && _value.CanDismiss;
         public string StateColor => EffectiveState switch
@@ -905,6 +1014,8 @@ public partial class CodexActivityStrip : UserControl, INotifyPropertyChanged
             _ => "#2D3A4C"
         };
         public string AccessibleDescription => $"{Title}. {StateText}. {TaskSummary}." +
+            (HasModel ? $" {ModelDescription}." : "") +
+            (HasReasoningEffort ? $" {ReasoningEffortDescription}." : "") +
             (IsWaitingToSpeak ? " New message waiting to speak." : "") +
             (HasSubagents ? $" {Subagents.Count} subagents tracked within this chat." : "");
         public bool Animate
@@ -938,9 +1049,8 @@ public partial class CodexActivityStrip : UserControl, INotifyPropertyChanged
             _value = value;
             UpdateThoughtHistory();
             _unavailable = false;
-            var newChildStart = newActivity && value.IsSubagent && value.IsRunning;
-            if (!showFeedback || (value.FeedbackIdentity is null && !newChildStart)) ClearOwnBubble();
-            else if ((newFeedback && !suppressCurrentFeedback && !consumeStartupFeedback) || newChildStart) ShowBubble(newChildStart);
+            if (!showFeedback || value.FeedbackIdentity is null || !HasReadableFeedback()) ClearOwnBubble();
+            else if (newFeedback && !suppressCurrentFeedback && !consumeStartupFeedback) ShowBubble();
             UpdateSubagents(showFeedback);
             PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(null));
         }
@@ -952,11 +1062,25 @@ public partial class CodexActivityStrip : UserControl, INotifyPropertyChanged
             PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(null));
         }
 
-        private static bool IsFeedbackPlaceholder(string? identity) => identity is null || identity.StartsWith("subagent-start:", StringComparison.Ordinal);
+        private static bool IsFeedbackPlaceholder(string? identity) => identity is null;
 
         private void UpdateThoughtHistory()
         {
-            _thoughtMessages = _value.MessageHistory;
+            var messages = new List<CodexActivityMessage>();
+            var identities = new HashSet<string>(StringComparer.Ordinal);
+            foreach (var message in _value.MessageHistory)
+            {
+                identities.Add(message.Identity);
+                if (!_thoughtTextCache.TryGetValue(message.Identity, out var cached) || cached.Source != message.Text)
+                {
+                    cached = (message.Text, CodexBubbleTextFormatter.Format(message.Text));
+                    _thoughtTextCache[message.Identity] = cached;
+                }
+                if (!string.IsNullOrWhiteSpace(cached.Display)) messages.Add(new(message.Identity, cached.Display));
+            }
+            foreach (var stale in _thoughtTextCache.Keys.Where(identity => !identities.Contains(identity)).ToArray())
+                _thoughtTextCache.Remove(stale);
+            _thoughtMessages = messages;
             _displaySummary = CodexBubbleTextFormatter.Format(_value.TaskSummary);
             if (_selectedThoughtIdentity is not null && !_thoughtMessages.Any(message => message.Identity == _selectedThoughtIdentity))
                 _selectedThoughtIdentity = _thoughtMessages.FirstOrDefault()?.Identity;
@@ -968,6 +1092,31 @@ public partial class CodexActivityStrip : UserControl, INotifyPropertyChanged
             var index = Math.Clamp(ThoughtMessageIndex + direction, 0, _thoughtMessages.Count - 1);
             _selectedThoughtIdentity = index == _thoughtMessages.Count - 1 ? null : _thoughtMessages[index].Identity;
             NotifyThoughtHistory();
+        }
+
+        public bool TryBeginHistoryCopy()
+        {
+            if (_copyingHistory) return false;
+            _copyingHistory = true;
+            _historyCopyStatus = "";
+            NotifyHistoryCopy();
+            return true;
+        }
+
+        public void FinishHistoryCopy(string status)
+        {
+            _copyingHistory = false;
+            _historyCopyStatus = status;
+            NotifyHistoryCopy();
+        }
+
+        private void NotifyHistoryCopy()
+        {
+            PropertyChanged?.Invoke(this, new(nameof(CanCopyHistory)));
+            PropertyChanged?.Invoke(this, new(nameof(HistoryCopyButtonText)));
+            PropertyChanged?.Invoke(this, new(nameof(HistoryCopyMenuText)));
+            PropertyChanged?.Invoke(this, new(nameof(HistoryCopyStatus)));
+            PropertyChanged?.Invoke(this, new(nameof(HasHistoryCopyStatus)));
         }
 
         public void ResetThoughtHistory()
@@ -1000,15 +1149,19 @@ public partial class CodexActivityStrip : UserControl, INotifyPropertyChanged
             PropertyChanged?.Invoke(this, new(nameof(AccessibleDescription)));
         }
 
-        private void ShowBubble(bool childStart = false)
+        private void ShowBubble()
         {
-            if (!_bubbleEnabled || (_value.FeedbackIdentity is null && !childStart)
-                || string.IsNullOrWhiteSpace(_value.TaskSummary) || _value.TaskSummary == "Reading saved chat…") return;
+            if (!_bubbleEnabled || _value.FeedbackIdentity is null
+                || !HasReadableFeedback() || _value.TaskSummary == "Reading saved chat…") return;
             _bubbleRequestedAt = DateTimeOffset.UtcNow;
             _bubblePresented = false;
             _bubbleShownAt = null;
             _bubbleElapsed = TimeSpan.Zero;
         }
+
+        private bool HasReadableFeedback() => !string.IsNullOrWhiteSpace(_displaySummary) &&
+            (_value.FeedbackIdentity is not { } identity || !_thoughtTextCache.TryGetValue(identity, out var text) ||
+             !string.IsNullOrWhiteSpace(text.Display));
 
         public void SetAutomaticBubbleVisible(bool visible, DateTimeOffset now)
         {

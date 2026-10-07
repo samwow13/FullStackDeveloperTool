@@ -72,7 +72,8 @@ public partial class ProjectQueueAttemptHistoryWindow : Window, INotifyPropertyC
                    $"Moved to History: {LocalTime(receipt.ActivityArchivedAt)}\n" +
                    $"Deleted from task activity: {LocalTime(receipt.ActivityDeletedAt)}\n" +
                    $"Folder: {receipt.Snapshot.Folder}\n" +
-                   $"Attention: {receipt.AttentionReason}";
+                   $"Attention: {receipt.AttentionReason}" +
+                   (string.IsNullOrEmpty(receipt.ConnectionDetails) ? "" : "\n" + receipt.ConnectionDetails);
         }
     }
     public string SelectedSummary => SelectedAttempt?.Receipt.ResultSummary ?? "";

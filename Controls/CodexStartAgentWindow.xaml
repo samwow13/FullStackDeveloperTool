@@ -1,0 +1,141 @@
+<Window x:Class="FullStackLauncher.Controls.CodexStartAgentWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:controls="clr-namespace:FullStackLauncher.Controls"
+        Title="Start Agent" Width="620" Height="600" MinWidth="460" MinHeight="440"
+        Background="{StaticResource BackgroundBrush}" Foreground="{StaticResource TextBrush}"
+        Icon="pack://application:,,,/Assets/launcher.ico" WindowStartupLocation="CenterOwner"
+        UseLayoutRounding="True" Closing="Window_Closing" PreviewKeyDown="Window_PreviewKeyDown">
+    <Grid Margin="18">
+        <Grid.RowDefinitions><RowDefinition Height="*"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
+        <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled"
+                      Focusable="False" CanContentScroll="False">
+            <StackPanel Margin="0,0,5,0">
+                <Grid Margin="0,0,24,16">
+                    <Grid.ColumnDefinitions><ColumnDefinition Width="58"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+                    <Viewbox Width="52" Height="44" VerticalAlignment="Top" Margin="0,8,6,0" IsHitTestVisible="False">
+                        <controls:CodexRobot State="Idle" Animate="False" Focusable="False"/>
+                    </Viewbox>
+                    <Border Grid.Column="1" Background="#EFFBF4" BorderBrush="#21464C" BorderThickness="2"
+                            CornerRadius="20,22,20,5" Padding="14,11">
+                        <StackPanel>
+                            <TextBlock Text="New Codex chat" Foreground="#31645F" FontSize="11" FontWeight="SemiBold" Margin="0,0,0,4"/>
+                            <TextBlock x:Name="ProjectTitle" Foreground="#17343B" FontSize="13" FontWeight="SemiBold"
+                                       TextTrimming="CharacterEllipsis"/>
+                        </StackPanel>
+                    </Border>
+                </Grid>
+                <Grid Margin="44,0,0,12">
+                    <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="12"/><ColumnDefinition Width="135"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+                    <StackPanel>
+                        <Label Content="_Model" Target="{Binding ElementName=ModelChoice}" Foreground="{StaticResource MutedBrush}" FontSize="11" Padding="0,0,0,4"/>
+                        <ComboBox x:Name="ModelChoice" DisplayMemberPath="DisplayName" SelectionChanged="Model_Changed"
+                                  AutomationProperties.Name="Agent model" Padding="8,5"/>
+                    </StackPanel>
+                    <StackPanel Grid.Column="2">
+                        <Label Content="_Thinking" Target="{Binding ElementName=EffortChoice}" Foreground="{StaticResource MutedBrush}" FontSize="11" Padding="0,0,0,4"/>
+                        <ComboBox x:Name="EffortChoice" DisplayMemberPath="Id" SelectionChanged="Effort_Changed"
+                                  AutomationProperties.Name="Agent thinking level" Padding="8,5"/>
+                    </StackPanel>
+                    <Button x:Name="RefreshButton" Grid.Column="3" Content="↻" Click="Refresh_Click" FontSize="17"
+                            Padding="9,3" Margin="8,0,0,0" VerticalAlignment="Bottom"
+                            ToolTip="Refresh available Codex models" AutomationProperties.Name="Refresh Codex models"/>
+                </Grid>
+                <DockPanel Margin="44,0,0,12">
+                    <Label Content="_Access" Target="{Binding ElementName=AccessChoice}" Foreground="{StaticResource MutedBrush}"
+                           FontSize="11" Padding="0,0,10,0" VerticalAlignment="Center"/>
+                    <ComboBox x:Name="AccessChoice" Width="150" HorizontalAlignment="Left" Padding="8,4"
+                              SelectionChanged="Access_Changed" AutomationProperties.Name="Agent access"
+                              ToolTip="Workspace limits file writes to this project. Full access allows commands and file access outside this project. Both run without approval prompts; choose the access you want before starting."/>
+                </DockPanel>
+                <Expander x:Name="ContextExpander" Header="Project context" Foreground="{StaticResource TextBrush}" Margin="44,0,0,12">
+                    <StackPanel Margin="0,9,0,0">
+                        <TextBox x:Name="ContextBox" AcceptsReturn="True" TextWrapping="Wrap" MinHeight="75" MaxHeight="160"
+                                 VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled" FontSize="12"
+                                 TextChanged="Context_Changed" AutomationProperties.Name="Saved context for this project"
+                                 ToolTip="Saved for this project and included with every new agent message."/>
+                        <DockPanel Margin="0,7,0,0">
+                            <Button x:Name="SaveContextButton" DockPanel.Dock="Right" Content="Save context" Click="SaveContext_Click"
+                                    Padding="9,5" FontSize="11" Margin="8,0,0,0"/>
+                            <TextBlock x:Name="ContextStatus" Foreground="{StaticResource MutedBrush}" FontSize="11"
+                                       TextWrapping="Wrap" VerticalAlignment="Center" AutomationProperties.LiveSetting="Polite"/>
+                        </DockPanel>
+                    </StackPanel>
+                </Expander>
+                <Border Margin="44,0,0,0" MinHeight="170" CornerRadius="20,20,5,20" Padding="14,10"
+                        Background="#162A2B" BorderThickness="1">
+                    <Border.Style><Style TargetType="Border">
+                        <Setter Property="BorderBrush" Value="#3B605B"/>
+                        <Style.Triggers><Trigger Property="IsKeyboardFocusWithin" Value="True">
+                            <Setter Property="BorderBrush" Value="{StaticResource AccentBrush}"/>
+                        </Trigger></Style.Triggers>
+                    </Style></Border.Style>
+                    <Grid>
+                        <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="*"/></Grid.RowDefinitions>
+                        <DockPanel Margin="0,0,0,8">
+                            <TextBlock DockPanel.Dock="Right" Text="You" Foreground="{StaticResource AccentBrush}"
+                                       FontSize="11" FontWeight="SemiBold" VerticalAlignment="Center"/>
+                            <Label Content="M_essage" Target="{Binding ElementName=PromptBox}" Foreground="{StaticResource MutedBrush}"
+                                   FontSize="11" Padding="0" VerticalAlignment="Center"/>
+                        </DockPanel>
+                        <ItemsControl x:Name="MessageImages" Grid.Row="1" Visibility="Collapsed" Margin="0,0,0,10">
+                            <ItemsControl.ItemsPanel><ItemsPanelTemplate><WrapPanel/></ItemsPanelTemplate></ItemsControl.ItemsPanel>
+                            <ItemsControl.ItemTemplate><DataTemplate>
+                                <Border Background="#101D20" BorderBrush="#3B605B" BorderThickness="1" CornerRadius="6"
+                                        Padding="4" Margin="0,0,8,6" ToolTip="{Binding Caption}">
+                                    <Grid Width="96" Height="72">
+                                        <Image Source="{Binding Preview}" Stretch="Uniform" AutomationProperties.Name="{Binding Caption}"/>
+                                        <Button Content="×" Click="RemoveMessageImage_Click" Tag="{Binding Id}" Width="22" Height="22"
+                                                Padding="0" HorizontalAlignment="Right" VerticalAlignment="Top"
+                                                Background="#E6101D20" Foreground="{StaticResource TextBrush}"
+                                                ToolTip="Remove image" AutomationProperties.Name="Remove attached image"/>
+                                    </Grid>
+                                </Border>
+                            </DataTemplate></ItemsControl.ItemTemplate>
+                        </ItemsControl>
+                        <Grid Grid.Row="2">
+                            <TextBox x:Name="PromptBox" AcceptsReturn="True" TextWrapping="Wrap" Background="Transparent"
+                                     BorderThickness="0" Padding="0" FontSize="13" MinHeight="130" MaxHeight="300"
+                                     VerticalContentAlignment="Top" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled"
+                                     AutomationProperties.Name="New agent message" TextChanged="Prompt_Changed"
+                                     CommandManager.PreviewCanExecute="Message_PreviewCanExecute"
+                                     CommandManager.PreviewExecuted="Message_PreviewExecuted"
+                                     DataObject.Pasting="Message_Pasting"
+                                     ToolTip="Write your message here. Paste images with Ctrl+V or Paste; attached images appear above your text.">
+                                <TextBox.Template><ControlTemplate TargetType="TextBox">
+                                    <ScrollViewer x:Name="PART_ContentHost" Background="{TemplateBinding Background}" Padding="{TemplateBinding Padding}"/>
+                                </ControlTemplate></TextBox.Template>
+                            </TextBox>
+                            <TextBlock Text="What should this agent work on?" Foreground="#91AAA7" IsHitTestVisible="False" TextWrapping="Wrap">
+                                <TextBlock.Style><Style TargetType="TextBlock">
+                                    <Setter Property="Visibility" Value="Collapsed"/>
+                                    <Style.Triggers><DataTrigger Binding="{Binding Text.Length, ElementName=PromptBox}" Value="0">
+                                        <Setter Property="Visibility" Value="Visible"/>
+                                    </DataTrigger></Style.Triggers>
+                                </Style></TextBlock.Style>
+                            </TextBlock>
+                        </Grid>
+                    </Grid>
+                </Border>
+            </StackPanel>
+        </ScrollViewer>
+        <TextBox x:Name="StatusText" Grid.Row="1" IsReadOnly="True" TextWrapping="Wrap" BorderThickness="0"
+                 Background="Transparent" Foreground="{StaticResource MutedBrush}" Padding="0" Margin="44,10,0,0"
+                 MaxHeight="100" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled"
+                 Visibility="Collapsed" AutomationProperties.Name="Agent start status" AutomationProperties.LiveSetting="Polite"/>
+        <Grid Grid.Row="2" Margin="0,14,0,0">
+            <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+            <StackPanel Orientation="Horizontal">
+                <Button x:Name="CheckStatusButton" Content="Check status" Click="CheckStatus_Click" Visibility="Collapsed"
+                        Padding="9,7" FontSize="11"/>
+                <Button x:Name="ReviewButton" Content="Review submission…" Click="Review_Click" Visibility="Collapsed"
+                        Padding="9,7" FontSize="11" Margin="6,0,0,0"/>
+            </StackPanel>
+            <StackPanel Grid.Column="1" Orientation="Horizontal">
+                <Button x:Name="CloseButton" Content="Close" Click="Close_Click" Margin="0,0,8,0"/>
+                <Button x:Name="StartButton" Content="_Start Agent" Style="{StaticResource PrimaryButton}"
+                        Click="Start_Click" IsEnabled="False" ToolTip="Start a new Codex chat (Ctrl+Enter)"/>
+            </StackPanel>
+        </Grid>
+    </Grid>
+</Window>

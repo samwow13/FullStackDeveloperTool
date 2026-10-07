@@ -65,6 +65,7 @@ public partial class MainWindow
             UpdateId = request.UpdateId ?? "",
             Name = request.Name ?? "",
             Prompt = request.Prompt ?? "",
+            Summary = request.Summary,
             Context = request.Context ?? "",
             SourceTaskId = request.SourceTaskId ?? "",
             SourcePrompt = request.SourcePrompt ?? "",

@@ -1,11 +1,20 @@
 using System.Text.Json;
 using System.Windows.Threading;
 using FullStackLauncher.Models;
+using FullStackLauncher.Services;
 
 namespace FullStackLauncher;
 
 public partial class MainWindow
 {
+    private void UpdateCodexCrewProject()
+    {
+        var scopes = Projects.Select(project => new CodexActivityProjectScope(project.Id, project.Name,
+            new[] { _store.ResolveRoot(project) }.Concat(project.Services.Select(service =>
+                _store.ResolveWorkingDirectory(project, service))).Distinct(StringComparer.OrdinalIgnoreCase).ToArray())).ToArray();
+        CodexCrewPanel.SetProjectScope(SelectedProject?.Id, SelectedProject?.Name, scopes);
+    }
+
     public int CodexCrewVisibleAgents
     {
         get => _settings.Layout.CodexCrewVisibleAgents;

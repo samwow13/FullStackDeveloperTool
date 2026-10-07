@@ -23,6 +23,8 @@ public sealed record AgentSnapshot(
     // Passive tracking identity only; never infer status from an identity or timestamp.
     public string? ActivityIdentity { get; init; }
     public DateTimeOffset? ActivityStartedAt { get; init; }
+    public string? Model { get; init; }
+    public string? ReasoningEffort { get; init; }
 }
 
 public sealed record ReminderUpdate(

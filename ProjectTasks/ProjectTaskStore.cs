@@ -114,6 +114,22 @@ public sealed class ProjectTaskStore
         }
     }
 
+    /// <summary>
+    /// Cleans up excess AI suggestions from a freshly loaded model using the
+    /// normal atomic save and conflict checks. A failed save leaves it unchanged.
+    /// </summary>
+    public ProjectAiNoteRemovalResult EnforceAiNoteLimit(ProjectTaskData data)
+    {
+        ArgumentNullException.ThrowIfNull(data);
+        var candidate = Clone(data);
+        var result = ProjectAiNoteRetention.TrimToLimit(candidate);
+        if (result.RemovedCount == 0) return result;
+        Save(candidate);
+        data.Notes = candidate.Notes;
+        data.QueueItems = candidate.QueueItems;
+        return result;
+    }
+
     public void Save(ProjectTaskData data)
     {
         lock (_gate)
@@ -122,7 +138,7 @@ public sealed class ProjectTaskStore
                 throw new InvalidOperationException(LoadWarning ?? "Load project tasks before saving them.");
             // Hold the owner slot through the file replacement. A one-time check
             // would race an older owner starting immediately before the schema upgrade.
-            using var migrationClaim = _loadedSourceVersion < 8 &&
+            using var migrationClaim = _loadedSourceVersion < 9 &&
                 !Environment.GetCommandLineArgs().Contains("--queue-owner", StringComparer.OrdinalIgnoreCase)
                 ? QueueOwnerClient.TryClaimOwnerMutex(StorePath)
                     ?? throw new InvalidOperationException("An older queue owner is still running. Wait for its idle handoff or exit its tray icon before saving project tasks.")
@@ -248,7 +264,7 @@ public sealed class ProjectTaskStore
         var root = document.RootElement;
         RequireUniqueProperties(root);
         var version = RequireProperty(root, "version", JsonValueKind.Number);
-        if (!version.TryGetInt32(out var sourceVersion) || sourceVersion is not (1 or 2 or 3 or 4 or 5 or 6 or 7 or 8))
+        if (!version.TryGetInt32(out var sourceVersion) || sourceVersion is not (1 or 2 or 3 or 4 or 5 or 6 or 7 or 8 or 9))
             throw new ArgumentException("Unsupported project task store version.");
         if (sourceVersion >= 4) RequireBoolean(root, "pauseAllQueues");
         var notes = RequireProperty(root, "notes", JsonValueKind.Array);
@@ -295,6 +311,8 @@ public sealed class ProjectTaskStore
             RequireProperties(item, JsonValueKind.String, "id", "projectId", "noteId", "modelId", "reasoningEffort", "state");
             RequireProperty(item, "order", JsonValueKind.Number);
             RequireBoolean(item, "enabled");
+            if (sourceVersion >= 9)
+                RequireProperties(item, JsonValueKind.String, "automaticLoopChainId", "automaticLoopPredecessorAttemptId");
         }
         foreach (var queue in queues.EnumerateArray())
         {
@@ -304,6 +322,14 @@ public sealed class ProjectTaskStore
                 RequireProperties(queue, JsonValueKind.String, "defaultModelId", "defaultReasoningEffort");
             if (sourceVersion >= 8)
                 RequireProperty(queue, "delayBetweenTasksMinutes", JsonValueKind.Number);
+            if (sourceVersion >= 9)
+            {
+                RequireBoolean(queue, "automaticLoopEnabled");
+                RequireProperties(queue, JsonValueKind.String, "automaticLoopFolder", "automaticLoopModelId",
+                    "automaticLoopReasoningEffort", "automaticLoopAppGoal", "automaticLoopChainId",
+                    "automaticLoopSeedAttemptId", "automaticLoopLastGeneratedAttemptId");
+                RequireNullableProperty(queue, "automaticLoopEnabledAt", JsonValueKind.String);
+            }
         }
         foreach (var receipt in receipts.EnumerateArray())
         {
@@ -315,6 +341,13 @@ public sealed class ProjectTaskStore
                 RequireNullableProperty(receipt, "queueAbandonedAt", JsonValueKind.String);
             var snapshot = RequireProperty(receipt, "snapshot", JsonValueKind.Object);
             RequireProperties(snapshot, JsonValueKind.String, "projectId", "projectName", "noteId", "queueItemId", "name", "prompt", "modelId", "reasoningEffort", "folder");
+            if (sourceVersion >= 9)
+            {
+                RequireBoolean(snapshot, "automaticLoopSeedEligible");
+                RequireProperties(snapshot, JsonValueKind.String, "automaticLoopChainId", "automaticLoopSeedAttemptId",
+                    "automaticLoopPredecessorAttemptId", "automaticLoopAppGoal", "automaticLoopSeedPrompt",
+                    "automaticLoopPreviousResult");
+            }
             if (sourceVersion >= 6)
             {
                 var images = RequireProperty(snapshot, "images", JsonValueKind.Array);
@@ -325,12 +358,20 @@ public sealed class ProjectTaskStore
             ?? throw new ArgumentException("Project task data is empty.");
         // Migrate only in memory; a normal atomic save retains the prior file as backup.
         // Legacy queue flags never authorize execution in the new format.
-        if (data.Version is 1 or 2 or 3 or 4 or 5 or 6 or 7)
+        if (data.Version is 1 or 2 or 3 or 4 or 5 or 6 or 7 or 8)
         {
-            data.Version = 8;
-            if (sourceVersion <= 3 && data.Queues != null)
+            data.Version = 9;
+            if (data.Queues != null)
                 foreach (var queue in data.Queues)
-                    if (queue != null) queue.Enabled = false;
+                    if (queue != null)
+                    {
+                        if (sourceVersion <= 3) queue.Enabled = false;
+                        queue.AutomaticLoopEnabled = false;
+                        queue.AutomaticLoopChainId = "";
+                        queue.AutomaticLoopEnabledAt = null;
+                        queue.AutomaticLoopSeedAttemptId = "";
+                        queue.AutomaticLoopLastGeneratedAttemptId = "";
+                    }
         }
         Validate(data);
         return data;
@@ -338,7 +379,7 @@ public sealed class ProjectTaskStore
 
     private static void Validate(ProjectTaskData data)
     {
-        if (data.Version != 8) throw new ArgumentException("Unsupported project task store version; expected version 1, 2, 3, 4, 5, 6, 7, or 8 on load, and version 8 on save.");
+        if (data.Version != 9) throw new ArgumentException("Unsupported project task store version; expected version 1, 2, 3, 4, 5, 6, 7, 8, or 9 on load, and version 9 on save.");
         if (data.Notes == null || data.QueueItems == null || data.Queues == null || data.Receipts == null || data.AgentFollowUpReceipts == null)
             throw new ArgumentException("Project task collections must be arrays.");
         var notes = new Dictionary<string, ProjectTaskNote>(StringComparer.Ordinal);
@@ -364,6 +405,25 @@ public sealed class ProjectTaskStore
             RequireText(queue.DefaultReasoningEffort, "Default queue thinking level");
             if (queue.DelayBetweenTasksMinutes is < 0 or > ProjectQueueConfiguration.MaximumDelayMinutes)
                 throw new ArgumentException("Queue delay must be a whole number from 0 to 10080 minutes.");
+            RequireText(queue.AutomaticLoopFolder, "Automatic loop folder");
+            if (queue.AutomaticLoopFolder.Length != 0) RequireAbsoluteFolder(queue.AutomaticLoopFolder);
+            Require(queue.AutomaticLoopModelId, "Automatic loop model");
+            Require(queue.AutomaticLoopReasoningEffort, "Automatic loop thinking level");
+            RequireText(queue.AutomaticLoopAppGoal, "Automatic loop app goal");
+            if (queue.AutomaticLoopAppGoal.Length > ProjectAutomaticLoop.MaximumAppGoalCharacters)
+                throw new ArgumentException("Automatic loop app goal exceeds 32,000 characters.");
+            RequireText(queue.AutomaticLoopChainId, "Automatic loop chain ID");
+            RequireText(queue.AutomaticLoopSeedAttemptId, "Automatic loop seed attempt ID");
+            RequireText(queue.AutomaticLoopLastGeneratedAttemptId, "Automatic loop predecessor attempt ID");
+            if (queue.AutomaticLoopChainId.Length != 0 &&
+                (!Guid.TryParseExact(queue.AutomaticLoopChainId, "N", out _) || queue.AutomaticLoopEnabledAt is null))
+                throw new ArgumentException("An automatic loop chain requires a valid ID and enablement time.");
+            if (queue.AutomaticLoopEnabled && (queue.AutomaticLoopChainId.Length == 0 ||
+                queue.AutomaticLoopFolder.Length == 0 || queue.DelayBetweenTasksMinutes < 1))
+                throw new ArgumentException("An enabled automatic loop requires a saved folder, chain, and delay of at least 1 minute.");
+            if (queue.AutomaticLoopChainId.Length == 0 && (queue.AutomaticLoopEnabledAt is not null ||
+                queue.AutomaticLoopSeedAttemptId.Length != 0 || queue.AutomaticLoopLastGeneratedAttemptId.Length != 0))
+                throw new ArgumentException("Automatic loop progress requires a saved chain.");
             RequireText(queue.StatusMessage, "Queue status message");
             RequireEnum(queue.RecoveryState);
             if (!queueIds.Add(queue.ProjectId)) throw new ArgumentException("Duplicate project queue.");
@@ -386,6 +446,14 @@ public sealed class ProjectTaskStore
             Require(item.NoteId, "Queue note ID");
             RequireText(item.ModelId, "Queue model");
             RequireText(item.ReasoningEffort, "Queue thinking level");
+            RequireText(item.AutomaticLoopChainId, "Queue automatic loop chain ID");
+            RequireText(item.AutomaticLoopPredecessorAttemptId, "Queue automatic loop predecessor attempt ID");
+            if (item.AutomaticLoopChainId.Length != 0 &&
+                (!Guid.TryParseExact(item.AutomaticLoopChainId, "N", out _) ||
+                    item.AutomaticLoopPredecessorAttemptId.Length == 0))
+                throw new ArgumentException("An automatic queue continuation requires a valid chain and predecessor.");
+            if (item.AutomaticLoopChainId.Length == 0 && item.AutomaticLoopPredecessorAttemptId.Length != 0)
+                throw new ArgumentException("A queue loop predecessor requires an automatic continuation.");
             RequireEnum(item.State);
             RequireOrder(item.Order);
             if (!itemIds.Add(item.Id)) throw new ArgumentException("Duplicate queue item ID.");
@@ -426,6 +494,27 @@ public sealed class ProjectTaskStore
             RequireText(snapshot.PredecessorHandoff, "Dispatched predecessor handoff");
             if (snapshot.PredecessorHandoff.Length > 1000)
                 throw new ArgumentException("A predecessor handoff is too long.");
+            RequireText(snapshot.AutomaticLoopChainId, "Dispatched automatic loop chain ID");
+            RequireText(snapshot.AutomaticLoopSeedAttemptId, "Dispatched automatic loop seed attempt ID");
+            RequireText(snapshot.AutomaticLoopPredecessorAttemptId, "Dispatched automatic loop predecessor attempt ID");
+            RequireText(snapshot.AutomaticLoopAppGoal, "Dispatched automatic loop app goal");
+            RequireText(snapshot.AutomaticLoopSeedPrompt, "Dispatched automatic loop seed prompt");
+            RequireText(snapshot.AutomaticLoopPreviousResult, "Dispatched automatic loop previous result");
+            if (snapshot.AutomaticLoopAppGoal.Length > ProjectAutomaticLoop.MaximumAppGoalCharacters ||
+                snapshot.AutomaticLoopSeedPrompt.Length > ProjectAutomaticLoop.MaximumSeedPromptCharacters ||
+                snapshot.AutomaticLoopPreviousResult.Length > ProjectAutomaticLoop.MaximumPreviousResultCharacters)
+                throw new ArgumentException("Dispatched automatic loop context exceeds its limit.");
+            if (snapshot.AutomaticLoopChainId.Length == 0 && (snapshot.AutomaticLoopSeedEligible ||
+                snapshot.AutomaticLoopSeedAttemptId.Length != 0 || snapshot.AutomaticLoopPredecessorAttemptId.Length != 0 ||
+                snapshot.AutomaticLoopAppGoal.Length != 0 || snapshot.AutomaticLoopSeedPrompt.Length != 0 ||
+                snapshot.AutomaticLoopPreviousResult.Length != 0))
+                throw new ArgumentException("Dispatched automatic loop context requires a chain.");
+            if (snapshot.AutomaticLoopChainId.Length != 0 && !Guid.TryParseExact(snapshot.AutomaticLoopChainId, "N", out _))
+                throw new ArgumentException("Dispatched automatic loop chain ID is invalid.");
+            if (snapshot.AutomaticLoopSeedAttemptId.Length != 0 &&
+                (snapshot.AutomaticLoopSeedEligible || snapshot.AutomaticLoopSeedPrompt.Length == 0 ||
+                    snapshot.AutomaticLoopPredecessorAttemptId.Length == 0))
+                throw new ArgumentException("Dispatched automatic loop continuation requires a frozen seed and predecessor.");
             RequireEnum(receipt.State);
             RequireEnum(receipt.Purpose);
             RequireEnum(receipt.DesktopAssociation);
@@ -486,6 +575,7 @@ public sealed class ProjectTaskStore
                 throw new ArgumentException("A queue item's attempt must reference its own execution receipt.");
         }
         ValidateFollowUpReceipts(data, notes);
+        ValidateAutomaticLoops(data, receiptIds);
     }
 
     private static void ValidateReceiptPreservation(ProjectTaskData candidate, ProjectTaskData previous)
@@ -519,6 +609,9 @@ public sealed class ProjectTaskStore
                 (oldReceipt.StartedAt != null && receipt.StartedAt != oldReceipt.StartedAt) ||
                 (oldReceipt.FinishedAt != null && receipt.FinishedAt != oldReceipt.FinishedAt))
                 throw new ArgumentException("Recorded execution milestones cannot be changed or cleared.");
+            if (oldReceipt.Purpose == ProjectTaskExecutionPurpose.QueueItem && oldReceipt.SubmissionStartedAt != null &&
+                !string.IsNullOrEmpty(oldReceipt.ConnectionDetails) && receipt.ConnectionDetails != oldReceipt.ConnectionDetails)
+                throw new ArgumentException("A submitted queue attempt's access evidence cannot be changed or cleared.");
             if (oldReceipt.FinishedAt != null &&
                 (receipt.State != oldReceipt.State || receipt.Outcome != oldReceipt.Outcome))
                 throw new ArgumentException("A recorded terminal execution result cannot be changed.");
@@ -579,6 +672,49 @@ public sealed class ProjectTaskStore
         }
     }
 
+    private static void ValidateAutomaticLoops(ProjectTaskData data,
+        IReadOnlyDictionary<string, ProjectTaskExecutionReceipt> receipts)
+    {
+        static bool MatchesChain(ProjectTaskExecutionReceipt receipt, string projectId, string chainId) =>
+            receipt.Snapshot.ProjectId == projectId && receipt.Snapshot.AutomaticLoopChainId == chainId &&
+            ProjectAutomaticLoop.ConfirmedSuccess(receipt);
+        foreach (var queue in data.Queues)
+        {
+            if (queue.AutomaticLoopSeedAttemptId.Length != 0 &&
+                (!receipts.TryGetValue(queue.AutomaticLoopSeedAttemptId, out var seed) ||
+                 !MatchesChain(seed, queue.ProjectId, queue.AutomaticLoopChainId) ||
+                 !seed.Snapshot.AutomaticLoopSeedEligible || seed.CreatedAt < queue.AutomaticLoopEnabledAt))
+                throw new ArgumentException("An automatic loop seed must reference its own confirmed successful manual queue attempt.");
+            if (queue.AutomaticLoopLastGeneratedAttemptId.Length != 0 &&
+                (!receipts.TryGetValue(queue.AutomaticLoopLastGeneratedAttemptId, out var predecessor) ||
+                 !MatchesChain(predecessor, queue.ProjectId, queue.AutomaticLoopChainId)))
+                throw new ArgumentException("Automatic loop progress must reference a confirmed successful attempt in its chain.");
+        }
+        var continuations = new HashSet<(string ProjectId, string ChainId, string PredecessorId)>();
+        foreach (var item in data.QueueItems.Where(item => item.AutomaticLoopChainId.Length != 0))
+        {
+            if (!receipts.TryGetValue(item.AutomaticLoopPredecessorAttemptId, out var predecessor) ||
+                !MatchesChain(predecessor, item.ProjectId, item.AutomaticLoopChainId))
+                throw new ArgumentException("An automatic queue continuation requires its own confirmed successful predecessor.");
+            if (!continuations.Add((item.ProjectId, item.AutomaticLoopChainId, item.AutomaticLoopPredecessorAttemptId)))
+                throw new ArgumentException("A successful automatic loop predecessor can generate only one continuation.");
+            var updateId = "loop-" + item.AutomaticLoopChainId + "-" + item.AutomaticLoopPredecessorAttemptId;
+            if (!data.AgentFollowUpReceipts.Any(receipt => receipt.NoteId == item.NoteId &&
+                    receipt.Request.ProjectId == item.ProjectId && receipt.Request.UpdateId == updateId))
+                throw new ArgumentException("An automatic queue continuation must retain its prompt submission identity.");
+        }
+        foreach (var receipt in receipts.Values.Where(receipt => receipt.Snapshot.AutomaticLoopSeedAttemptId.Length != 0))
+        {
+            var snapshot = receipt.Snapshot;
+            if (!receipts.TryGetValue(snapshot.AutomaticLoopSeedAttemptId, out var seed) ||
+                !MatchesChain(seed, snapshot.ProjectId, snapshot.AutomaticLoopChainId) ||
+                !seed.Snapshot.AutomaticLoopSeedEligible || snapshot.AutomaticLoopSeedPrompt != seed.Snapshot.Prompt ||
+                !receipts.TryGetValue(snapshot.AutomaticLoopPredecessorAttemptId, out var predecessor) ||
+                !MatchesChain(predecessor, snapshot.ProjectId, snapshot.AutomaticLoopChainId))
+                throw new ArgumentException("A dispatched automatic loop continuation must retain its exact seed and successful predecessor.");
+        }
+    }
+
     internal static bool SnapshotsEqual(ProjectTaskDispatchSnapshot left, ProjectTaskDispatchSnapshot right) =>
         left.ProjectId == right.ProjectId && left.ProjectName == right.ProjectName &&
         left.NoteId == right.NoteId && left.QueueItemId == right.QueueItemId &&
@@ -586,6 +722,13 @@ public sealed class ProjectTaskStore
         left.ImageStagingId == right.ImageStagingId &&
         left.ModelId == right.ModelId && left.ReasoningEffort == right.ReasoningEffort &&
         left.Folder == right.Folder && left.PredecessorHandoff == right.PredecessorHandoff &&
+        left.AutomaticLoopChainId == right.AutomaticLoopChainId &&
+        left.AutomaticLoopSeedEligible == right.AutomaticLoopSeedEligible &&
+        left.AutomaticLoopSeedAttemptId == right.AutomaticLoopSeedAttemptId &&
+        left.AutomaticLoopPredecessorAttemptId == right.AutomaticLoopPredecessorAttemptId &&
+        left.AutomaticLoopAppGoal == right.AutomaticLoopAppGoal &&
+        left.AutomaticLoopSeedPrompt == right.AutomaticLoopSeedPrompt &&
+        left.AutomaticLoopPreviousResult == right.AutomaticLoopPreviousResult &&
         left.Images.Count == right.Images.Count && left.Images.Zip(right.Images).All(pair =>
             pair.First.Id == pair.Second.Id && pair.First.Caption == pair.Second.Caption &&
             pair.First.MimeType == pair.Second.MimeType && pair.First.DataBase64 == pair.Second.DataBase64 &&

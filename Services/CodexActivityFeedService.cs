@@ -8,28 +8,42 @@ namespace FullStackLauncher.Services;
 /// Read-only local activity for the dashboard, independent of saved alert watches.
 /// Call ReadSnapshot on a background worker. ClearRecent only changes this feed.
 /// </summary>
-public sealed class CodexActivityFeedService
+public sealed partial class CodexActivityFeedService
 {
     private const int MaximumRecentChats = 12;
     private static readonly TimeSpan CompletionConfirmation = TimeSpan.FromSeconds(10);
     private readonly LocalCodexReader _reader;
     private readonly CodexActivityFeedSummaryReader _summaries;
     private readonly CodexActivityResetStore _resetStore;
+    private readonly CodexActivityProjectStore _projectStore;
+    private readonly CodexActivityProjectReceiptReader _projectReceiptReader;
+    private readonly CodexActivityWorkingFolderReader _workingFolderReader;
+    private readonly string _settingsPath;
+    private CodexActivityProjectResolver _projectResolver = new([]);
+    private IReadOnlyDictionary<string, string> _explicitProjectIds = new Dictionary<string, string>();
+    private IReadOnlyDictionary<string, IReadOnlyList<string>> _workingFolders = new Dictionary<string, IReadOnlyList<string>>();
+    private Dictionary<string, CodexActivityProjectScope> _projectOwners = new(StringComparer.Ordinal);
+    private string[] _unlistedUnknownFamilies = [];
     private readonly object _readLock = new();
     private readonly object _stateLock = new();
     private readonly Dictionary<string, TrackedAgent> _tracked = new(StringComparer.Ordinal);
     private Dictionary<string, AgentSnapshot> _familyAnchors = new(StringComparer.Ordinal);
     private CodexActivityFeedSnapshot _current = CodexActivityFeedSnapshot.Initial;
+    private CodexDesktopPresence _desktopPresence;
     private int _unlistedUnknownCount;
     private HashSet<string>? _previousAgentIds;
     private CodexActivityResetBaseline _resetBaseline;
     private Dictionary<string, HashSet<string?>> _suppressed;
 
-    public CodexActivityFeedService(string codexHome, string? resetStorePath = null)
+    public CodexActivityFeedService(string codexHome, string? resetStorePath = null, string? settingsPath = null)
     {
         _reader = new LocalCodexReader(codexHome);
         _summaries = new CodexActivityFeedSummaryReader(codexHome);
         _resetStore = new CodexActivityResetStore(codexHome, resetStorePath);
+        _settingsPath = settingsPath ?? new SettingsStore().SettingsPath;
+        _projectStore = new CodexActivityProjectStore(_settingsPath);
+        _projectReceiptReader = new CodexActivityProjectReceiptReader(_settingsPath);
+        _workingFolderReader = new CodexActivityWorkingFolderReader(codexHome);
         _resetBaseline = _resetStore.Load();
         _suppressed = IndexReset(_resetBaseline);
         _current = _current with { ResetAt = _resetBaseline.ResetAt };
@@ -40,11 +54,19 @@ public sealed class CodexActivityFeedService
         get { lock (_stateLock) return _current; }
     }
 
-    public CodexActivityFeedSnapshot ReadSnapshot(CancellationToken token = default)
+    internal CodexChatHistoryExport ReadChatHistory(string agentId, CancellationToken token) =>
+        _summaries.ReadChatHistory(agentId, token);
+
+    public CodexActivityFeedSnapshot ReadSnapshot(CancellationToken token = default) => ReadSnapshot([], token);
+
+    public CodexActivityFeedSnapshot ReadSnapshot(IReadOnlyList<CodexActivityProjectScope> projects, CancellationToken token = default)
     {
         lock (_readLock)
         {
             token.ThrowIfCancellationRequested();
+            var desktopPresence = CodexDesktopPresenceReader.Read();
+            if (desktopPresence != CodexDesktopPresence.Running)
+                return SuspendRead(desktopPresence);
             string[] retained;
             lock (_stateLock) retained = _tracked.Keys.ToArray();
             IReadOnlyList<AgentSnapshot> agents;
@@ -53,28 +75,24 @@ public sealed class CodexActivityFeedService
             {
                 resetBaseline = _resetStore.Load(token);
                 agents = _reader.ReadAllSnapshot(retained, includeGuardians: false);
+                ReadProjectEvidence(projects, agents, token);
                 token.ThrowIfCancellationRequested();
+                desktopPresence = CodexDesktopPresenceReader.Read();
+                if (desktopPresence != CodexDesktopPresence.Running)
+                    return SuspendRead(desktopPresence);
             }
             catch (OperationCanceledException) { throw; }
             catch (Exception)
             {
                 // Database exceptions and source payloads never become dashboard diagnostics.
-                lock (_stateLock)
-                {
-                    foreach (var tracked in _tracked.Values.Where(item => !IsSettled(item)))
-                    {
-                        tracked.Missing = true;
-                        tracked.CompletionSince = null;
-                        tracked.CompletionScans = 0;
-                    }
-                    return _current = CreateSnapshot(false, "Local Codex status unavailable", DateTimeOffset.UtcNow);
-                }
+                return SuspendRead(CodexDesktopPresenceReader.Read());
             }
 
             var now = DateTimeOffset.UtcNow;
             string[] summaryIds;
             lock (_stateLock)
             {
+                _desktopPresence = desktopPresence;
                 // A removed/replaced receipt must not resurrect an already suppressed turn in this process.
                 resetBaseline = MergeReset(_resetBaseline, resetBaseline);
                 _resetBaseline = resetBaseline;
@@ -107,7 +125,8 @@ public sealed class CodexActivityFeedService
                         _tracked[agent.Id] = tracked = new TrackedAgent(agent, now);
                         CaptureParentActivity(tracked, agents);
                     }
-                    if (IsNewActivity(tracked.Agent, agent))
+                    var newActivity = IsNewActivity(tracked.Agent, agent);
+                    if (newActivity)
                     {
                         tracked.Summary = null;
                         tracked.ObservedAt = now;
@@ -120,9 +139,20 @@ public sealed class CodexActivityFeedService
                     if (!IsTerminal(tracked.Agent.State) && IsTerminal(agent.State))
                         tracked.TerminalObservedAt = now;
                     // A projection changing back to idle is not proof that observed work completed.
-                    tracked.Agent = agent.State == AgentRunState.Idle
+                    var observed = agent.State == AgentRunState.Idle
                         ? agent with { State = AgentRunState.Unknown }
                         : agent;
+                    // Keep the last known selection identity across an incomplete
+                    // status read, so a later new turn cannot inherit old badges.
+                    var selectionIdentity = ActivityIdentity(observed);
+                    var preserveSelection = !newActivity && (selectionIdentity is null ||
+                        selectionIdentity == tracked.SelectionActivityIdentity);
+                    tracked.Agent = !preserveSelection ? observed : observed with
+                    {
+                        Model = observed.Model ?? tracked.Agent.Model,
+                        ReasoningEffort = observed.ReasoningEffort ?? tracked.Agent.ReasoningEffort
+                    };
+                    if (selectionIdentity is not null) tracked.SelectionActivityIdentity = selectionIdentity;
                     tracked.Missing = false;
                     if (agent.State == AgentRunState.Completed)
                     {
@@ -161,12 +191,14 @@ public sealed class CodexActivityFeedService
                     }
                 }
                 RememberChildFailures();
+                UpdateProjectOwnership();
                 PruneRecent();
                 _previousAgentIds = currentIds;
                 var listedFamilies = _tracked.Values.Select(item => ResolveFamilyRoot(item.Agent).Id).ToHashSet(StringComparer.Ordinal);
-                _unlistedUnknownCount = agents.Where(agent => agent.State == AgentRunState.Unknown && !_tracked.ContainsKey(agent.Id))
+                _unlistedUnknownFamilies = agents.Where(agent => agent.State == AgentRunState.Unknown && !_tracked.ContainsKey(agent.Id))
                     .Select(agent => ResolveFamilyRoot(agent).Id).Where(id => !listedFamilies.Contains(id))
-                    .Distinct(StringComparer.Ordinal).Count();
+                    .Distinct(StringComparer.Ordinal).ToArray();
+                _unlistedUnknownCount = _unlistedUnknownFamilies.Length;
                 foreach (var tracked in _tracked.Values.Where(item => string.IsNullOrWhiteSpace(item.Agent.LatestTurnId)))
                     tracked.Summary = new(null, "", "Chat title · current turn's saved chat unavailable");
                 summaryIds = _tracked.Values.Where(item => !string.IsNullOrWhiteSpace(item.Agent.LatestTurnId))
@@ -176,8 +208,12 @@ public sealed class CodexActivityFeedService
 
             var summaries = _summaries.Read(agents, summaryIds, token);
             token.ThrowIfCancellationRequested();
+            desktopPresence = CodexDesktopPresenceReader.Read();
+            if (desktopPresence != CodexDesktopPresence.Running)
+                return SuspendRead(desktopPresence);
             lock (_stateLock)
             {
+                _desktopPresence = desktopPresence;
                 foreach (var (id, summary) in summaries)
                     if (_tracked.TryGetValue(id, out var tracked) && tracked.Agent.LatestTurnId == summary.TurnId)
                     {
@@ -191,13 +227,36 @@ public sealed class CodexActivityFeedService
         }
     }
 
-    public CodexActivityFeedSnapshot ClearRecent()
+    private CodexActivityFeedSnapshot SuspendRead(CodexDesktopPresence desktopPresence)
+    {
+        lock (_stateLock)
+        {
+            _desktopPresence = desktopPresence;
+            // Keep observed history and reset markers. Loss of the desktop never
+            // establishes completion, and a reopened desktop resumes normal reads.
+            foreach (var tracked in _tracked.Values.Where(item => !IsSettled(item)))
+            {
+                tracked.Missing = true;
+                tracked.CompletionSince = null;
+                tracked.CompletionScans = 0;
+            }
+            var status = desktopPresence switch
+            {
+                CodexDesktopPresence.NotRunning => "Codex isn't Running",
+                CodexDesktopPresence.Unknown => "Codex desktop status unavailable",
+                _ => "Local Codex status unavailable"
+            };
+            return _current = CreateSnapshot(false, status, DateTimeOffset.UtcNow);
+        }
+    }
+
+    public CodexActivityFeedSnapshot ClearRecent(string? projectId = null)
     {
         lock (_stateLock)
         {
             // Clear the complete settled family. Hidden children must not
             // recreate an orphan card after their visible chat is dismissed.
-            var removable = _current.Agents.Where(agent => agent.CanDismiss &&
+            var removable = _current.Agents.Where(agent => (projectId is null || agent.ProjectId == projectId) && agent.CanDismiss &&
                 TryGetFamilyRoot(agent.Id, out var root) && ActivityIdentity(root) == agent.ActivityIdentity &&
                 FamilyMembers(agent.Id).All(item => !item.Missing && IsSettled(item)))
                 .Select(agent => agent.Id).ToHashSet(StringComparer.Ordinal);
@@ -259,8 +318,12 @@ public sealed class CodexActivityFeedService
             IReadOnlyList<AgentSnapshot> agents;
             try
             {
+                if (CodexDesktopPresenceReader.Read() != CodexDesktopPresence.Running)
+                    throw new InvalidOperationException();
                 agents = _reader.ReadAllSnapshot(retained, includeGuardians: false);
                 token.ThrowIfCancellationRequested();
+                if (CodexDesktopPresenceReader.Read() != CodexDesktopPresence.Running)
+                    throw new InvalidOperationException();
             }
             catch (OperationCanceledException) { throw; }
             catch (Exception)
@@ -280,6 +343,11 @@ public sealed class CodexActivityFeedService
                 _familyAnchors.Clear();
                 _previousAgentIds = [];
                 _unlistedUnknownCount = 0;
+                _unlistedUnknownFamilies = [];
+                var desktopPresence = CodexDesktopPresenceReader.Read();
+                if (desktopPresence != CodexDesktopPresence.Running)
+                    return SuspendRead(desktopPresence);
+                _desktopPresence = desktopPresence;
                 return _current = CreateSnapshot(true, "Tracking reset · existing work hidden", saved.ResetAt);
             }
         }
@@ -347,8 +415,9 @@ public sealed class CodexActivityFeedService
         var removeFamilies = _tracked.Values.GroupBy(item => ResolveFamilyRoot(item.Agent).Id, StringComparer.Ordinal)
             .Where(family => TryGetFamilyRoot(family.Key, out var root) && IsTerminal(root.State) &&
                 family.All(item => !item.Missing && IsSettled(item)))
-            .OrderByDescending(family => family.Max(item => item.TerminalObservedAt ?? item.ObservedAt))
-            .Skip(MaximumRecentChats).Select(family => family.Key).ToHashSet(StringComparer.Ordinal);
+            .GroupBy(family => _projectOwners.GetValueOrDefault(family.Key)?.Id ?? "", StringComparer.Ordinal)
+            .SelectMany(project => project.OrderByDescending(family => family.Max(item => item.TerminalObservedAt ?? item.ObservedAt))
+                .Skip(MaximumRecentChats)).Select(family => family.Key).ToHashSet(StringComparer.Ordinal);
         foreach (var id in _tracked.Values.Where(item => removeFamilies.Contains(ResolveFamilyRoot(item.Agent).Id))
                      .Select(item => item.Agent.Id).ToArray())
             _tracked.Remove(id);
@@ -374,19 +443,6 @@ public sealed class CodexActivityFeedService
             var source = summary?.Source ?? "Chat title";
             if (summary?.Text.Length == 0) text = title;
             var feedbackIdentity = summary?.FeedbackIdentity;
-            if (feedbackIdentity is null && !string.IsNullOrWhiteSpace(agent.ParentId) &&
-                !tracked.Missing && agent.State == AgentRunState.Running)
-            {
-                // A newly observed child can start before its first saved update.
-                // Use its own assigned request when readable, otherwise report only the observed lifecycle.
-                feedbackIdentity = "subagent-start:" + agent.Id + ":" + (ActivityIdentity(agent) ??
-                    "observed:" + tracked.ObservedAt.Ticks.ToString(System.Globalization.CultureInfo.InvariantCulture));
-                if (summary is not { Text.Length: > 0 })
-                {
-                    text = "Started work.";
-                    source = "Local lifecycle";
-                }
-            }
             var stateDetail = tracked.Missing
                 ? "This agent is missing from readable local status. Completion is unconfirmed."
                 : unknownChild
@@ -419,13 +475,18 @@ public sealed class CodexActivityFeedService
                     CanDismiss = IsSettled(tracked) && !HasUnresolvedDescendant(agent.Id),
                     ActivityIdentity = ActivityIdentity(agent),
                     FeedbackIdentity = feedbackIdentity,
+                    Model = agent.Model,
+                    ReasoningEffort = agent.ReasoningEffort,
                     MessageHistory = tracked.MessageHistory });
         }
         var chats = GroupChatRows(rows);
         return new(chats.OrderBy(row => row.NeedsInput ? 0 : row.IsRunning ? 1 : row.IsWaiting ? 2 : row.IsUnknown ? 3 : 4)
             .ThenByDescending(row => row.IsRecent ? row.CompletedAt ?? row.ObservedAt : row.ObservedAt)
             .ThenBy(row => row.Id, StringComparer.Ordinal).ToArray(), available, status, checkedAt)
-            { UnlistedUnknownCount = _unlistedUnknownCount, ResetAt = _resetBaseline.ResetAt };
+            { DesktopPresence = _desktopPresence, UnlistedUnknownCount = _unlistedUnknownCount, ResetAt = _resetBaseline.ResetAt,
+                ProjectUnknownCounts = _unlistedUnknownFamilies.Select(id => _projectOwners.GetValueOrDefault(id)?.Id)
+                    .Where(id => id is not null).GroupBy(id => id!, StringComparer.Ordinal)
+                    .ToDictionary(group => group.Key, group => group.Count(), StringComparer.Ordinal) };
     }
 
     private IReadOnlyList<CodexActivityAgent> GroupChatRows(IReadOnlyList<CodexActivityAgent> rows)
@@ -470,6 +531,8 @@ public sealed class CodexActivityFeedService
                 detail += "\nAn observed subagent is still working. This chat is not complete.";
             chats.Add(rootRow with
             {
+                ProjectId = _projectOwners.GetValueOrDefault(family.Key)?.Id,
+                ProjectLabel = _projectOwners.GetValueOrDefault(family.Key)?.Name ?? rootRow.ProjectLabel,
                 ParentId = null,
                 State = state,
                 WaitingForChildren = waitingForChildren && state is AgentRunState.Running or AgentRunState.Waiting,
@@ -493,7 +556,9 @@ public sealed class CodexActivityFeedService
             title + "\n" + root.ProjectPath + "\nParent chat metadata anchors newly observed subagent work.")
         {
             SummarySource = "Chat title",
-            ActivityIdentity = ActivityIdentity(root)
+            ActivityIdentity = ActivityIdentity(root),
+            Model = root.Model,
+            ReasoningEffort = root.ReasoningEffort
         };
     }
 
@@ -640,6 +705,7 @@ public sealed class CodexActivityFeedService
     private sealed class TrackedAgent(AgentSnapshot agent, DateTimeOffset observedAt)
     {
         public AgentSnapshot Agent { get; set; } = agent;
+        public string? SelectionActivityIdentity { get; set; } = ActivityIdentity(agent);
         public DateTimeOffset ObservedAt { get; set; } = observedAt;
         public DateTimeOffset? TerminalObservedAt { get; set; }
         public bool Missing { get; set; }

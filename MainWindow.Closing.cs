@@ -26,9 +26,9 @@ public partial class MainWindow
         if (_closed) return true;
         if (_closeRequested || _closing) return false;
         cancellationToken.ThrowIfCancellationRequested();
-        if (automaticReplacement && CodexCrewPanel.HasReplyDrafts)
+        if (automaticReplacement && (CodexCrewPanel.HasReplyDrafts || HasStartAgentDrafts))
         {
-            Notice = "Finish or clear unsent Codex replies, then open the new launcher again. Apps remain running.";
+            Notice = "Finish or clear unsent Codex messages, then open the new launcher again. Apps remain running.";
             return false;
         }
         if (automaticReplacement && (!IsEnabled || _checkingStartupServices || _savingProjectEdits ||
@@ -73,6 +73,7 @@ public partial class MainWindow
             finally { _resolvingCloseDrafts = false; UpdateActions(); }
             if (_projectTasksWindow?.PrepareToClose() == false) return false;
             if (!CodexCrewPanel.PrepareReplyDraftsForClose()) return false;
+            if (!PrepareStartAgentDraftsForClose()) return false;
             cancellationToken.ThrowIfCancellationRequested();
             // Inspect idle services across every project. Busy services remain in
             // the choice without waiting for a potentially long maintenance command.
@@ -157,6 +158,7 @@ public partial class MainWindow
             await StopCodexAccountUsageAsync();
             _closed = true;
             CodexCrewPanel.DiscardReplyDraftsAfterClose();
+            _startAgentDrafts.Clear();
             Close();
             return true;
         }

@@ -142,7 +142,12 @@ public sealed class ServiceRunner : IDisposable
     public Task RefreshAsync() => WithGateAsync(() => RefreshCoreAsync());
     public Task RefreshForProfileEditAsync() => WithGateAsync(async () =>
         await RefreshCoreAsync(await InspectAsync(fresh: true)));
-    public Task StartAsync() => WithGateAsync(StartCoreAsync);
+    public Task StartAsync()
+    {
+        var revision = Volatile.Read(ref _stopRevision);
+        return WithGateAsync(async () => await StartCoreAsync(await Task.Run(PrepareConfiguration),
+            expectedStopRevision: revision));
+    }
     public Task CleanAsync()
     {
         var revision = Volatile.Read(ref _stopRevision);
@@ -170,7 +175,7 @@ public sealed class ServiceRunner : IDisposable
             {
                 RequireCurrentRestart();
                 beforeStart?.Invoke();
-            });
+            }, revision);
         });
 
         void RequireCurrentRestart()
@@ -188,7 +193,7 @@ public sealed class ServiceRunner : IDisposable
         {
             // The UI preflights and saves the selection before entering the process operation.
             RequireCurrentRestart();
-            if (await StopAndClearConsoleAsync()) await StartCoreAsync(configuration, RequireCurrentRestart);
+            if (await StopAndClearConsoleAsync()) await StartCoreAsync(configuration, RequireCurrentRestart, revision);
         });
 
         void RequireCurrentRestart()
@@ -242,7 +247,7 @@ public sealed class ServiceRunner : IDisposable
             if (revision != Volatile.Read(ref _stopRevision)) return;
             if (await StopAndClearConsoleAsync(approval)
                 && revision == Volatile.Read(ref _stopRevision))
-                await StartCoreAsync(configuration);
+                await StartCoreAsync(configuration, expectedStopRevision: revision);
         });
     }
 
@@ -408,28 +413,18 @@ public sealed class ServiceRunner : IDisposable
         finally { _gate.Release(); }
     }
 
-    private async Task StartCoreAsync() => await StartCoreAsync(await Task.Run(PrepareConfiguration));
-
-    private async Task StartCoreAsync(ApiLaunchConfiguration? configuration, Action? beforeStart = null)
+    private async Task StartCoreAsync(ApiLaunchConfiguration? configuration, Action? beforeStart = null,
+        int? expectedStopRevision = null)
     {
+        var stopRevision = expectedStopRevision ?? Volatile.Read(ref _stopRevision);
+        if (StartCanceled()) return;
         if (Profile.UsesProcessSession) configuration = null;
         if (!Profile.IsConsole && NormalizeLocalUri(Profile.Url) is null)
             throw new InvalidOperationException("Set a valid local HTTP or HTTPS URL in project settings.");
-        var inspection = await InspectAsync(fresh: true);
-        if (inspection.Inventory.InspectionError is not null)
-            throw new InvalidOperationException(inspection.Inventory.InspectionError + " Start was skipped because ownership could not be checked.");
-        await RefreshCoreAsync(inspection);
-        if (inspection.All.Count > 0)
-        {
-            Log("A process already belongs to this service. Start skipped to avoid a duplicate.");
-            return;
-        }
-        if (Snapshot.State == ServiceState.Conflict)
-        {
-            Log(Snapshot.Detail + " Start skipped.", true);
-            return;
-        }
+        if (!await CheckCanStartAsync()) return;
         if (configuration is null) await Task.Run(() => ValidateCommand(Profile.StartCommand, "Start"));
+        var installRequired = await Task.Run(() => AngularDependencyInstall.IsRequired(Profile, WorkingDirectory));
+        if (StartCanceled()) return;
         var previousSession = _consoleSession;
         _consoleSession = null;
         _lastError = null;
@@ -442,12 +437,27 @@ public sealed class ServiceRunner : IDisposable
             await Task.Run(previousSession.Dispose);
         }
         _startProcess?.Dispose();
+        _startProcess = null;
         _startOutputCapture?.Dispose();
         _startOutputCapture = null;
-        // Inspection and output draining yield. Respect a stop or dashboard override
-        // that arrived during those awaits before launching another process.
+        if (installRequired)
+        {
+            if (!await RunMaintenanceAsync("npm install", "npm install", stopRevision,
+                ServiceState.Installing, beforeStart)) return;
+            if (StartCanceled()) return;
+            if (await Task.Run(() => AngularDependencyInstall.IsRequired(Profile, WorkingDirectory)))
+                throw new InvalidOperationException("npm install completed, but Angular dependencies are still missing. See the output log.");
+            // Installation can take minutes. Recheck process ownership and port conflicts
+            // before starting the configured command, including agent lease validation below.
+            if (!await CheckCanStartAsync()) return;
+        }
+        // Inspection, installation and output draining yield. Respect a later stop
+        // or dashboard override before launching another process.
+        if (StartCanceled()) return;
         beforeStart?.Invoke();
-        _startProcess = await Task.Run(() => StartCommand(Profile.StartCommand, detectUrl: true, configuration));
+        _startProcess = await Task.Run(() => StartCanceled() ? null
+            : StartCommand(Profile.StartCommand, detectUrl: true, configuration));
+        if (_startProcess is null) return;
         ConfigurationNeedsRestart = false;
         Publish(ServiceState.Starting, FlutterRuntimeStatus.IsNative(Profile) ? "Starting Flutter; waiting for the app window"
             : Profile.IsConsole ? "Starting console command" : "Starting; waiting for the local HTTP endpoint",
@@ -455,11 +465,33 @@ public sealed class ServiceRunner : IDisposable
         // Capture early descendants immediately; subsequent refreshes keep identities even if the shell exits.
         var started = await InspectAsync(fresh: true);
         if (Profile.IsConsole) await RefreshCoreAsync(started);
+
+        bool StartCanceled() => _disposed || _preparingKeepRunning || stopRevision != Volatile.Read(ref _stopRevision);
     }
 
-    private async Task RunMaintenanceAsync(string command, string label, int stopRevision)
+    private async Task<bool> CheckCanStartAsync()
     {
-        if (stopRevision != Volatile.Read(ref _stopRevision)) return;
+        var inspection = await InspectAsync(fresh: true);
+        if (inspection.Inventory.InspectionError is not null)
+            throw new InvalidOperationException(inspection.Inventory.InspectionError + " Start was skipped because ownership could not be checked.");
+        await RefreshCoreAsync(inspection);
+        if (inspection.All.Count > 0)
+        {
+            Log("A process already belongs to this service. Start skipped to avoid a duplicate.");
+            return false;
+        }
+        if (Snapshot.State == ServiceState.Conflict)
+        {
+            Log(Snapshot.Detail + " Start skipped.", true);
+            return false;
+        }
+        return true;
+    }
+
+    private async Task<bool> RunMaintenanceAsync(string command, string label, int stopRevision,
+        ServiceState activeState = ServiceState.Busy, Action? beforeCommand = null)
+    {
+        if (stopRevision != Volatile.Read(ref _stopRevision)) return false;
         await Task.Run(() => ValidateCommand(command, label));
         var inspection = await InspectAsync(fresh: true);
         if (inspection.Inventory.InspectionError is not null)
@@ -468,7 +500,7 @@ public sealed class ServiceRunner : IDisposable
         if (inspection.All.Count > 0 || Snapshot.State == ServiceState.Conflict)
         {
             Log($"Stop this service before running {label.ToLowerInvariant()}.", true);
-            return;
+            return false;
         }
         _lastError = null;
         using var cancellation = new CancellationTokenSource();
@@ -477,34 +509,46 @@ public sealed class ServiceRunner : IDisposable
         if (cancellation.IsCancellationRequested)
         {
             Interlocked.CompareExchange(ref _operationCancellation, null, cancellation);
-            return;
+            return false;
         }
-        var process = await Task.Run(() => StartCommand(command, detectUrl: false));
-        _maintenanceProcess = process;
-        _maintenanceLabel = label;
-        var maintenanceSession = _maintenanceSession;
+        Process? process = null;
+        ConsoleProcessSession? maintenanceSession = null;
         var retainedForExit = false;
-        Publish(ServiceState.Busy, $"{label} in progress", [process.Id], BuildUiUrl());
         try
         {
+            beforeCommand?.Invoke();
+            cancellation.Token.ThrowIfCancellationRequested();
+            process = await Task.Run(() =>
+            {
+                cancellation.Token.ThrowIfCancellationRequested();
+                return StartCommand(command, detectUrl: false);
+            });
+            _maintenanceProcess = process;
+            _maintenanceLabel = label;
+            maintenanceSession = _maintenanceSession;
+            Publish(activeState, activeState == ServiceState.Installing
+                ? "Installing npm dependencies (npm install)" : $"{label} in progress", [process.Id], BuildUiUrl());
             await process.WaitForExitAsync(cancellation.Token);
             if (maintenanceSession is not null)
                 while ((await Task.Run(maintenanceSession.ReadProcesses)).Count > 0)
                     await Task.Delay(150, cancellation.Token);
+            cancellation.Token.ThrowIfCancellationRequested();
             if (process.ExitCode != 0) throw new InvalidOperationException($"{label} exited with code {process.ExitCode}. See the output log.");
             Log($"{label} completed successfully.", kind: ServiceLogKind.Success);
+            return true;
         }
         catch (OperationCanceledException)
         {
             retainedForExit = _preparingKeepRunning;
             if (retainedForExit) Log($"{label} remains running while the launcher prepares to close.");
-            else
+            else if (process is not null)
             {
                 if (maintenanceSession is not null) await Task.Run(maintenanceSession.Stop);
                 await KillProcessesAsync(ProcessInspector.Descendants((await ProcessInspector.ReadAsync(true, includePorts: !Profile.IsConsole)).Processes,
                     [new ProcessIdentity(process.Id, process.StartTime.ToUniversalTime().Ticks)]));
                 Log($"{label} stopped.");
             }
+            return false;
         }
         finally
         {
@@ -534,7 +578,7 @@ public sealed class ServiceRunner : IDisposable
                     _maintenanceLabel = null;
                     _maintenanceOutputCapture?.Dispose();
                     _maintenanceOutputCapture = null;
-                    process.Dispose();
+                    process?.Dispose();
                 }
                 await RefreshCoreAsync();
             }
@@ -973,6 +1017,11 @@ public sealed class ServiceRunner : IDisposable
         {
             if (FlutterRuntimeStatus.IsNative(Profile)) RefreshFlutter(inspection, ids);
             else RefreshConsole(inspection, ids);
+            return;
+        }
+        if (_maintenanceLabel == "npm install" && ids.Length > 0)
+        {
+            Publish(ServiceState.Installing, "Installing npm dependencies (npm install)", ids, BuildUiUrl());
             return;
         }
         if (inspection.Owned.Count == 0) InvalidateFrontendRun();

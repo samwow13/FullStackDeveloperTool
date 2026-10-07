@@ -24,7 +24,7 @@ internal sealed record CodexActivityFeedHistoryEntry(CodexActivityMessage Messag
 /// separate from the alerts reader, which remains strictly lifecycle/metadata-only.
 /// No app server, model request, credential access, persistent cache, or diagnostic output.
 /// </summary>
-internal sealed class CodexActivityFeedSummaryReader(string codexHome)
+internal sealed partial class CodexActivityFeedSummaryReader(string codexHome)
 {
     private const int MaximumTailBytes = 512 * 1024;
     private const int MaximumReadsPerPoll = 16;
@@ -225,11 +225,15 @@ internal sealed class CodexActivityFeedSummaryReader(string codexHome)
                     }
                     if (currentTurnId == expectedTurnId) expectedTurnSeen = true;
                     string? cleanCommentary = null;
+                    string? displayCommentary = null;
                     string? messageIdentity = null;
                     if (record.Commentary is not null)
                     {
                         cleanCommentary = CleanMessage(record.Commentary);
-                        if (cleanCommentary.Length > 0)
+                        // Filter before both compaction and bounded bubble-history retention.
+                        // Raw chat export reads the saved messages through a separate path.
+                        displayCommentary = CodexBubbleTextFormatter.Format(cleanCommentary);
+                        if (!string.IsNullOrWhiteSpace(displayCommentary))
                         {
                             messageIdentity = record.MessageId is { Length: > 0 } messageId
                                 ? record.IdentityKind + ":" + currentTurnId + ":" + messageId
@@ -273,13 +277,11 @@ internal sealed class CodexActivityFeedSummaryReader(string codexHome)
                         var clean = CleanUserRequest(record.UserText);
                         if (clean.Length > 0) user = clean;
                     }
-                    if (cleanCommentary is { Length: > 0 })
+                    if (!string.IsNullOrWhiteSpace(displayCommentary))
                     {
-                        commentary = Compact(cleanCommentary, 220);
+                        commentary = Compact(displayCommentary, 220);
                         commentarySource = record.Source;
-                        // Current item and response records share a message ID. Use that
-                        // identity so a paired representation cannot replay one update.
-                        // Legacy record positions still distinguish identical excerpts.
+                        // Hidden payloads do not replace or replay the last readable update.
                         feedbackIdentity = messageIdentity;
                     }
                 }
@@ -300,14 +302,29 @@ internal sealed class CodexActivityFeedSummaryReader(string codexHome)
         finally { Array.Clear(bytes); }
     }
 
-    private static MessageRecord ReadLine(ReadOnlySpan<byte> line)
+    private static MessageRecord ReadLine(ReadOnlySpan<byte> line,
+        int maximumMessageBytes = MaximumMessageBytes, bool preserveTextParts = false)
     {
         // Skip tool results and reasoning without materializing their strings.
         // Only the exact outgoing collaboration.send_message call is a public agent message.
         var reader = new Utf8JsonReader(line);
         string? type = null;
+        if (preserveTextParts)
+        {
+            // Export accepts any JSON property order; the passive reader keeps its
+            // existing inexpensive path for the current rollout format.
+            var probe = reader;
+            while (probe.Read())
+            {
+                if (probe.TokenType != JsonTokenType.PropertyName || probe.CurrentDepth != 1) continue;
+                var isType = probe.ValueTextEquals("type"u8);
+                if (!probe.Read()) break;
+                if (isType && probe.TokenType == JsonTokenType.String) { type = probe.GetString(); break; }
+                probe.Skip();
+            }
+        }
         JsonElement payload = default;
-        using var document = SelectMessagePayload(ref reader, ref type, out var recordTurnId);
+        using var document = SelectMessagePayload(ref reader, ref type, out var recordTurnId, maximumMessageBytes);
         if (document is null) return new(recordTurnId, null, null);
         payload = document.RootElement;
         var payloadType = String(payload, "type");
@@ -315,19 +332,22 @@ internal sealed class CodexActivityFeedSummaryReader(string codexHome)
             return new(String(payload, "turn_id"), null, null);
         if (type == "event_msg")
         {
-            if (payloadType == "user_message") return new(recordTurnId, ReadPublicText(payload, "message"), null);
+            if (payloadType == "user_message") return new(recordTurnId, ReadPublicText(payload, "message"), null,
+                String(payload, "id"), Representation: "event");
             if (payloadType == "agent_message" && String(payload, "channel") != "analysis" &&
                 IsPublicMessagePhase(String(payload, "phase")))
-                return new(recordTurnId, null, ReadPublicText(payload, "message"), String(payload, "id"), Representation: "event");
+                return new(recordTurnId, null, ReadPublicText(payload, "message"), String(payload, "id"),
+                    Representation: "event", Phase: String(payload, "phase"));
             if (payloadType == "item_completed" && payload.TryGetProperty("item", out var item) &&
                 String(item, "type") == "AgentMessage" && IsPublicMessagePhase(String(item, "phase")))
-                return new(recordTurnId, null, ReadMessageText(item), String(item, "id"), Representation: "item");
+                return new(recordTurnId, null, ReadMessageText(item, maximumMessageBytes, preserveTextParts), String(item, "id"),
+                    Representation: "item", Phase: String(item, "phase"));
         }
         if (type == "response_item" && payloadType == "function_call" &&
             String(payload, "namespace") == "collaboration" && String(payload, "name") == "send_message")
         {
             var arguments = String(payload, "arguments");
-            if (arguments is not { Length: > 0 and <= MaximumMessageBytes })
+            if (arguments is null || arguments.Length == 0 || arguments.Length > maximumMessageBytes)
                 return new(recordTurnId, null, null);
             using var parsed = JsonDocument.Parse(arguments);
             if (parsed.RootElement.ValueKind != JsonValueKind.Object)
@@ -340,29 +360,32 @@ internal sealed class CodexActivityFeedSummaryReader(string codexHome)
         var role = String(payload, "role");
         if (role != "user" && !(role == "assistant" && IsPublicMessagePhase(String(payload, "phase"))))
             return new(recordTurnId, null, null);
-        var text = ReadMessageText(payload);
-        return role == "user" ? new(recordTurnId, text, null) : new(recordTurnId, null, text, String(payload, "id"));
+        var text = ReadMessageText(payload, maximumMessageBytes, preserveTextParts);
+        return role == "user" ? new(recordTurnId, text, null, String(payload, "id"))
+            : new(recordTurnId, null, text, String(payload, "id"), Phase: String(payload, "phase"));
     }
 
-    private static string? ReadMessageText(JsonElement payload)
+    private static string? ReadMessageText(JsonElement payload,
+        int maximumMessageBytes = MaximumMessageBytes, bool preserveTextParts = false)
     {
         if (!payload.TryGetProperty("content", out var content) || content.ValueKind != JsonValueKind.Array)
-            return null;
+            return preserveTextParts ? ReadPublicText(payload, "text") : null;
         var text = new StringBuilder();
         foreach (var part in content.EnumerateArray())
         {
             if (String(part, "type") is not ("input_text" or "output_text" or "text" or "Text")) continue;
             var value = ReadPublicText(part, "text");
             if (value is null) continue;
-            if (text.Length > 0) text.Append(' ');
+            // Preserve part boundaries until chat presentation filters code and metadata.
+            if (text.Length > 0) text.Append("\n\n");
             text.Append(value);
-            if (text.Length > MaximumMessageBytes) break;
+            if (!preserveTextParts && text.Length > maximumMessageBytes) break;
         }
         return text.ToString();
     }
 
     private static JsonDocument? SelectMessagePayload(ref Utf8JsonReader reader, ref string? type,
-        out string? recordTurnId)
+        out string? recordTurnId, int maximumMessageBytes = MaximumMessageBytes)
     {
         recordTurnId = null;
         while (reader.Read())
@@ -419,7 +442,7 @@ internal sealed class CodexActivityFeedSummaryReader(string codexHome)
                     type == "response_item" && channel != "analysis" &&
                     (payloadType == "message" && (role == "user" || role == "assistant" && IsPublicMessagePhase(phase)) ||
                         payloadType == "function_call" && callNamespace == "collaboration" && callName == "send_message");
-                if (!allowed || probe.BytesConsumed - reader.TokenStartIndex > MaximumMessageBytes)
+                if (!allowed || probe.BytesConsumed - reader.TokenStartIndex > maximumMessageBytes)
                 {
                     reader.Skip();
                     continue;
@@ -504,6 +527,7 @@ internal sealed class CodexActivityFeedSummaryReader(string codexHome)
                  text.TrimStart().StartsWith("<external_codex_apps_open_page>", StringComparison.Ordinal)) return "";
         text = Regex.Replace(text, @"<(environment_context|INSTRUCTIONS|skills_instructions|system_reminder|image)\b[^>]*>[\s\S]*?</\1>",
             " ", RegexOptions.IgnoreCase, TimeSpan.FromMilliseconds(100));
+        text = CodexBubbleTextFormatter.Format(text);
         text = Regex.Replace(text, @"<[^>]{1,256}>", " ", RegexOptions.None, TimeSpan.FromMilliseconds(100));
         return Compact(text, 220);
     }
@@ -548,5 +572,6 @@ internal sealed class CodexActivityFeedSummaryReader(string codexHome)
         JsonException or RegexMatchTimeoutException;
     private sealed record CacheEntry(string Path, long Length, DateTime Modified, CodexActivityFeedSummary Summary);
     private sealed record MessageRecord(string? TurnId, string? UserText, string? Commentary, string? MessageId = null,
-        string IdentityKind = "saved-message", string Source = "Latest saved update", string Representation = "response");
+        string IdentityKind = "saved-message", string Source = "Latest saved update", string Representation = "response",
+        string? Phase = null);
 }

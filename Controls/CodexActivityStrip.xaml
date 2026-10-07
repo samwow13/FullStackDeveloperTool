@@ -4,7 +4,7 @@
              xmlns:controls="clr-namespace:FullStackLauncher.Controls"
              x:Name="Crew" FontFamily="Segoe UI" Foreground="{StaticResource TextBrush}"
              UseLayoutRounding="True" SnapsToDevicePixels="True"
-             AutomationProperties.Name="Codex crew, activity across all local chats">
+             AutomationProperties.Name="Codex crew, activity for selected project">
     <UserControl.Resources>
         <Style x:Key="DismissAgentButton" TargetType="Button">
             <Setter Property="Width" Value="26"/>
@@ -153,6 +153,19 @@
                     <StackPanel>
                     <TextBlock Text="{Binding Title}" Foreground="#31645F" FontSize="10" FontWeight="SemiBold"
                                TextTrimming="CharacterEllipsis" Margin="0,0,0,4"/>
+                    <StackPanel Orientation="Horizontal" Margin="0,0,0,4"
+                                Visibility="{Binding HasModelSettings, Converter={StaticResource BoolToVisibility}}">
+                        <Border Background="#111A24" CornerRadius="3" Padding="5,1" Margin="0,0,5,0"
+                                Visibility="{Binding HasModel, Converter={StaticResource BoolToVisibility}}">
+                            <TextBlock Text="{Binding ModelLabel}" Foreground="#C7D0DE" FontSize="10"
+                                       ToolTip="{Binding ModelDescription}"/>
+                        </Border>
+                        <Border Background="#111A24" CornerRadius="3" Padding="5,1"
+                                Visibility="{Binding HasReasoningEffort, Converter={StaticResource BoolToVisibility}}">
+                            <TextBlock Text="{Binding ReasoningEffortLabel}" Foreground="{Binding ReasoningEffortColor}"
+                                       FontSize="10" FontWeight="SemiBold" ToolTip="{Binding ReasoningEffortDescription}"/>
+                        </Border>
+                    </StackPanel>
                     <ScrollViewer MaxHeight="{Binding ThoughtBubbleMaxHeight}" HorizontalScrollBarVisibility="Disabled" VerticalScrollBarVisibility="Auto"
                                   Background="Transparent" Padding="0,0,5,0" PreviewMouseWheel="ThoughtScroll_PreviewMouseWheel"
                                   CanContentScroll="False" PanningMode="VerticalOnly" Focusable="False"
@@ -161,15 +174,24 @@
                                    Foreground="#17343B" FontSize="12" FontWeight="Medium"
                                    LineHeight="17" TextWrapping="Wrap"/>
                     </ScrollViewer>
-                    <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,6,0,0">
-                        <TextBlock Text="{Binding ThoughtMessagePosition}" Foreground="#31645F" FontSize="10" VerticalAlignment="Center" Margin="0,0,4,0"/>
-                        <Button Content="‹" FontSize="18" Style="{StaticResource ThoughtHistoryButton}"
-                                IsEnabled="{Binding CanShowPreviousThought}" Click="PreviousThought_Click"
-                                ToolTip="Previous message" AutomationProperties.Name="Previous agent message"/>
-                        <Button Content="›" FontSize="18" Style="{StaticResource ThoughtHistoryButton}"
-                                IsEnabled="{Binding CanShowNextThought}" Click="NextThought_Click"
-                                ToolTip="Next message" AutomationProperties.Name="Next agent message"/>
-                    </StackPanel>
+                    <DockPanel Margin="0,6,0,0" LastChildFill="False">
+                        <Button Content="{Binding HistoryCopyButtonText}" Width="70" FontSize="11" Margin="0"
+                                DockPanel.Dock="Left" Style="{StaticResource ThoughtHistoryButton}"
+                                IsEnabled="{Binding CanCopyHistory}" Click="CopyAgentHistory_Click"
+                                ToolTip="Copy this agent's saved chat text history" AutomationProperties.Name="Copy agent chat history"/>
+                        <StackPanel Orientation="Horizontal" DockPanel.Dock="Right">
+                            <TextBlock Text="{Binding ThoughtMessagePosition}" Foreground="#31645F" FontSize="10" VerticalAlignment="Center" Margin="0,0,4,0"/>
+                            <Button Content="‹" FontSize="18" Style="{StaticResource ThoughtHistoryButton}"
+                                    IsEnabled="{Binding CanShowPreviousThought}" Click="PreviousThought_Click"
+                                    ToolTip="Previous message" AutomationProperties.Name="Previous agent message"/>
+                            <Button Content="›" FontSize="18" Style="{StaticResource ThoughtHistoryButton}"
+                                    IsEnabled="{Binding CanShowNextThought}" Click="NextThought_Click"
+                                    ToolTip="Next message" AutomationProperties.Name="Next agent message"/>
+                        </StackPanel>
+                    </DockPanel>
+                    <TextBlock Text="{Binding HistoryCopyStatus}" Foreground="#31645F" FontSize="10" TextWrapping="Wrap" Margin="0,4,0,0"
+                               Visibility="{Binding HasHistoryCopyStatus, Converter={StaticResource BoolToVisibility}}"
+                               AutomationProperties.LiveSetting="Polite"/>
                     </StackPanel>
                 </Border>
             </DockPanel>
@@ -256,7 +278,20 @@
                                     <Grid.ColumnDefinitions><ColumnDefinition Width="72"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
                                     <Border x:Name="ChatRobot" Width="68" Height="56" Background="Transparent"
                                             MouseEnter="RobotHover_Enter" MouseLeave="RobotHover_Leave"
-                                            VerticalAlignment="Center" HorizontalAlignment="Left">
+                                            VerticalAlignment="Center" HorizontalAlignment="Left" Focusable="True"
+                                            AutomationProperties.Name="{Binding Title}">
+                                        <Border.ContextMenu>
+                                            <ContextMenu Style="{StaticResource CrewViewMenu}"
+                                                         DataContext="{Binding PlacementTarget.DataContext, RelativeSource={RelativeSource Self}}">
+                                                <MenuItem Header="{Binding HistoryCopyMenuText}" Style="{StaticResource CrewViewMenuItem}"
+                                                          IsEnabled="{Binding CanCopyHistory}" Click="CopyAgentHistory_Click" StaysOpenOnClick="True"/>
+                                                <MenuItem Style="{StaticResource CrewViewMenuItem}" IsEnabled="False"
+                                                          Visibility="{Binding HasHistoryCopyStatus, Converter={StaticResource BoolToVisibility}}">
+                                                    <MenuItem.Header><TextBlock Text="{Binding HistoryCopyStatus}" MaxWidth="260" TextWrapping="Wrap"
+                                                                               AutomationProperties.LiveSetting="Polite"/></MenuItem.Header>
+                                                </MenuItem>
+                                            </ContextMenu>
+                                        </Border.ContextMenu>
                                         <controls:CodexRobot State="{Binding State}" Animate="{Binding Animate}"
                                                              IsWaitingToSpeak="{Binding IsWaitingToSpeak}"
                                                              IsHovered="{Binding IsMouseOver, ElementName=ChatRobot}"
@@ -281,7 +316,20 @@
                                                 <DataTemplate>
                                                     <Border x:Name="SubagentRobot" Background="Transparent" Width="34" Height="28" Margin="0,0,3,2"
                                                             MouseEnter="RobotHover_Enter" MouseLeave="RobotHover_Leave"
-                                                            AutomationProperties.Name="{Binding AccessibleDescription}" AutomationProperties.HelpText="{Binding Detail}">
+                                                            AutomationProperties.Name="{Binding AccessibleDescription}" AutomationProperties.HelpText="{Binding Detail}"
+                                                            Focusable="True">
+                                                        <Border.ContextMenu>
+                                                            <ContextMenu Style="{StaticResource CrewViewMenu}"
+                                                                         DataContext="{Binding PlacementTarget.DataContext, RelativeSource={RelativeSource Self}}">
+                                                                <MenuItem Header="{Binding HistoryCopyMenuText}" Style="{StaticResource CrewViewMenuItem}"
+                                                                          IsEnabled="{Binding CanCopyHistory}" Click="CopyAgentHistory_Click" StaysOpenOnClick="True"/>
+                                                                <MenuItem Style="{StaticResource CrewViewMenuItem}" IsEnabled="False"
+                                                                          Visibility="{Binding HasHistoryCopyStatus, Converter={StaticResource BoolToVisibility}}">
+                                                                    <MenuItem.Header><TextBlock Text="{Binding HistoryCopyStatus}" MaxWidth="260" TextWrapping="Wrap"
+                                                                                               AutomationProperties.LiveSetting="Polite"/></MenuItem.Header>
+                                                                </MenuItem>
+                                                            </ContextMenu>
+                                                        </Border.ContextMenu>
                                                         <Grid>
                                                             <!-- Scale the complete native-size control, including every animated pose. -->
                                                             <Viewbox Width="34" Height="28" Stretch="Uniform" StretchDirection="Both" HorizontalAlignment="Left">
@@ -320,14 +368,37 @@
                                     <TextBlock Text="{Binding Title}" FontSize="12" FontWeight="SemiBold"
                                                TextTrimming="CharacterEllipsis" ToolTip="{Binding Title}"/>
                                 </Border>
-                                <Border Background="#111A24" Padding="6,0" Margin="12,0,12,0"
-                                        HorizontalAlignment="Left" VerticalAlignment="Bottom">
-                                    <DockPanel LastChildFill="True">
+                                <Grid Margin="12,0,12,0" VerticalAlignment="Bottom">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="Auto"/>
+                                        <ColumnDefinition Width="*"/>
+                                        <ColumnDefinition Width="Auto"/>
+                                    </Grid.ColumnDefinitions>
+                                    <Border Background="#111A24" Padding="6,0,4,0" VerticalAlignment="Center">
+                                    <StackPanel Orientation="Horizontal">
                                         <Ellipse Width="5" Height="5" Fill="{Binding StateColor}" VerticalAlignment="Center" Margin="0,0,5,0"/>
                                         <TextBlock Text="{Binding StateText}" Foreground="{Binding StateColor}" FontSize="10"
-                                                   TextTrimming="CharacterEllipsis"/>
-                                    </DockPanel>
-                                </Border>
+                                                   MaxWidth="90" TextTrimming="CharacterEllipsis" ToolTip="{Binding StateText}"/>
+                                    </StackPanel>
+                                    </Border>
+                                    <Border Grid.Column="1" Background="#111A24" Padding="4,0" Margin="2,0,0,0"
+                                            HorizontalAlignment="Right" VerticalAlignment="Center"
+                                            Visibility="{Binding HasModel, Converter={StaticResource BoolToVisibility}}">
+                                        <TextBlock Text="{Binding ModelLabel}" Foreground="#C7D0DE" FontSize="10"
+                                                   TextTrimming="CharacterEllipsis" ToolTip="{Binding ModelDescription}"
+                                                   AutomationProperties.Name="{Binding ModelDescription}"/>
+                                    </Border>
+                                    <Border Grid.Column="2" Background="#111A24" Padding="3,0,6,0" Margin="2,0,0,0"
+                                            VerticalAlignment="Center"
+                                            Visibility="{Binding HasReasoningEffort, Converter={StaticResource BoolToVisibility}}">
+                                        <Border Background="{Binding ReasoningEffortBackground}" BorderBrush="{Binding ReasoningEffortBorder}"
+                                                BorderThickness="1" CornerRadius="3" Padding="4,0">
+                                            <TextBlock Text="{Binding ReasoningEffortLabel}" Foreground="{Binding ReasoningEffortColor}"
+                                                       FontSize="10" FontWeight="SemiBold" ToolTip="{Binding ReasoningEffortDescription}"
+                                                       AutomationProperties.Name="{Binding ReasoningEffortDescription}"/>
+                                        </Border>
+                                    </Border>
+                                </Grid>
                                 <Button Style="{StaticResource ReplyAgentButton}" HorizontalAlignment="Right" VerticalAlignment="Top"
                                         Click="ReplyAgent_Click" ToolTip="Reply to this chat" AutomationProperties.Name="Reply to chat"
                                         AutomationProperties.HelpText="Save a response to this exact chat's MCP inbox and follow its receipt status.">
@@ -349,9 +420,10 @@
                     Visibility="{Binding IsEmpty, Converter={StaticResource BoolToVisibility}}">
                 <Grid HorizontalAlignment="Center" Margin="12,0">
                     <Grid.ColumnDefinitions><ColumnDefinition Width="Auto"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
-                    <controls:CodexRobot State="Idle" Animate="False" Margin="0,0,15,0" VerticalAlignment="Center"/>
+                    <controls:CodexRobot State="{Binding EmptyRobotState}" Animate="False" Margin="0,0,15,0" VerticalAlignment="Center"/>
                     <StackPanel Grid.Column="1" VerticalAlignment="Center">
-                        <TextBlock Text="{Binding EmptyTitle}" FontSize="13" FontWeight="SemiBold"/>
+                        <TextBlock Text="{Binding EmptyTitle}" FontSize="13" FontWeight="SemiBold"
+                                   AutomationProperties.LiveSetting="Polite"/>
                         <TextBlock Text="{Binding EmptyMessage}" FontSize="11" Foreground="{StaticResource MutedBrush}"
                                    TextWrapping="Wrap" MaxWidth="350" Margin="0,4,0,0"/>
                     </StackPanel>
@@ -361,9 +433,14 @@
     </Border>
     <Grid Margin="16,0,12,0" VerticalAlignment="Top">
         <Grid.ColumnDefinitions><ColumnDefinition Width="Auto"/><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
-        <Border Background="{StaticResource BackgroundBrush}" Padding="8,0" VerticalAlignment="Center">
-            <TextBlock Text="Codex Crew" Foreground="#A6F2DE" FontSize="15" FontWeight="SemiBold"/>
-        </Border>
+        <StackPanel Orientation="Horizontal" Background="{StaticResource BackgroundBrush}" VerticalAlignment="Center">
+            <TextBlock Text="Codex Crew" Foreground="#A6F2DE" FontSize="15" FontWeight="SemiBold"
+                       Margin="8,0" VerticalAlignment="Center"/>
+            <Button Content="Start Agent" Click="StartAgent_Click" Margin="2,0,8,0" Padding="10,4"
+                    IsEnabled="{Binding CanStartAgent, ElementName=Crew}"
+                    AutomationProperties.Name="Start Agent" ToolTip="Start a new Codex chat for the selected project"
+                    ToolTipService.ShowOnDisabled="True"/>
+        </StackPanel>
         <Border Grid.Column="1" Background="{StaticResource BackgroundBrush}" BorderBrush="#42546B" BorderThickness="1" CornerRadius="5"
                 Padding="8,2" Margin="12,0,0,0" HorizontalAlignment="Right" VerticalAlignment="Center">
             <controls:CodexAccountUsageView Snapshot="{Binding AccountUsage, ElementName=Crew}"/>

@@ -6,6 +6,7 @@ namespace FullStackLauncher.ProjectTasks;
 
 public enum CodexQueueRunStage
 {
+    CommandAccessChecking,
     ThreadSubmissionStarting,
     ThreadCreated,
     TurnSubmissionStarting,
@@ -23,7 +24,8 @@ public sealed record CodexQueueRunUpdate(
     string? TurnId,
     string Summary,
     bool TerminalConfirmed = false,
-    string FinalResponse = "");
+    string FinalResponse = "",
+    string ConnectionDetails = "");
 
 public sealed record CodexQueueRunResult(
     ProjectTaskRunState State,
@@ -65,9 +67,7 @@ public interface ICodexQueueTaskRunner
 /// </summary>
 public sealed class CodexQueueTaskRunner : ICodexQueueTaskRunner
 {
-    private const string ApprovalPolicy = "on-request";
-    private const string RequestedSandbox = "workspace-write";
-    private const string EffectiveSandbox = "workspaceWrite";
+    private const string ApprovalPolicy = CodexAgentAccessPolicy.ApprovalPolicy;
     private const int MaximumPromptCharacters = 500_000;
     private const int MaximumFinalCharacters = 16_384;
 
@@ -112,6 +112,7 @@ public sealed class CodexQueueTaskRunner : ICodexQueueTaskRunner
         var stagedImages = false;
         IReadOnlyList<string> stagedImagePaths = [];
         var finalResponse = "";
+        var connectionDetails = "";
         var resolvedFolder = snapshot.Folder;
         using var startup = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         startup.CancelAfter(TimeSpan.FromSeconds(90));
@@ -126,7 +127,7 @@ public sealed class CodexQueueTaskRunner : ICodexQueueTaskRunner
             try
             {
                 await persistUpdate(new(stage, state, outcome, ThreadId, TurnId, summary,
-                    confirmed, finalResponse)).ConfigureAwait(false);
+                    confirmed, finalResponse, connectionDetails)).ConfigureAwait(false);
             }
             catch { callbackFailed = true; throw; }
             if (stage != CodexQueueRunStage.Terminal)
@@ -150,11 +151,13 @@ public sealed class CodexQueueTaskRunner : ICodexQueueTaskRunner
                 return await TerminalAsync(ProjectTaskRunState.Failed, ProjectTaskOutcome.Failed,
                     "The assigned project folder must be an existing absolute folder.").ConfigureAwait(false);
             resolvedFolder = Path.TrimEndingDirectorySeparator(Path.GetFullPath(resolvedFolder));
+            if (snapshot.AutomaticLoopChainId.Length != 0)
+                ProjectAutomaticLoop.ValidateFolder(resolvedFolder, resolvedFolder);
             var preparedPrompt = MakePrompt(snapshot, out var pageSourceIncluded);
             if (string.IsNullOrWhiteSpace(snapshot.Prompt) || preparedPrompt.Length > MaximumPromptCharacters ||
                 !pageSourceIncluded)
                 return await TerminalAsync(ProjectTaskRunState.Failed, ProjectTaskOutcome.Failed,
-                    "The saved prompt and selected browser page source exceed the 500,000-character task limit. Shorten the note or turn off source for some snips, then retry.").ConfigureAwait(false);
+                    "The saved prompt, loop context, and selected browser page source exceed the 500,000-character task limit. Shorten the note or turn off source for some snips, then retry.").ConfigureAwait(false);
             if (snapshot.PredecessorHandoff is { Length: > 1000 })
                 return await TerminalAsync(ProjectTaskRunState.Failed, ProjectTaskOutcome.Failed,
                     "The frozen predecessor handoff exceeds the 1,000-character limit.").ConfigureAwait(false);
@@ -165,8 +168,13 @@ public sealed class CodexQueueTaskRunner : ICodexQueueTaskRunner
                 return await TerminalAsync(ProjectTaskRunState.Interrupted, ProjectTaskOutcome.Interrupted,
                     "Stopped before creating a Codex task.").ConfigureAwait(false);
 
-            var connection = await CodexAppServerConnection.StartAsync(resolvedFolder, startupToken).ConfigureAwait(false);
+            var connection = await CodexAppServerConnection.StartAsync(resolvedFolder, startupToken,
+                includeImagePayloads: snapshot.Images.Count > 0).ConfigureAwait(false);
             lock (_sync) _connection = connection;
+            // Resolve once from the user's effective configuration. A sandbox failure
+            // never changes this choice or authorizes a full-access fallback.
+            var accessMode = await CodexAgentAccessPolicy.LoadConfiguredDefaultAsync(connection,
+                resolvedFolder, startupToken).ConfigureAwait(false);
             var catalog = await CodexModelCatalog.LoadAsync(connection, startupToken).ConfigureAwait(false);
             var model = catalog.SingleOrDefault(option => string.Equals(option.Id, snapshot.ModelId, StringComparison.Ordinal));
             if (model is null || !model.SupportedReasoningEfforts.Any(option =>
@@ -183,15 +191,28 @@ public sealed class CodexQueueTaskRunner : ICodexQueueTaskRunner
             }
             stagedImages = stagedImagePaths.Count > 0;
 
+            connectionDetails = $"Access mode: {accessMode}\nApproval policy: {ApprovalPolicy}\nCommand access: checking";
+            await PersistAsync(CodexQueueRunStage.CommandAccessChecking,
+                ProjectTaskRunState.Starting, ProjectTaskOutcome.Unknown,
+                "Checking command access before creating a Codex task.").ConfigureAwait(false);
+            if (IsStopRequested())
+                return await TerminalAsync(ProjectTaskRunState.Interrupted, ProjectTaskOutcome.Interrupted,
+                    "Stopped before creating a Codex task.").ConfigureAwait(false);
+            await CodexCommandAccessCheck.VerifyAsync(connection, resolvedFolder, accessMode,
+                startupToken).ConfigureAwait(false);
+            connectionDetails = $"Access mode: {accessMode}\nApproval policy: {ApprovalPolicy}\nCommand access: verified";
+
             await PersistAsync(CodexQueueRunStage.ThreadSubmissionStarting,
                 ProjectTaskRunState.Starting, ProjectTaskOutcome.Unknown,
                 "Codex task submission is starting.").ConfigureAwait(false);
             startupToken.ThrowIfCancellationRequested();
+            if (snapshot.AutomaticLoopChainId.Length != 0)
+                ProjectAutomaticLoop.ValidateFolder(resolvedFolder, resolvedFolder);
             var threadResponse = await connection.RequestAsync("thread/start", new
             {
                 cwd = resolvedFolder,
                 model = snapshot.ModelId,
-                sandbox = RequestedSandbox,
+                sandbox = CodexAgentAccessPolicy.RequestedSandbox(accessMode),
                 approvalPolicy = ApprovalPolicy,
                 approvalsReviewer = "user",
                 config = new Dictionary<string, object> { ["model_reasoning_effort"] = snapshot.ReasoningEffort }
@@ -220,10 +241,10 @@ public sealed class CodexQueueTaskRunner : ICodexQueueTaskRunner
                 || !string.Equals(RequiredString(threadResponse, "model"), snapshot.ModelId, StringComparison.Ordinal)
                 || !string.Equals(OptionalString(threadResponse, "reasoningEffort"), snapshot.ReasoningEffort, StringComparison.Ordinal)
                 || !string.Equals(RequiredString(threadResponse, "approvalPolicy"), ApprovalPolicy, StringComparison.Ordinal)
-                || !string.Equals(RequiredString(effectiveSandbox, "type"), EffectiveSandbox, StringComparison.Ordinal)
+                || !string.Equals(RequiredString(effectiveSandbox, "type"), CodexAgentAccessPolicy.EffectiveSandbox(accessMode), StringComparison.Ordinal)
                 || !string.Equals(OptionalString(threadResponse, "approvalsReviewer"), "user", StringComparison.Ordinal))
                 return await TerminalAsync(ProjectTaskRunState.NeedsAttention, ProjectTaskOutcome.Blocked,
-                    "Codex did not confirm the assigned folder, model, thinking level, workspace-write sandbox, or user approval policy. No prompt was submitted.").ConfigureAwait(false);
+                    "Codex did not confirm the assigned folder, model, thinking level, configured access mode, or noninteractive approval policy. No prompt was submitted.").ConfigureAwait(false);
 
             await WaitForThreadStartedAsync(connection, ThreadId!, startupToken).ConfigureAwait(false);
             if (IsStopRequested())
@@ -321,7 +342,7 @@ public sealed class CodexQueueTaskRunner : ICodexQueueTaskRunner
                                 "Codex confirmed that the exact turn was interrupted.", true).ConfigureAwait(false);
                         if (status == "failed")
                             return await TerminalAsync(ProjectTaskRunState.Failed, ProjectTaskOutcome.Failed,
-                                "Codex reported that the exact turn failed. Review this task in Codex.", true).ConfigureAwait(false);
+                                FailureSummary(turn), true).ConfigureAwait(false);
                         if (status != "completed")
                             return await TerminalAsync(ProjectTaskRunState.NeedsAttention, ProjectTaskOutcome.Unknown,
                                 "Codex returned an unsupported terminal status. Review this task in Codex.").ConfigureAwait(false);
@@ -354,7 +375,8 @@ public sealed class CodexQueueTaskRunner : ICodexQueueTaskRunner
                 {
                     await TryInterruptAsync().ConfigureAwait(false);
                     return await TerminalAsync(ProjectTaskRunState.NeedsAttention, ProjectTaskOutcome.Unknown,
-                        "Codex reported a non-retryable error without confirming this turn's terminal state.").ConfigureAwait(false);
+                        "Codex reported a non-retryable error without confirming this turn's terminal state. " +
+                        (parameters.TryGetProperty("error", out var error) ? CodexFailureDetails.Describe(error) : "Review this task in Codex.")).ConfigureAwait(false);
                 }
             }
         }
@@ -363,11 +385,11 @@ public sealed class CodexQueueTaskRunner : ICodexQueueTaskRunner
             return Result(ProjectTaskRunState.Interrupted, ProjectTaskOutcome.Interrupted,
                 "Stopped before the next Codex request was sent.");
         }
-        catch (CodexInteractionRequiredException)
+        catch (CodexInteractionRequiredException ex)
         {
             await TryInterruptAsync().ConfigureAwait(false);
             return Result(ProjectTaskRunState.NeedsAttention, ProjectTaskOutcome.NeedsInput,
-                "Codex requested approval, input, or a client tool. Open the task in Codex for review; the launcher did not answer it.");
+                ex.Message);
         }
         catch (Exception) when (callbackFailed)
         {
@@ -391,10 +413,10 @@ public sealed class CodexQueueTaskRunner : ICodexQueueTaskRunner
         {
             await TryInterruptAsync().ConfigureAwait(false);
             return Result(threadSubmissionAttempted ? ProjectTaskRunState.NeedsAttention : ProjectTaskRunState.Failed,
-                ProjectTaskOutcome.Unknown,
+                threadSubmissionAttempted ? ProjectTaskOutcome.Unknown : ProjectTaskOutcome.Blocked,
                 threadSubmissionAttempted
-                    ? "Codex connection or protocol evidence was lost after submission began. Do not retry this attempt automatically; review the retained IDs in Codex."
-                    : CodexAppServerConnection.UnavailableMessage);
+                    ? "Codex connection or protocol evidence was lost after submission began. Do not retry this attempt automatically; review the retained IDs in Codex. " + CodexFailureDetails.Describe(ex)
+                    : CodexFailureDetails.Describe(ex) + " No task or prompt was submitted.");
         }
         finally
         {
@@ -438,7 +460,7 @@ public sealed class CodexQueueTaskRunner : ICodexQueueTaskRunner
                     threadId, turnId, "The assigned folder is unavailable. Review this attempt before any new submission.");
             var folder = Path.TrimEndingDirectorySeparator(Path.GetFullPath(snapshot.Folder));
             await using var connection = await CodexAppServerConnection.StartAsync(folder, timeout.Token,
-                experimentalApi: true).ConfigureAwait(false);
+                experimentalApi: true, includeImagePayloads: snapshot.Images.Count > 0).ConfigureAwait(false);
             var (thread, storedTurnValue) = await ReadStoredExactAsync(connection, threadId, turnId,
                 timeout.Token).ConfigureAwait(false);
             if (!string.Equals(RequiredString(thread, "id"), threadId, StringComparison.Ordinal)
@@ -466,7 +488,7 @@ public sealed class CodexQueueTaskRunner : ICodexQueueTaskRunner
                     threadId, turnId, "Codex storage confirms that the exact turn was interrupted.", true);
             if (status == "failed")
                 return new(ProjectTaskRunState.Failed, ProjectTaskOutcome.Failed,
-                    threadId, turnId, "Codex storage confirms that the exact turn failed.", true);
+                    threadId, turnId, FailureSummary(storedTurn), true);
             var finalMessages = new Dictionary<string, string>(StringComparer.Ordinal);
             if (!CollectFinalItems(storedTurn, new Dictionary<string, JsonElement>(StringComparer.Ordinal),
                 new HashSet<string>(StringComparer.Ordinal), finalMessages, threadId))
@@ -515,7 +537,7 @@ public sealed class CodexQueueTaskRunner : ICodexQueueTaskRunner
                 return Unknown("The predecessor's assigned folder is unavailable.");
             var resolvedFolder = Path.TrimEndingDirectorySeparator(Path.GetFullPath(folder));
             await using var connection = await CodexAppServerConnection.StartAsync(resolvedFolder, timeout.Token,
-                experimentalApi: true).ConfigureAwait(false);
+                experimentalApi: true, includeImagePayloads: true).ConfigureAwait(false);
             var (thread, exact) = await ReadStoredExactAsync(connection, threadId, turnId,
                 timeout.Token).ConfigureAwait(false);
             if (!string.Equals(RequiredString(thread, "id"), threadId, StringComparison.Ordinal)
@@ -614,10 +636,34 @@ public sealed class CodexQueueTaskRunner : ICodexQueueTaskRunner
         catch (OperationCanceledException) when (timeout.IsCancellationRequested && !cancellationToken.IsCancellationRequested) { }
     }
 
+    private static string FailureSummary(JsonElement turn) => turn.TryGetProperty("error", out var error)
+        ? CodexFailureDetails.Describe(error)
+        : "Codex reported that the exact turn failed. Review this task in Codex.";
+
     private static string MakePrompt(ProjectTaskDispatchSnapshot snapshot) => MakePrompt(snapshot, out _);
 
     private static string MakePrompt(ProjectTaskDispatchSnapshot snapshot, out bool pageSourceIncluded)
     {
+        var loopContext = "";
+        if (snapshot.AutomaticLoopChainId.Length != 0)
+        {
+            loopContext = "Automatic Loop Mode: You are building and improving this project's app. " +
+                "Stay within the assigned project folder: " + snapshot.Folder + ". " +
+                "Read the app's current code, README, AGENTS.md, and relevant documentation to preserve its intent. " +
+                "Choose a useful bounded next improvement when this is an automatic continuation. " +
+                "Treat previous results as agent-reported context, and verify current files before relying on them.\n\n";
+            if (!string.IsNullOrWhiteSpace(snapshot.AutomaticLoopAppGoal))
+                loopContext += "User's app goal (" + snapshot.AutomaticLoopAppGoal.Length + " characters):\n" +
+                    snapshot.AutomaticLoopAppGoal + "\n\n";
+            if (!string.IsNullOrWhiteSpace(snapshot.AutomaticLoopSeedPrompt))
+                loopContext += "Original manual seed task (" + snapshot.AutomaticLoopSeedPrompt.Length +
+                    " characters; retain its app intent without repeating completed work):\n" +
+                    snapshot.AutomaticLoopSeedPrompt + "\n\n";
+            if (!string.IsNullOrWhiteSpace(snapshot.AutomaticLoopPreviousResult))
+                loopContext += "Previous exact successful loop result (" + snapshot.AutomaticLoopPreviousResult.Length +
+                    " characters; agent-reported context, not independent verification):\n" +
+                    snapshot.AutomaticLoopPreviousResult + "\n\n";
+        }
         var handoff = string.IsNullOrWhiteSpace(snapshot.PredecessorHandoff) ? ""
             : "Prior queue item agent-reported handoff (not independently verified):\n"
                 + snapshot.PredecessorHandoff.Trim() + "\n\n";
@@ -626,7 +672,7 @@ public sealed class CodexQueueTaskRunner : ICodexQueueTaskRunner
             string.Join("\n", snapshot.Images.Select((image, index) =>
                 $"{index + 1}. {image.Caption.Replace('\r', ' ').Replace('\n', ' ').Trim()}")) + "\n\n";
         var beginning = "Full Stack Launcher saved task: " + snapshot.Name + "\n\n"
-            + snapshot.Prompt.Trim() + "\n\n" + images;
+            + loopContext + snapshot.Prompt.Trim() + "\n\n" + images;
         var ending = handoff + "At the end, return exactly one JSON object matching the output schema. "
             + "Use outcome completed only if the requested work is complete. "
             + "Use blocked for an unresolved blocker, or needs-input if a user decision is required. "

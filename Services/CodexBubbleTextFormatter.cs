@@ -5,14 +5,41 @@ using System.Text.RegularExpressions;
 namespace FullStackLauncher.Services;
 
 /// <summary>
-/// Produces short command descriptions for chat presentation only. It never changes
-/// stored messages, evaluates a script, or treats a command as a successful result.
+/// Keeps readable conversation and short command descriptions for chat presentation.
+/// It never changes stored messages, evaluates scripts, or implies command success.
 /// </summary>
 internal static class CodexBubbleTextFormatter
 {
     private const int MaximumInputLength = 64 * 1024;
     private const int MaximumActions = 8;
     private const int MaximumTokens = 256;
+    private static readonly Regex InternalBlocks = new(
+        @"(?is)<(?<tag>oai-mem-citation|citation_entries|rollout_ids|environment_context|INSTRUCTIONS|skills_instructions|system_reminder|external_codex_apps_open_page|app-context|codex_apps_open_page_instructions|codex_apps_client_time_context|permissions|collaboration_mode|multi_agent_role|multi_agent_mode)\b[^>]*(?:>|$).*?(?:</\k<tag>\s*>|\z)",
+        RegexOptions.CultureInvariant, TimeSpan.FromMilliseconds(75));
+    private static readonly Regex InternalTokens = new(
+        @"<\|[^>\r\n]{1,100}\|>|\uE200[^\uE201\r\n]*\uE201?|[\uE000-\uF8FF]",
+        RegexOptions.CultureInvariant, TimeSpan.FromMilliseconds(75));
+    private static readonly Regex InternalDirectives = new(
+        @"(?m)(?:::|:codex-)[a-z][\w-]*(?:\{|\[)[^\r\n]*",
+        RegexOptions.CultureInvariant, TimeSpan.FromMilliseconds(75));
+    private static readonly Regex InlineCode = new(
+        @"(?<!`)(?<marker>`{1,2})(?<body>[^`\r\n]+)\k<marker>(?!`)",
+        RegexOptions.CultureInvariant, TimeSpan.FromMilliseconds(75));
+    private static readonly Regex SourceCode = new(
+        @"^(?:(?:using|namespace|package)\s+[\w.]+\s*[;{]|using\s+var\b|" +
+        @"import\s+[^\r\n]*(?:;|\bfrom\b)|import\s+[\w.]+(?:\s+as\s+\w+)?(?:\s*,\s*[\w.]+)*\s*$|from\s+[\w.]+\s+import\b|" +
+        @"(?:const|let|var)\s+[$\w]+\s*[:=;]|[\w<>?,.\[\]]+\s+[\w]+\s*[=;]|" +
+        @"[""'][^""']+[""']\s*:|" +
+        @"(?:string|bool|byte|char|int|long|double|float|decimal|object|void|Task(?:<[^>]+>)?)\s+[\w]+\s*[=(;{]|" +
+        @"(?:(?:public|private|protected|internal|static|sealed|abstract|partial|async|override|readonly|export|default)\s+)+(?:class|interface|enum|record|struct|function)\s+\w+|" +
+        @"(?:(?:public|private|protected|internal|static|sealed|abstract|partial|async|override|readonly|export|default)\s+)+[\w<>?,.\[\]]+\s+\w+\s*(?:[={;]|\(\s*(?:$|\)|[\w<>?,.\[\]]+\s+\w+))|" +
+        @"(?:class|interface|enum|record|struct)\s+\w+\s*(?:$|[:({])|(?:function|def)\s+\w+\s*\(|" +
+        @"(?:await\s+)?(?:tools|cua|nodeRepl|console|text|image|store|load|notify|exit)\s*[.(]|(?:await\s+)?[\w.$]+\.[\w.$]+\s*\(|" +
+        @"(?:print|repr|len|open|range)\s*\(|(?:return|throw|yield|break|continue)\b[^\r\n]*[;{]|(?:if|else|foreach|for|while|switch|catch|try|finally)\s*[({]|" +
+        @"[$\w.]+\s*(?:=>|\?\?=|\+=|-=|:=)|[$\w.]+\s*=\s*(?:[""'{\[]|new\b|await\b|\d)|[$\w.]+\s*=\s*[^;\r\n]+;|[$\w.]+\s*=\s*[$\w.]+\s*$|" +
+        @"[\w.$]+\s*\([^\r\n]*\)\s*;\s*$|[.#][\w.-]+\s*\{|(?:color|background(?:-color)?|font-size|display|padding|margin|width|height|border(?:-\w+)?)\s*:\s*[^;\r\n]+;\s*$|" +
+        @"#(?:include|define|if|endif|pragma)\b|(?:SELECT|INSERT|UPDATE|DELETE|CREATE|ALTER|DROP|WITH)\b[^\r\n]*(?:\b(?:FROM|INTO|SET|TABLE|WHERE|VALUES|AS)\b|;))",
+        RegexOptions.CultureInvariant, TimeSpan.FromMilliseconds(75));
     private static readonly Regex Diagnostic = new(
         @"(?im)^\s*(?:\[[^\]\r\n]{1,40}\]\s*)?(?:error\b|warning\b|fatal\b|exception\b|unhandled exception\b|traceback\b|build failed\b|npm err!\b|[\w-]+\s+:\s+|at\s+[\w.]+\([^\r\n]*\)\s*(?:in\s+|$))|\b(?:error|warning)\s+(?:CS|MSB|NETSDK|NU|TS)\d+\b|\b(?:FullyQualifiedErrorId|CategoryInfo)\s*:|\bexit code\s*[:=]?\s*[1-9]\d*\b",
         RegexOptions.CultureInvariant, TimeSpan.FromMilliseconds(75));
@@ -29,44 +56,161 @@ internal static class CodexBubbleTextFormatter
     internal static string Format(string text)
     {
         var safeText = SensitiveDataProtection.Redact(text);
-        if (string.IsNullOrWhiteSpace(safeText) || safeText.Length > MaximumInputLength) return safeText;
+        if (string.IsNullOrWhiteSpace(safeText) || safeText.Length > MaximumInputLength) return "";
         try
         {
-            // Preserve complete diagnostic context, including a command printed next to its failure.
-            if (Diagnostic.IsMatch(safeText)) return safeText;
+            safeText = InternalDirectives.Replace(InternalTokens.Replace(InternalBlocks.Replace(safeText, ""), ""), "").Trim();
+            if (safeText.Length == 0) return "";
             if (TryJsonCommand(safeText, out var jsonSummary)) return jsonSummary;
-            if (IsStandalonePowerShellScript(safeText)) return DescribeScript(safeText, "PowerShell", true);
+            if (IsJsonPayload(safeText)) return "";
+            if (!Diagnostic.IsMatch(safeText) && IsStandalonePowerShellScript(safeText))
+                return DescribeScript(safeText, "PowerShell", true);
 
-            var lines = safeText.Replace("\r\n", "\n", StringComparison.Ordinal).Split('\n');
+            var lines = safeText.Replace("\r\n", "\n", StringComparison.Ordinal).Replace('\r', '\n').Split('\n');
             var result = new List<string>(lines.Length);
+            var structuredDepth = 0;
+            var structuredQuote = '\0';
+            var sourceIndent = -1;
+            var patch = false;
             for (var index = 0; index < lines.Length; index++)
             {
                 var line = lines[index];
+                var trimmed = line.Trim();
+                if (sourceIndent >= 0)
+                {
+                    if (trimmed.Length == 0 || line.TakeWhile(char.IsWhiteSpace).Count() > sourceIndent) continue;
+                    sourceIndent = -1;
+                }
                 if (TryFence(line, out var marker, out var language))
                 {
                     var end = index + 1;
                     while (end < lines.Length && !IsClosingFence(lines[end], marker)) end++;
-                    if (end < lines.Length && ShellLanguages.Contains(language))
+                    var body = string.Join("\n", lines[(index + 1)..end]);
+                    if (Diagnostic.IsMatch(body))
                     {
-                        var body = string.Join("\n", lines[(index + 1)..end]);
-                        result.Add(DescribeScript(body, ShellLabel(language), true));
-                        index = end;
-                        continue;
+                        // Failure messages stay readable without restoring their code or stack frames.
+                        result.AddRange(lines[(index + 1)..end].Where(IsPlainDiagnosticLine));
                     }
-                    // Preserve every unrecognized fence intact; commands inside C#, SQL, or prose
-                    // examples are not an instruction to summarize that source code.
-                    var final = Math.Min(end, lines.Length - 1);
-                    result.AddRange(lines[index..(final + 1)]);
-                    index = final;
+                    else if (ShellLanguages.Contains(language))
+                    {
+                        result.Add(DescribeScript(body, ShellLabel(language), true));
+                    }
+                    index = Math.Min(end, lines.Length - 1);
                     continue;
                 }
 
-                if (TryCommand(line.Trim(), out var summary)) result.Add(summary);
+                if (trimmed.StartsWith("*** End Patch", StringComparison.Ordinal)) { patch = false; continue; }
+                if (IsPatchStart(trimmed)) { patch = true; continue; }
+                if (patch)
+                {
+                    if (trimmed.Length == 0) continue;
+                    if (line[0] is ' ' or '\t' or '+' or '-' || trimmed.StartsWith('@')) continue;
+                    patch = false;
+                }
+                if (structuredDepth > 0 || IsStructuredStart(trimmed))
+                {
+                    AdvanceStructuredBlock(line, ref structuredDepth, ref structuredQuote);
+                    continue;
+                }
+                if (IsInternalLine(trimmed) || IsOpaqueToken(trimmed)) continue;
+                if (trimmed.Length > 1 && trimmed.StartsWith('`') && trimmed.EndsWith('`'))
+                {
+                    var body = trimmed.Trim('`');
+                    if (TryCommand(body, out var inlineSummary)) result.Add(inlineSummary);
+                    else if (!IsSourceLine(body) && !IsStructuredStart(body) && !IsJsonPayload(body) && !IsInternalLine(body))
+                        result.Add(body);
+                    continue;
+                }
+                line = InlineCode.Replace(line, match =>
+                {
+                    var body = match.Groups["body"].Value.Trim();
+                    if (TryCommand(body, out var action)) return action;
+                    return IsSourceLine(body) || IsStructuredStart(body) || IsJsonPayload(body) || IsInternalLine(body)
+                        ? "" : body;
+                });
+                trimmed = line.Trim();
+                if (TryCommand(trimmed, out var summary) && !Diagnostic.IsMatch(trimmed)) result.Add(summary);
+                else if (IsSourceLine(trimmed))
+                {
+                    AdvanceStructuredBlock(line, ref structuredDepth, ref structuredQuote);
+                    if (trimmed.EndsWith(':')) sourceIndent = line.TakeWhile(char.IsWhiteSpace).Count();
+                }
                 else result.Add(line);
             }
-            return string.Join(Environment.NewLine, result);
+            return string.Join(Environment.NewLine, result).Trim();
         }
-        catch (RegexMatchTimeoutException) { return safeText; }
+        catch (RegexMatchTimeoutException) { return ""; }
+    }
+
+    private static bool IsJsonPayload(string text)
+    {
+        if (string.IsNullOrWhiteSpace(text)) return false;
+        if (text[0] is not ('{' or '[')) return false;
+        try
+        {
+            using var document = JsonDocument.Parse(text, new JsonDocumentOptions { MaxDepth = 8 });
+            return document.RootElement.ValueKind is JsonValueKind.Object or JsonValueKind.Array;
+        }
+        catch (JsonException) { return false; }
+    }
+
+    private static bool IsStructuredStart(string line) => line is "{" or "[" ||
+        line.StartsWith("{\"", StringComparison.Ordinal) || line.StartsWith("{ \"", StringComparison.Ordinal) ||
+        line.StartsWith("[{", StringComparison.Ordinal) || line.StartsWith("[\"", StringComparison.Ordinal);
+
+    private static void AdvanceStructuredBlock(string line, ref int depth, ref char quote)
+    {
+        for (var index = 0; index < line.Length; index++)
+        {
+            var character = line[index];
+            if (quote != '\0')
+            {
+                if (character == '\\') { index++; continue; }
+                if (character == quote) quote = '\0';
+                continue;
+            }
+            if (character is '"' or '\'' or '`') { quote = character; continue; }
+            if (character is '{' or '[' or '(') depth++;
+            else if (character is '}' or ']' or ')') depth = Math.Max(0, depth - 1);
+        }
+        if (depth == 0) quote = '\0';
+    }
+
+    private static bool IsPatchStart(string line) => line.StartsWith("*** Begin Patch", StringComparison.Ordinal) ||
+        line.StartsWith("diff --git ", StringComparison.Ordinal) || line.StartsWith("@@", StringComparison.Ordinal) ||
+        line.StartsWith("--- a/", StringComparison.Ordinal) || line.StartsWith("+++ b/", StringComparison.Ordinal);
+
+    private static bool IsInternalLine(string line) =>
+        line.StartsWith("::", StringComparison.Ordinal) || line.StartsWith(":codex-", StringComparison.Ordinal) ||
+        line.StartsWith("- :codex-", StringComparison.Ordinal) ||
+        line.StartsWith("*** ", StringComparison.Ordinal) || line.StartsWith("index ", StringComparison.Ordinal) && line.Contains("..") ||
+        line.StartsWith("Message Type:", StringComparison.Ordinal) || line.StartsWith("Task name:", StringComparison.Ordinal) ||
+        line.StartsWith("Sender:", StringComparison.Ordinal) ||
+        line.StartsWith("<", StringComparison.Ordinal) && line.Length > 1 && (char.IsLetter(line[1]) || line[1] is '/' or '!' or '?') ||
+        line.StartsWith("</", StringComparison.Ordinal) || line.StartsWith("to=", StringComparison.Ordinal) ||
+        line.StartsWith("assistant to=", StringComparison.Ordinal) || line.StartsWith("functions.", StringComparison.Ordinal) ||
+        line.StartsWith("collaboration.", StringComparison.Ordinal);
+
+    private static bool IsSourceLine(string line) => line.Length > 0 &&
+        (line is "}" or "};" or ");" or ");}" or "]" or "];" or "</>" ||
+         line.StartsWith("//", StringComparison.Ordinal) || line.StartsWith("/*", StringComparison.Ordinal) ||
+         line.StartsWith("* ", StringComparison.Ordinal) && line.EndsWith("*/", StringComparison.Ordinal) ||
+         line.StartsWith("+", StringComparison.Ordinal) && SourceCode.IsMatch(line[1..].TrimStart()) ||
+         line.StartsWith("-", StringComparison.Ordinal) && SourceCode.IsMatch(line[1..].TrimStart()) ||
+         SourceCode.IsMatch(line));
+
+    private static bool IsPlainDiagnosticLine(string line)
+    {
+        var trimmed = line.Trim();
+        return Diagnostic.IsMatch(trimmed) && !IsSourceLine(trimmed) && !IsStructuredStart(trimmed) &&
+            !IsInternalLine(trimmed) && !IsOpaqueToken(trimmed) &&
+            !(trimmed.StartsWith("at ", StringComparison.Ordinal) && trimmed.Contains('('));
+    }
+
+    private static bool IsOpaqueToken(string line)
+    {
+        if (line.Length < 80 || line.Any(char.IsWhiteSpace)) return false;
+        return line.All(character => char.IsLetterOrDigit(character) || character is '_' or '-' or '+' or '/' or '=' or '.');
     }
 
     private static bool TryJsonCommand(string text, out string summary)

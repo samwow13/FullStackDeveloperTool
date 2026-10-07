@@ -2,6 +2,13 @@ using FullStackLauncher.CodexMonitor;
 
 namespace FullStackLauncher.Models;
 
+public enum CodexDesktopPresence
+{
+    Unknown,
+    Running,
+    NotRunning
+}
+
 /// <summary>A bounded, redacted public chat excerpt retained only in dashboard memory.</summary>
 public sealed record CodexActivityMessage(string Identity, string Text);
 
@@ -33,6 +40,9 @@ public sealed record CodexActivityAgent(
     public bool CanDismiss { get; init; }
     public string? ActivityIdentity { get; init; }
     public string? FeedbackIdentity { get; init; }
+    public string? Model { get; init; }
+    public string? ReasoningEffort { get; init; }
+    public string? ProjectId { get; init; }
     public IReadOnlyList<CodexActivityMessage> MessageHistory { get; init; } = [];
     public IReadOnlyList<CodexActivityAgent> Subagents { get; init; } = [];
     public bool HasSubagents => Subagents.Count > 0;
@@ -55,16 +65,27 @@ public sealed record CodexActivityFeedSnapshot(
     string StatusText,
     DateTimeOffset? CheckedAt)
 {
+    public CodexDesktopPresence DesktopPresence { get; init; }
+    public bool IsCodexNotRunning => DesktopPresence == CodexDesktopPresence.NotRunning;
     public int RunningCount => Agents.Count(agent => agent.IsRunning);
     public int WaitingCount => Agents.Count(agent => agent.IsWaiting);
     public int NeedsInputCount => Agents.Count(agent => agent.NeedsInput);
     public int RecentCount => Agents.Count(agent => agent.IsRecent);
     public int UnlistedUnknownCount { get; init; }
+    public IReadOnlyDictionary<string, int> ProjectUnknownCounts { get; init; } = new Dictionary<string, int>();
     public int UnknownCount => Agents.Count(agent => agent.IsUnknown) + UnlistedUnknownCount;
     public bool CanClear => Agents.Any(agent => agent.CanDismiss);
     public bool HasAgents => Agents.Count > 0;
     public DateTimeOffset? ResetAt { get; init; }
-    public const string ScopeDescription = "One card per local Codex chat, with its observed subagents retained asleep after completion. Codex must remain open; remote and cloud work is not covered. Summaries are bounded excerpts from saved chat, kept only in memory.";
+    public const string ScopeDescription = "One card per local Codex chat belonging to the selected project, with its observed subagents retained after completion. All projects remain tracked. Codex must remain open; remote and cloud work is not covered. Summaries are bounded excerpts from saved chat, kept only in memory.";
     public static CodexActivityFeedSnapshot Initial { get; } =
         new([], false, "Checking local Codex activity…", null);
+
+    public CodexActivityFeedSnapshot ForProject(string? projectId, string? projectName) => this with
+    {
+        Agents = string.IsNullOrWhiteSpace(projectId) ? [] : Agents.Where(agent => agent.ProjectId == projectId).ToArray(),
+        UnlistedUnknownCount = projectId is null ? 0 : ProjectUnknownCounts.GetValueOrDefault(projectId),
+        StatusText = !IsAvailable ? StatusText :
+            string.IsNullOrWhiteSpace(projectId) ? "Choose a project" : projectName ?? "Selected project"
+    };
 }

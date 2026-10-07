@@ -120,6 +120,22 @@ public partial class ProjectTasksPanel : UserControl
 
     private void CloseQueueSettings_Click(object sender, RoutedEventArgs e) => CloseQueueSettings();
 
+    private void BrowseAutomaticLoopFolder_Click(object sender, RoutedEventArgs e)
+    {
+        if (DataContext is not ProjectTasksViewModel model || !model.CanEditAutomaticLoopSettings) return;
+        var picker = new Microsoft.Win32.OpenFolderDialog
+        {
+            Title = "Choose this project's loop folder",
+            Multiselect = false,
+            InitialDirectory = System.IO.Directory.Exists(model.AutomaticLoopFolderText)
+                ? model.AutomaticLoopFolderText : model.ProjectFolder
+        };
+        // Native dialog deactivates the workspace, so close the popup explicitly.
+        CloseQueueSettings();
+        if (picker.ShowDialog(Window.GetWindow(this)) == true) model.AutomaticLoopFolderText = picker.FolderName;
+        QueueSettingsToggle.IsChecked = true;
+    }
+
     private void QueueSettings_KeyDown(object sender, KeyEventArgs e)
     {
         if (e.Key != Key.Escape) return;
@@ -145,6 +161,15 @@ public partial class ProjectTasksPanel : UserControl
     private void Notes_MouseDoubleClick(object sender, System.Windows.Input.MouseButtonEventArgs e)
     {
         if (DataContext is ProjectTasksViewModel { SelectedNote: not null }) OpenLargeEditor();
+    }
+
+    private void Queue_SelectionChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (sender is not ListBox { SelectedItem: QueueRow selected } list) return;
+        list.Dispatcher.BeginInvoke(new Action(() =>
+        {
+            if (ReferenceEquals(list.SelectedItem, selected)) list.ScrollIntoView(selected);
+        }));
     }
 
     private void OpenLargeEditor()
@@ -250,9 +275,33 @@ public partial class ProjectTasksPanel : UserControl
     private void DeleteNote_Click(object sender, RoutedEventArgs e)
     {
         if (DataContext is not ProjectTasksViewModel model || model.SelectedNote is not { } note || !model.DeleteNoteCommand.CanExecute(null)) return;
-        if (MessageBox.Show(Window.GetWindow(this), $"Delete the note ‘{note.Name}’ and remove it from the queue? Previous execution receipts will be retained.",
+        if (MessageBox.Show(Window.GetWindow(this), $"Delete the note ‘{note.Name}’ completely? Previous execution receipts will be retained." +
+                model.GetNoteDeletionWarning(note.Id),
                 "Delete note", MessageBoxButton.OKCancel, MessageBoxImage.Question) == MessageBoxResult.OK)
             model.DeleteNoteCommand.Execute(null);
+    }
+
+    private void DeleteQueueItem_Click(object sender, RoutedEventArgs e)
+    {
+        if (DataContext is not ProjectTasksViewModel model || model.SelectedQueue is not { } item ||
+            !model.DeleteQueueItemCommand.CanExecute(null)) return;
+        if (MessageBox.Show(Window.GetWindow(this),
+                $"Delete ‘{item.Name}’ completely from Notes and Queue? Previous execution receipts will be retained." +
+                model.GetNoteDeletionWarning(item.NoteId),
+                "Delete queue item", MessageBoxButton.OKCancel, MessageBoxImage.Question) == MessageBoxResult.OK)
+            model.DeleteQueueItemCommand.Execute(null);
+    }
+
+    private void RemoveAllAiPrompts_Click(object sender, RoutedEventArgs e)
+    {
+        if (DataContext is not ProjectTasksViewModel model || !model.RemoveAllAiPromptsCommand.CanExecute(null)) return;
+        if (MessageBox.Show(Window.GetWindow(this),
+                $"Remove all {model.AiPromptCount} AI generated prompt(s) from '{model.ProjectName}'?\n\n" +
+                "This deletes AI notes, their unsaved edits, and inactive queue entries. " +
+                "Manual notes and execution receipts are retained. " +
+                "AI notes used by active or unresolved queue attempts stay until those attempts finish or are reviewed.",
+                "Remove all AI generated Prompts", MessageBoxButton.YesNo, MessageBoxImage.Warning, MessageBoxResult.No) == MessageBoxResult.Yes)
+            model.RemoveAllAiPromptsCommand.Execute(null);
     }
 
     private async void RetrySelectedItem_Click(object sender, RoutedEventArgs e)

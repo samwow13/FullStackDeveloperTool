@@ -284,8 +284,10 @@ public sealed partial class ServiceViewModel(ServiceRunner runner) : ObservableO
     public string LocalButtonLabel => "Use Local & restart";
     public bool IsBusy { get => _isBusy; set { if (_isBusy == value) return; _isBusy = value; Update(); } }
     public bool IsStopping { get => _isStopping; set { if (_isStopping == value) return; _isStopping = value; Update(); } }
-    public string Status => IsStopping ? "STOPPING" : IsBusy ? "WORKING" : _snapshot.State.ToString().ToUpperInvariant();
+    public string Status => IsStopping ? "STOPPING" : _snapshot.State == ServiceState.Installing ? "INSTALLING"
+        : IsBusy ? "WORKING" : _snapshot.State.ToString().ToUpperInvariant();
     public string CardStatus => IsStopping ? "Stopping…"
+        : _snapshot.State == ServiceState.Installing ? "Installing…"
         : IsBusy && _snapshot.State == ServiceState.Busy &&
           _snapshot.Detail.StartsWith("Stopping", StringComparison.Ordinal) ? "Stopping…"
         : IsBusy ? $"{_activeOperation ?? "Working"}…"
@@ -337,7 +339,7 @@ public sealed partial class ServiceViewModel(ServiceRunner runner) : ObservableO
     public bool HasCardDetail => !IsConsoleApp && !ShowFunctionsMenu && HasDetail && (_statusMessage is not null || HasRuntimeDetail);
     public string StateColor => IsStopping || IsBusy ? "#F6CF7D" : _snapshot.State switch
     {
-        ServiceState.Running or ServiceState.Completed => "#69E2C0", ServiceState.Starting or ServiceState.Busy => "#F6CF7D",
+        ServiceState.Running or ServiceState.Completed => "#69E2C0", ServiceState.Starting or ServiceState.Busy or ServiceState.Installing => "#F6CF7D",
         ServiceState.Conflict or ServiceState.Error => "#FF939A", _ => "#9AAAC0"
     };
     public string ProcessLabel => _snapshot.ProcessIds.Count == 0 ? "No matching process" :
@@ -382,6 +384,7 @@ public sealed partial class ServiceViewModel(ServiceRunner runner) : ObservableO
         {
             if (HasLiveUrl) return $"Open {LiveUrl} in your default browser.";
             if (IsStopping) return $"{Name} is stopping. Start it again and wait until this button turns green.";
+            if (_snapshot.State == ServiceState.Installing) return $"{Name} is installing npm dependencies. Wait for installation and startup to finish.";
             if (IsBusy) return $"{Name} is busy. Wait for the operation to finish and for this button to turn green.";
             if (Runner.IsSwaggerUiLaunch && _snapshot.State == ServiceState.Running)
                 return string.Equals(_swaggerStatus.UiUrl, _snapshot.ActiveUrl, StringComparison.Ordinal) &&
@@ -408,10 +411,10 @@ public sealed partial class ServiceViewModel(ServiceRunner runner) : ObservableO
     public bool HasLiveUrl => CanOpen && !IsBusy && !IsStopping;
     public string? LiveUrl => HasLiveUrl ? _snapshot.ActiveUrl : null;
     public bool CanStart => !AreCommandsBlocked && !IsEditing && !IsBusy && !IsStopping && (_snapshot.State is ServiceState.Stopped or ServiceState.Error or ServiceState.Completed) && _snapshot.ProcessIds.Count == 0;
-    public bool CanRestart => !AreCommandsBlocked && !IsEditing && !IsBusy && !IsStopping && _snapshot.State is not (ServiceState.Busy or ServiceState.Conflict or ServiceState.Checking);
+    public bool CanRestart => !AreCommandsBlocked && !IsEditing && !IsBusy && !IsStopping && _snapshot.State is not (ServiceState.Busy or ServiceState.Installing or ServiceState.Conflict or ServiceState.Checking);
     public bool HasConflict => _snapshot.State == ServiceState.Conflict;
     public bool CanResolveConflict => !AreCommandsBlocked && !IsEditing && HasConflict && !IsBusy && !IsStopping;
-    public bool CanMaintain => !AreCommandsBlocked && !IsEditing && !IsBusy && !IsStopping && _snapshot.ProcessIds.Count == 0 && _snapshot.State is not (ServiceState.Starting or ServiceState.Busy or ServiceState.Conflict or ServiceState.Checking);
+    public bool CanMaintain => !AreCommandsBlocked && !IsEditing && !IsBusy && !IsStopping && _snapshot.ProcessIds.Count == 0 && _snapshot.State is not (ServiceState.Starting or ServiceState.Busy or ServiceState.Installing or ServiceState.Conflict or ServiceState.Checking);
     public bool CanClean => CanMaintain && !string.IsNullOrWhiteSpace(Profile.CleanCommand);
     public bool CanSetup => CanMaintain && !string.IsNullOrWhiteSpace(Profile.SetupCommand);
     public bool CanStop => !IsSavingEdits && !IsStopping && (_snapshot.ProcessIds.Count > 0 || Runner.HasManagedProcess);

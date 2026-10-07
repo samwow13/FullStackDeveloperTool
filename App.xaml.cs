@@ -55,6 +55,18 @@ public partial class App : Application
             }
             finally { Shutdown(); }
         }
+        else if (e.Args.Contains("--codex-command-check", StringComparer.OrdinalIgnoreCase))
+        {
+            ShutdownMode = ShutdownMode.OnExplicitShutdown;
+            ProjectTasks.CodexCommandAccessDiagnostic.Open(e.Args);
+        }
+        else if (e.Args.Contains("--codex-agent-chat", StringComparer.OrdinalIgnoreCase))
+        {
+            // One independent staged process retains each explicit chat's App
+            // Server connection when the composer or dashboard is closed.
+            ShutdownMode = ShutdownMode.OnExplicitShutdown;
+            ProjectTasks.CodexAgentChatHost.Open(e.Args);
+        }
         else if (e.Args.Contains("--queue-owner", StringComparer.OrdinalIgnoreCase))
         {
             // A separate staged tray process owns queue recovery, dispatch, and
@@ -74,6 +86,12 @@ public partial class App : Application
             ShutdownMode = ShutdownMode.OnExplicitShutdown;
             try
             {
+                var lifetime = await Task.Run(() => Services.DashboardProcessLifetime.Protect(e.Args));
+                if (lifetime.ExitStartup)
+                {
+                    Shutdown();
+                    return;
+                }
                 _dashboardInstance = await Services.DashboardInstanceLease.AcquireAsync(
                     new Services.SettingsStore().SettingsPath);
                 MainWindow = new MainWindow();

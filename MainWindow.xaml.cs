@@ -239,6 +239,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         if (project is null)
         {
             SelectedProject = null;
+            UpdateCodexCrewProject();
             ResetNextCommitProject();
             _projectTasksWindow?.ShowProject(null, "");
             NotifyQueueActivityChanged();
@@ -248,6 +249,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
             return;
         }
         SelectedProject = project;
+        UpdateCodexCrewProject();
         ResetNextCommitProject();
         _projectTasksWindow?.ShowProject(project, _store.ResolveRoot(project));
         NotifyQueueActivityChanged();
@@ -311,7 +313,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         Changed(nameof(Summary)); Changed(nameof(CanBatch)); Changed(nameof(CanStopBatch)); Changed(nameof(CanEdit));
         Changed(nameof(CanChangeProject)); Changed(nameof(CanEditDetails)); Changed(nameof(CanSaveProjectEdits));
         Changed(nameof(CanRemoveProject)); Changed(nameof(CanCancelProjectEdits));
-        Changed(nameof(CanAddService));
+        Changed(nameof(CanAddService)); Changed(nameof(CanStartAgent));
         Changed(nameof(ProductionNotice)); Changed(nameof(HasProductionNotice));
         NotifyStartAllChanged();
         UpdateArchiveActions();
@@ -788,12 +790,14 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         if (MessageBox.Show(this, $"Remove the saved profile for {selected.Name}? Project files stay on disk.",
                 "Remove project", MessageBoxButton.OKCancel, MessageBoxImage.Question) != MessageBoxResult.OK) return;
         if (_projectTasksWindow?.PrepareToRemoveProject(selected.Id) == false) return;
+        if (!PrepareStartAgentDraftForRemoval(selected.Id)) return;
         var index = _settings.Projects.IndexOf(selected);
         _settings.Projects.RemoveAt(index);
         var previousSelection = _settings.SelectedProjectId;
         _settings.SelectedProjectId = _settings.Projects.FirstOrDefault(project => project.IsArchived == ShowArchivedProjects)?.Id;
         try { _store.Save(_settings); }
         catch (Exception ex) { _settings.Projects.Insert(index, selected); _settings.SelectedProjectId = previousSelection; ShowSaveError(ex); return; }
+        _startAgentDrafts.Remove(selected.Id);
         if (_runners.Remove(selected.Id, out var old)) foreach (var service in old) service.Runner.Dispose();
         Projects.Remove(selected);
         _refreshingProjectList = true;

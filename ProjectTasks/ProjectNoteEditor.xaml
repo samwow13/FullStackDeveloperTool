@@ -16,9 +16,8 @@
         <StackPanel Margin="0,0,0,12">
             <TextBlock Text="{Binding EditorHeading}" FontSize="17" FontWeight="SemiBold"/>
             <TextBlock Text="{Binding EditorAgentOrigin}" Foreground="{StaticResource AccentBrush}" FontSize="11"
-                       TextWrapping="Wrap" Margin="0,5,0,0"
-                       Visibility="{Binding HasAgentSource, Converter={StaticResource BoolToVisibility}}"/>
-            <Expander Header="Agent source" Foreground="{StaticResource TextBrush}" Margin="0,5,0,0"
+                       TextWrapping="Wrap" Margin="0,5,0,0"/>
+            <Expander Header="AI source" Foreground="{StaticResource TextBrush}" Margin="0,5,0,0"
                       Visibility="{Binding HasAgentSource, Converter={StaticResource BoolToVisibility}}">
                 <TextBox Text="{Binding EditorAgentSourceDetails, Mode=OneWay}" IsReadOnly="True"
                          TextWrapping="Wrap" AcceptsReturn="True" VerticalScrollBarVisibility="Auto"

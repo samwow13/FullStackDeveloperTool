@@ -54,7 +54,7 @@ public sealed class ProjectQueueCoordinator
             if (_started) throw new InvalidOperationException("The queue coordinator is already running.");
             _started = true;
             var data = LoadWritable();
-            var needsMigration = _store.LoadedSourceVersion < 8;
+            var needsMigration = _store.LoadedSourceVersion < 9;
             if (ProjectTaskRecovery.HoldUnfinishedQueueAttempts(data, DateTimeOffset.UtcNow) > 0 || needsMigration)
                 _store.Save(data);
             await InspectHeldAttemptsAsync(cancellationToken).ConfigureAwait(false);
@@ -111,11 +111,27 @@ public sealed class ProjectQueueCoordinator
         {
             var data = LoadWritable();
             var queue = FindQueue(data, projectId);
+            var removed = ProjectQueueMaintenance.RemoveFailedItems(data, projectId, _active?.AttemptId);
+            if (removed > 0)
+            {
+                _store.Save(data);
+                TryClearSettledMarker();
+            }
             if (HasUnresolvedAttempt(data, _active?.AttemptId))
                 throw new InvalidOperationException("An earlier queue attempt needs review before automatic dispatch can resume.");
             if (data.QueueItems.All(item => item.ProjectId != projectId || item.State != ProjectQueueItemState.Pending || !item.Enabled))
-                throw new InvalidOperationException("This queue has no enabled pending item.");
+            {
+                queue.Enabled = false;
+                queue.StatusMessage = removed > 0
+                    ? $"Moved {removed} failed queue item(s) back to Notes. No enabled pending items remain."
+                    : "This queue has no enabled pending item.";
+                _store.Save(data);
+                return Status(data, projectId);
+            }
             ValidateSavedProject(queue, out _);
+            if (queue.AutomaticLoopEnabled)
+                ProjectAutomaticLoop.ValidateDispatch(queue, data.QueueItems.First(item =>
+                    item.ProjectId == projectId && item.State == ProjectQueueItemState.Pending && item.Enabled));
             queue.Enabled = true;
             queue.RecoveryState = ProjectQueueRecoveryState.None;
             queue.StatusMessage = "Queue enabled. The next eligible item can start.";
@@ -639,8 +655,10 @@ public sealed class ProjectQueueCoordinator
             // choices remain a fallback for stores created before this UI change.
             var hasQueueChoice = !string.IsNullOrWhiteSpace(choice.queue.DefaultModelId) &&
                 !string.IsNullOrWhiteSpace(choice.queue.DefaultReasoningEffort);
-            var model = hasQueueChoice ? choice.queue.DefaultModelId : choice.item.ModelId;
-            var effort = hasQueueChoice ? choice.queue.DefaultReasoningEffort : choice.item.ReasoningEffort;
+            var model = choice.queue.AutomaticLoopEnabled ? choice.queue.AutomaticLoopModelId :
+                hasQueueChoice ? choice.queue.DefaultModelId : choice.item.ModelId;
+            var effort = choice.queue.AutomaticLoopEnabled ? choice.queue.AutomaticLoopReasoningEffort :
+                hasQueueChoice ? choice.queue.DefaultReasoningEffort : choice.item.ReasoningEffort;
             if (string.IsNullOrWhiteSpace(model) || string.IsNullOrWhiteSpace(effort))
             {
                 choice.queue.Enabled = false;
@@ -650,6 +668,13 @@ public sealed class ProjectQueueCoordinator
                 return null;
             }
 
+            var dispatchFolder = ProjectAutomaticLoop.ValidateDispatch(choice.queue, choice.item);
+            var loopSeed = ProjectAutomaticLoop.IsContinuation(choice.item)
+                ? ProjectAutomaticLoop.Seed(data, choice.queue) : null;
+            if (ProjectAutomaticLoop.IsContinuation(choice.item) && loopSeed is null)
+                throw new InvalidOperationException("Automatic Loop Mode requires a successful manual seed before running a continuation.");
+            var loopPredecessor = loopSeed is null ? null : ProjectAutomaticLoop.Predecessor(data, choice.item);
+            var dispatchImages = loopSeed?.Snapshot.Images ?? note!.Images;
             var snapshot = new ProjectTaskDispatchSnapshot
             {
                 ProjectId = profile!.Id,
@@ -657,8 +682,8 @@ public sealed class ProjectQueueCoordinator
                 NoteId = note!.Id,
                 QueueItemId = choice.item.Id,
                 Name = note.Name,
-                Prompt = note.Prompt,
-                Images = note.Images.Select(image => new ProjectTaskNoteImage
+                Prompt = note.AgentSource == null ? note.Prompt : AgentPromptSummary.EnsureSummary(note.Name, note.Prompt),
+                Images = dispatchImages.Select(image => new ProjectTaskNoteImage
                 {
                     Id = image.Id, Caption = image.Caption, MimeType = image.MimeType,
                     DataBase64 = image.DataBase64, PageUrl = image.PageUrl,
@@ -666,11 +691,20 @@ public sealed class ProjectQueueCoordinator
                     PageCaptureStatus = image.PageCaptureStatus,
                     IncludePageContextInPrompt = image.IncludePageContextInPrompt
                 }).ToList(),
-                ImageStagingId = note.Images.Count == 0 ? "" : Guid.NewGuid().ToString("N"),
+                ImageStagingId = dispatchImages.Count == 0 ? "" : Guid.NewGuid().ToString("N"),
                 ModelId = model,
                 ReasoningEffort = effort,
-                Folder = NormalizeFolder(choice.queue.AssignedFolder),
-                PredecessorHandoff = FindPredecessorHandoff(data, choice.item)
+                Folder = dispatchFolder,
+                PredecessorHandoff = FindPredecessorHandoff(data, choice.item),
+                AutomaticLoopChainId = choice.queue.AutomaticLoopEnabled ? choice.queue.AutomaticLoopChainId : "",
+                AutomaticLoopSeedEligible = choice.queue.AutomaticLoopEnabled &&
+                    !ProjectAutomaticLoop.IsContinuation(choice.item) && note.AgentSource is null,
+                AutomaticLoopSeedAttemptId = loopSeed?.AttemptId ?? "",
+                AutomaticLoopPredecessorAttemptId = loopPredecessor?.AttemptId ?? "",
+                AutomaticLoopAppGoal = choice.queue.AutomaticLoopEnabled ? choice.queue.AutomaticLoopAppGoal : "",
+                AutomaticLoopSeedPrompt = loopSeed?.Snapshot.Prompt ?? "",
+                AutomaticLoopPreviousResult = loopPredecessor is null ? "" :
+                    loopPredecessor.ResultSummary + "\n\n" + loopPredecessor.FinalResponse
             };
             var receipt = new ProjectTaskExecutionReceipt { Snapshot = snapshot };
             // Recheck after predecessor inspection and project validation. Closing
@@ -744,7 +778,15 @@ public sealed class ProjectQueueCoordinator
             var item = data.QueueItems.FirstOrDefault(item => item.Id == attempt.Snapshot.QueueItemId);
             var queue = FindQueue(data, attempt.ProjectId);
             ApplyIdentity(receipt, update.ThreadId, update.TurnId);
+            if (!string.IsNullOrEmpty(update.ConnectionDetails))
+            {
+                if (receipt.SubmissionStartedAt is not null && receipt.ConnectionDetails != update.ConnectionDetails)
+                    throw new InvalidOperationException("The submitted attempt's access policy cannot change.");
+                receipt.ConnectionDetails = update.ConnectionDetails;
+            }
             var now = DateTimeOffset.UtcNow;
+            if (update.Stage == CodexQueueRunStage.CommandAccessChecking)
+                queue.StatusMessage = "Checking command access before task creation.";
             if (update.Stage == CodexQueueRunStage.ThreadSubmissionStarting)
                 receipt.SubmissionStartedAt ??= now;
             if (update.Stage == CodexQueueRunStage.Running)
@@ -785,7 +827,7 @@ public sealed class ProjectQueueCoordinator
             ApplyIdentity(receipt, result.ThreadId, result.TurnId);
             if (recovered) queue.Enabled = false; // Recovery never silently advances the queue.
             ApplyTerminal(data, receipt, item, queue, result.State, result.Outcome,
-                result.TerminalConfirmed, result.Summary, result.FinalResponse);
+                result.TerminalConfirmed, result.Summary, result.FinalResponse, allowLoopContinuation: !recovered);
             receipt.UpdatedAt = DateTimeOffset.UtcNow;
             _handoffPending = receipt.State == ProjectTaskRunState.Completed &&
                 receipt.Outcome == ProjectTaskOutcome.Succeeded && queue.Enabled &&
@@ -853,9 +895,9 @@ public sealed class ProjectQueueCoordinator
             try { ApplyIdentity(receipt, result.ThreadId, result.TurnId); }
             catch (InvalidOperationException) { continue; }
             var item = data.QueueItems.FirstOrDefault(candidate => candidate.Id == receipt.Snapshot.QueueItemId);
-            ApplyTerminal(data, receipt, item, queue, result.State, result.Outcome,
-                result.TerminalConfirmed, result.Summary, result.FinalResponse);
             queue.Enabled = false; // Recovery never silently resumes a queue.
+            ApplyTerminal(data, receipt, item, queue, result.State, result.Outcome,
+                result.TerminalConfirmed, result.Summary, result.FinalResponse, allowLoopContinuation: false);
             receipt.UpdatedAt = DateTimeOffset.UtcNow;
             _store.Save(data);
             QueueImageStaging.Cleanup(receipt.Snapshot);
@@ -885,6 +927,13 @@ public sealed class ProjectQueueCoordinator
         if (!Directory.Exists(folder))
         {
             reason = "The assigned queue folder is unavailable. Review the project folder before auto-run.";
+            return false;
+        }
+        try { ProjectAutomaticLoop.ValidateDispatch(queue, item); }
+        catch (Exception ex) when (ex is InvalidOperationException or ArgumentException or IOException or UnauthorizedAccessException)
+        {
+            reason = ex is InvalidOperationException or ArgumentException ? ex.Message :
+                "Automatic Loop Mode folder could not be validated. Review the saved folder before resuming.";
             return false;
         }
         return true;
@@ -926,7 +975,8 @@ public sealed class ProjectQueueCoordinator
 
     private static void ApplyTerminal(ProjectTaskData data, ProjectTaskExecutionReceipt receipt,
         ProjectQueueItem? item, ProjectQueueConfiguration queue, ProjectTaskRunState state,
-        ProjectTaskOutcome outcome, bool terminalConfirmed, string summary, string finalResponse)
+        ProjectTaskOutcome outcome, bool terminalConfirmed, string summary, string finalResponse,
+        bool allowLoopContinuation = true)
     {
         var confirmedSuccess = terminalConfirmed && state == ProjectTaskRunState.Completed &&
             outcome == ProjectTaskOutcome.Succeeded && receipt.ThreadId is not null && receipt.TurnId is not null;
@@ -945,6 +995,19 @@ public sealed class ProjectQueueCoordinator
                 ProjectQueueItemState.NeedsAttention;
         if (confirmedSuccess)
         {
+            string? loopError = null;
+            if (allowLoopContinuation)
+            {
+                try { ProjectAutomaticLoop.TryPrepareContinuation(data, queue, receipt); }
+                catch (Exception ex) when (ex is InvalidOperationException or ArgumentException or IOException or UnauthorizedAccessException)
+                {
+                    // Keep the confirmed terminal result. A continuation failure
+                    // pauses later work without rewriting this successful attempt.
+                    queue.Enabled = false;
+                    loopError = ex is InvalidOperationException or ArgumentException ? ex.Message :
+                        "Automatic Loop Mode could not prepare its next prompt. Review the folder and task store before resuming.";
+                }
+            }
             var hasNext = data.QueueItems.Any(candidate => candidate.ProjectId == queue.ProjectId &&
                 candidate.Enabled && candidate.State == ProjectQueueItemState.Pending);
             if (queue.Enabled && !hasNext)
@@ -956,7 +1019,8 @@ public sealed class ProjectQueueCoordinator
                 queue.StatusMessage = queue.Enabled
                     ? $"Recently completed: {receipt.Snapshot.Name}"
                     : "Queue paused. The current task completed.";
-            queue.RecoveryState = ProjectQueueRecoveryState.None;
+            queue.RecoveryState = loopError is null ? ProjectQueueRecoveryState.None : ProjectQueueRecoveryState.NeedsAttention;
+            if (loopError is not null) queue.StatusMessage = loopError;
         }
         else
         {

@@ -27,6 +27,7 @@ internal sealed class AgentBridgeRequest
     public string? UpdateId { get; set; }
     public string? Name { get; set; }
     public string? Prompt { get; set; }
+    public string? Summary { get; set; }
     public string? Context { get; set; }
     public string? SourceTaskId { get; set; }
     public string? SourcePrompt { get; set; }

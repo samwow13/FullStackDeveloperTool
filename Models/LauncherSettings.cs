@@ -136,7 +136,7 @@ public sealed class ApiConfigurationSelection
     public string? LaunchCommand { get; set; }
 }
 
-public enum ServiceState { Stopped, Starting, Running, Busy, Conflict, Error, Checking, Completed }
+public enum ServiceState { Stopped, Starting, Running, Busy, Conflict, Error, Checking, Completed, Installing }
 
 public sealed record ServiceSnapshot(ServiceState State, string Detail, IReadOnlyList<int> ProcessIds,
     string? ActiveUrl = null, bool IsManaged = false);
