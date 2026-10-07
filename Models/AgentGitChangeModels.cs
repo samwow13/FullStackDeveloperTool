@@ -33,8 +33,12 @@ public static class GitCommitMessage
 
     public static string Compose(string title, AgentGitSummaryBatch? summaries = null)
     {
-        var bullets = summaries?.Entries.SelectMany(entry => entry.Bullets)
-            .Distinct(StringComparer.OrdinalIgnoreCase).ToArray() ?? [];
+        var bullets = summaries is null ? Array.Empty<string>() : NewestFirst(summaries).SelectMany(entry => entry.Bullets)
+            .Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
         return bullets.Length == 0 ? title : title + "\n\n" + string.Join("\n", bullets.Select(bullet => "- " + bullet));
     }
+
+    public static AgentGitSummaryEntry[] NewestFirst(AgentGitSummaryBatch summaries) =>
+        // Ledger insertion order breaks ties between reports saved at the same timestamp.
+        summaries.Entries.Reverse().OrderByDescending(entry => entry.CreatedAt).ToArray();
 }

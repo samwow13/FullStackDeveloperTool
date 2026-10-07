@@ -15,7 +15,7 @@ internal sealed record AgentSessionIdentity(string SessionId, string Owner);
 /// Cooperative, in-memory reservations for local agent sessions. Dashboard controls remain
 /// available to the user. All calls occur on the WPF dispatcher.
 /// </summary>
-internal sealed class AgentBridgeCoordination
+internal sealed partial class AgentBridgeCoordination
 {
     internal const string AgentRestartMessage = "Agent initiated restart";
     private static readonly TimeSpan SessionLifetime = TimeSpan.FromMinutes(5);
@@ -37,6 +37,7 @@ internal sealed class AgentBridgeCoordination
         internal long NotificationSequence { get; set; } = startSequence;
         internal DateTime LastSeenUtc { get; set; } = now;
         internal DateTime ExpiresUtc { get; set; } = now + SessionLifetime;
+        internal string? ReplyChatId { get; set; }
         internal HashSet<string> DeclaredServiceIds { get; } = [];
         internal HashSet<string> ActingServiceIds { get; } = [];
     }
@@ -91,7 +92,7 @@ internal sealed class AgentBridgeCoordination
             expiresUtc = now + SessionLifetime, eventCursor = _sequence };
     }
 
-    internal object Heartbeat(string projectId, string sessionToken)
+    internal object Heartbeat(string projectId, string sessionToken, object? replyInbox = null)
     {
         var session = RequireSession(projectId, sessionToken);
         var expires = DateTime.UtcNow + SessionLifetime;
@@ -101,7 +102,7 @@ internal sealed class AgentBridgeCoordination
         var notifications = _events.Where(item => item.ProjectId == projectId &&
             item.Message is not null && item.Sequence > session.NotificationSequence).ToArray();
         session.NotificationSequence = _sequence;
-        return new { instanceId = InstanceId, projectId, expiresUtc = expires, notifications };
+        return new { instanceId = InstanceId, projectId, expiresUtc = expires, notifications, replyInbox };
     }
 
     internal AgentSessionIdentity SessionIdentity(string projectId, string sessionToken)

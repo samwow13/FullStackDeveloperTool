@@ -31,6 +31,12 @@ public sealed partial class ServiceViewModel(ServiceRunner runner) : ObservableO
     private bool _isBusy;
     private bool _isStopping;
     private string? _activeOperation;
+    private ServiceSnapshot? _operationStartingStatus;
+    private string? _statusMessage;
+    private bool _statusMessageIsError;
+    private ServiceSnapshot? _statusMessageSnapshot;
+    private long _statusMessageApiRun;
+    private long _statusMessageFrontendRun;
     private bool _areCommandsBlocked;
     public bool AreCommandsBlocked { get => _areCommandsBlocked; set { if (_areCommandsBlocked == value) return; _areCommandsBlocked = value; Update(); } }
     private int _retainedOutputErrors;
@@ -77,7 +83,7 @@ public sealed partial class ServiceViewModel(ServiceRunner runner) : ObservableO
     public string DraftPort { get => _draftPort; set { if (_draftPort == value) return; _draftPort = value; Changed(); } }
     public bool IsConsoleApp => Profile.IsConsole;
     public bool IsCommandApi => Profile.IsCommandApi;
-    public bool ShowCommandFolder => IsConsoleApp || IsCommandApi;
+    public bool ShowCommandFolder => IsCommandApi;
     public bool IsFrontendService => FrontendServiceSupport.IsFrontend(Profile);
     public bool OpenAfterBuild => Profile.OpenAfterBuild;
     public bool CanChangeOpenAfterBuild => IsFrontendService && !IsEditing && !IsSavingEdits &&
@@ -110,11 +116,11 @@ public sealed partial class ServiceViewModel(ServiceRunner runner) : ObservableO
     public string ServiceTypeLabel => IsCommandApi ? Profile.ApiType!.ToUpperInvariant() : Profile.IsGenericConsole
         ? string.IsNullOrWhiteSpace(Profile.ConsoleType) ? "CONSOLE APP" : Profile.ConsoleType.ToUpperInvariant()
         : Kind;
-    public bool ShowProcessTrackingHint => Runner.UsesManagedProcessTrackingOnly;
+    public bool ShowProcessTrackingHint => !IsConsoleApp && Runner.UsesManagedProcessTrackingOnly;
     public string ProcessTrackingHint => Profile.IsGenericConsole || IsCommandApi
         ? "Tracks launcher-started command processes."
         : "Shared service folder: tracks only launcher-started processes.";
-    public bool ShowServiceTypeLabel => !IsCommandApi && !ShowApiDatabaseLabel &&
+    public bool ShowServiceTypeLabel => !IsConsoleApp && !IsCommandApi && !ShowApiDatabaseLabel &&
         !Profile.Kind.Equals("Angular", StringComparison.OrdinalIgnoreCase);
     public bool IsStoppedForPortEdit => HasWebEndpoint && !IsBusy && !IsStopping && !Runner.HasManagedProcess &&
         Runner.HasVerifiedNoServiceProcesses && Runner.Snapshot.ProcessIds.Count == 0 &&
@@ -154,6 +160,8 @@ public sealed partial class ServiceViewModel(ServiceRunner runner) : ObservableO
     public bool ShowApiDatabaseLabel => !(IsConsoleApp || IsCommandApi) && (HasApiConfiguration ||
         Profile.Kind.Equals(".NET", StringComparison.OrdinalIgnoreCase) ||
         Profile.Kind.Equals("API", StringComparison.OrdinalIgnoreCase));
+    public bool IsApiService => IsCommandApi || ShowApiDatabaseLabel;
+    public bool ShowFunctionsMenu => IsApiService || IsFrontendService;
     private string? DiscoveredDatabaseName => HasCurrentApiDatabaseDiscovery
         ? _discoveredApiDatabases.OrderBy(database => ApiDatabaseIdentifier.ConnectionKeyPriority(database.Key))
             .Select(database => database.Name).FirstOrDefault(name => name is not null) : null;
@@ -230,6 +238,11 @@ public sealed partial class ServiceViewModel(ServiceRunner runner) : ObservableO
             NotifyIfChanged(HasApiConfiguration, nameof(HasApiConfiguration));
             NotifyIfChanged(ShowChangeDatabaseRecovery, nameof(ShowChangeDatabaseRecovery));
             NotifyIfChanged(ShowApiDatabaseLabel, nameof(ShowApiDatabaseLabel));
+            NotifyIfChanged(IsApiService, nameof(IsApiService));
+            NotifyIfChanged(ShowFunctionsMenu, nameof(ShowFunctionsMenu));
+            NotifyIfChanged(HasCardStatusDetail, nameof(HasCardStatusDetail));
+            NotifyIfChanged(HasCopyableStatusError, nameof(HasCopyableStatusError));
+            NotifyIfChanged(HasCardDetail, nameof(HasCardDetail));
             NotifyIfChanged(ShowServiceTypeLabel, nameof(ShowServiceTypeLabel));
             NotifyIfChanged(CanConfigureApi, nameof(CanConfigureApi));
             NotifyIfChanged(CanSwitchConfiguration, nameof(CanSwitchConfiguration));
@@ -272,38 +285,56 @@ public sealed partial class ServiceViewModel(ServiceRunner runner) : ObservableO
     public bool IsBusy { get => _isBusy; set { if (_isBusy == value) return; _isBusy = value; Update(); } }
     public bool IsStopping { get => _isStopping; set { if (_isStopping == value) return; _isStopping = value; Update(); } }
     public string Status => IsStopping ? "STOPPING" : IsBusy ? "WORKING" : _snapshot.State.ToString().ToUpperInvariant();
-    public string CardStatus => !IsStopping && !IsBusy && HasWebEndpoint && _snapshot.State == ServiceState.Running &&
+    public string CardStatus => IsStopping ? "Stopping…"
+        : IsBusy && _snapshot.State == ServiceState.Busy &&
+          _snapshot.Detail.StartsWith("Stopping", StringComparison.Ordinal) ? "Stopping…"
+        : IsBusy ? $"{_activeOperation ?? "Working"}…"
+        : HasWebEndpoint && _snapshot.State == ServiceState.Running &&
         Uri.TryCreate(_snapshot.ActiveUrl, UriKind.Absolute, out var activeUrl) && activeUrl.Port > 0
             ? $"Running on {activeUrl.Port}"
             : Status;
-    public string OverviewStatus => $"{Name} {OverviewState}";
-    public string OverviewStatusColor => StateColor;
-    private string OverviewState => IsStopping ? "Stopping"
-        : IsBusy && _snapshot.State == ServiceState.Busy &&
-          _snapshot.Detail.StartsWith("Stopping", StringComparison.Ordinal) ? "Stopping"
-        : IsBusy ? _activeOperation ?? "Working"
-        : _snapshot.State == ServiceState.Starting ? IsConsoleApp ? "Starting" : "Waiting for HTTP"
-        : _snapshot.State switch
-        {
-            ServiceState.Running => "Running",
-            ServiceState.Completed => "Completed",
-            ServiceState.Conflict => "Port conflict",
-            ServiceState.Error => "Failed",
-            ServiceState.Checking => "Checking",
-            ServiceState.Busy => "Working",
-            _ => "Stopped"
-        };
+    public string CardStatusDetail => _statusMessage ??
+        ((IsBusy || IsStopping) && _operationStartingStatus is { } initial && SameStatus(initial, _snapshot)
+            ? "" : HasRuntimeDetail ? _snapshot.Detail : "");
+    public bool HasCardStatusDetail => (ShowFunctionsMenu || IsConsoleApp) && !string.IsNullOrWhiteSpace(CardStatusDetail);
+    public bool HasCopyableStatusError => HasCardStatusDetail && HasCurrentStatusError;
+    private bool HasCurrentStatusError => (_statusMessage is not null && _statusMessageIsError) ||
+        _snapshot.State is ServiceState.Error or ServiceState.Conflict ||
+        _snapshot.Detail.EndsWith("(server reports an error)", StringComparison.Ordinal);
+    public string CardStatusDetailColor => HasCurrentStatusError ? "#FF939A" : "#A6B4C9";
     internal void SetActiveOperation(string? operation)
     {
         if (_activeOperation == operation) return;
         _activeOperation = operation;
+        _operationStartingStatus = operation is null ? null : Runner.Snapshot;
+        if (operation is not null) _statusMessage = null;
         Update();
     }
-    public string Detail => _snapshot.Detail;
+    internal void SetStatusMessage(string message, bool isError = false)
+    {
+        _statusMessage = SensitiveDataProtection.Redact(message);
+        _statusMessageIsError = isError;
+        _statusMessageSnapshot = Runner.Snapshot;
+        _statusMessageApiRun = Runner.ManagedApiRunVersion;
+        _statusMessageFrontendRun = Runner.ManagedFrontendRunVersion;
+        Update();
+    }
+    private static bool SameStatus(ServiceSnapshot left, ServiceSnapshot right) =>
+        left.State == right.State && left.Detail == right.Detail && left.ActiveUrl == right.ActiveUrl &&
+        left.IsManaged == right.IsManaged && left.ProcessIds.SequenceEqual(right.ProcessIds);
+    public string Detail => _statusMessage ?? _snapshot.Detail;
     public bool HasDetail => !string.IsNullOrWhiteSpace(Detail) &&
         !(HasWebEndpoint && _snapshot.State == ServiceState.Stopped && Detail == "No matching service processes");
-    public bool HasCardDetail => HasDetail && (IsConsoleApp || _snapshot.State != ServiceState.Running ||
-        Detail.EndsWith("(server reports an error)", StringComparison.Ordinal));
+    private bool HasRuntimeDetail => !string.IsNullOrWhiteSpace(_snapshot.Detail) &&
+        !(HasWebEndpoint && _snapshot.State == ServiceState.Stopped && _snapshot.Detail == "No matching service processes") &&
+        (IsConsoleApp
+            ? _snapshot.State != ServiceState.Stopped &&
+              !(_snapshot.State == ServiceState.Running &&
+                (_snapshot.Detail.EndsWith("; console processes running", StringComparison.Ordinal) ||
+                 _snapshot.Detail.EndsWith("; Flutter app window detected", StringComparison.Ordinal)))
+            : _snapshot.State != ServiceState.Running ||
+              _snapshot.Detail.EndsWith("(server reports an error)", StringComparison.Ordinal));
+    public bool HasCardDetail => !IsConsoleApp && !ShowFunctionsMenu && HasDetail && (_statusMessage is not null || HasRuntimeDetail);
     public string StateColor => IsStopping || IsBusy ? "#F6CF7D" : _snapshot.State switch
     {
         ServiceState.Running or ServiceState.Completed => "#69E2C0", ServiceState.Starting or ServiceState.Busy => "#F6CF7D",
@@ -390,6 +421,13 @@ public sealed partial class ServiceViewModel(ServiceRunner runner) : ObservableO
     public void Update()
     {
         _snapshot = Runner.Snapshot;
+        if (_statusMessage is not null && _statusMessageSnapshot is { } messageStatus &&
+            (messageStatus.State != _snapshot.State || messageStatus.ActiveUrl != _snapshot.ActiveUrl ||
+             messageStatus.IsManaged != _snapshot.IsManaged || _statusMessageApiRun != Runner.ManagedApiRunVersion ||
+             _statusMessageFrontendRun != Runner.ManagedFrontendRunVersion ||
+             (!_statusMessageIsError && (_snapshot.State is ServiceState.Error or ServiceState.Conflict ||
+              _snapshot.Detail.EndsWith("(server reports an error)", StringComparison.Ordinal)))))
+            _statusMessage = null;
         _swaggerStatus = Runner.SwaggerStatus;
         UpdateFlutterDatabaseState();
         // The same VM appears in the sidebar and the service card. Re-notifying every property
@@ -424,8 +462,10 @@ public sealed partial class ServiceViewModel(ServiceRunner runner) : ObservableO
         NotifyIfChanged(IsStopping, nameof(IsStopping));
         NotifyIfChanged(Status, nameof(Status));
         NotifyIfChanged(CardStatus, nameof(CardStatus));
-        NotifyIfChanged(OverviewStatus, nameof(OverviewStatus));
-        NotifyIfChanged(OverviewStatusColor, nameof(OverviewStatusColor));
+        NotifyIfChanged(CardStatusDetail, nameof(CardStatusDetail));
+        NotifyIfChanged(HasCardStatusDetail, nameof(HasCardStatusDetail));
+        NotifyIfChanged(HasCopyableStatusError, nameof(HasCopyableStatusError));
+        NotifyIfChanged(CardStatusDetailColor, nameof(CardStatusDetailColor));
         NotifyIfChanged(Detail, nameof(Detail));
         NotifyIfChanged(HasDetail, nameof(HasDetail));
         NotifyIfChanged(HasCardDetail, nameof(HasCardDetail));
@@ -453,6 +493,8 @@ public sealed partial class ServiceViewModel(ServiceRunner runner) : ObservableO
         NotifyIfChanged(CanForceStop, nameof(CanForceStop));
         NotifyIfChanged(HasApiConfiguration, nameof(HasApiConfiguration));
         NotifyIfChanged(ShowApiDatabaseLabel, nameof(ShowApiDatabaseLabel));
+        NotifyIfChanged(IsApiService, nameof(IsApiService));
+        NotifyIfChanged(ShowFunctionsMenu, nameof(ShowFunctionsMenu));
         NotifyDatabaseCard();
         NotifyIfChanged(CanConfigureApi, nameof(CanConfigureApi));
         NotifyIfChanged(CanSwitchConfiguration, nameof(CanSwitchConfiguration));

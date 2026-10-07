@@ -80,7 +80,6 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     public bool HasProductionNotice => ProductionNotice.Length > 0;
     public bool ProjectsVisible { get => _settings.Layout.ProjectsVisible; set => SetSectionVisibility(nameof(ProjectsVisible), value); }
     public bool ToolsVisible { get => _settings.Layout.ToolsVisible; set => SetSectionVisibility(nameof(ToolsVisible), value); }
-    public bool ServicesVisible { get => _settings.Layout.ServicesVisible; set => SetSectionVisibility(nameof(ServicesVisible), value); }
     public bool CodexCrewVisible { get => _settings.Layout.CodexCrewVisible; set => SetSectionVisibility(nameof(CodexCrewVisible), value); }
     public bool NextCommitVisible { get => _settings.Layout.NextCommitVisible; set => SetSectionVisibility(nameof(NextCommitVisible), value); }
     public event PropertyChangedEventHandler? PropertyChanged;
@@ -105,6 +104,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         VisibleProjectItems = CollectionViewSource.GetDefaultView(ProjectItems);
         VisibleProjectItems.Filter = item => item is ProjectViewModel project && project.IsArchived == ShowArchivedProjects;
         InitializeComponent();
+        InitializeSidebarAutoHide();
         InitializeSectionsMenu();
         InitializeNextCommitSettings();
         _consoleTimer.Tick += (_, _) => FlushConsoleOutput();
@@ -119,6 +119,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         InitializeLongRunningTaskMode();
         InitializeNextCommitReminder();
         InitializeDashboardGitComparison();
+        InitializeCodexAccountUsage();
         _timer.Tick += async (_, _) => await Task.WhenAll(RefreshAsync(), RefreshProjectBranchesAsync(), RefreshNextCommitAsync());
         Activated += async (_, _) => await Task.WhenAll(RefreshProjectBranchesAsync(), RefreshNextCommitAsync());
         Closed += (_, _) => _branchLifetime.Cancel();
@@ -381,20 +382,18 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         service.SetActiveOperation(verb);
         service.IsBusy = true;
         UpdateActions();
-        Notice = $"{verb}: {service.Name}…";
         try
         {
             await action(service.Runner);
             await service.Runner.RefreshAsync();
             var snapshot = service.Runner.Snapshot;
-            Notice = $"{service.Name}: {snapshot.Detail}";
             if (agentAction != null) RecordAgentBridgeEvent(service, agentAction,
                 snapshot.State is ServiceState.Error or ServiceState.Conflict ? "failed" : "completed");
             return snapshot.State is not (ServiceState.Error or ServiceState.Conflict);
         }
         catch (Exception ex)
         {
-            Notice = $"{service.Name}: {ex.Message}";
+            service.SetStatusMessage(ex.Message, isError: true);
             RecordServiceMessage(service, ex.Message, ServiceLogKind.Error);
             if (agentAction != null) RecordAgentBridgeEvent(service, agentAction, "failed");
             return false;
@@ -432,16 +431,6 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     }
     private async void RestartAll_Click(object sender, RoutedEventArgs e) => await RunBatchAsync(r => r.RestartAsync(), "Restarting", s => s.CanRestart);
     private async void StopAll_Click(object sender, RoutedEventArgs e) => await ForceStopAllAsync();
-    private void CodexAlertsMenu_Click(object sender, RoutedEventArgs e)
-    {
-        if (sender is Button { ContextMenu: { } menu } button)
-        {
-            menu.PlacementTarget = button;
-            menu.Placement = PlacementMode.Bottom;
-            menu.IsOpen = true;
-        }
-    }
-
     private void ProjectTasks_Click(object sender, RoutedEventArgs e)
     {
         if (_projectTasksWindow == null)
@@ -470,9 +459,6 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     }
 
     private void CodexAlerts_Click(object sender, RoutedEventArgs e) => OpenCodexMonitor("show");
-    private void CodexOverlayShow_Click(object sender, RoutedEventArgs e) => OpenCodexMonitor("show-overlay");
-    private void CodexOverlayHide_Click(object sender, RoutedEventArgs e) => OpenCodexMonitor("hide-overlay");
-    private void CodexOverlayClear_Click(object sender, RoutedEventArgs e) => OpenCodexMonitor("clear-completed");
 
     private void OpenCodexMonitor(string command)
     {
@@ -594,6 +580,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         if (service.IsStopping || _addingProjectService || _closeRequested || _closing || _savingProjectEdits) return;
         RecordAgentBridgeEvent(service, "stop", "requested");
         RecordServiceMessage(service, "Force stop requested…", ServiceLogKind.Information);
+        service.SetActiveOperation("Stopping");
         service.IsStopping = true;
         UpdateActions();
         try
@@ -603,18 +590,17 @@ public partial class MainWindow : Window, INotifyPropertyChanged
                     $"Force stop — {service.Name}", MessageBoxButton.YesNo, MessageBoxImage.Warning,
                     MessageBoxResult.No) == MessageBoxResult.Yes);
             else await service.Runner.ForceStopAsync();
-            Notice = $"{service.Name}: {service.Runner.Snapshot.Detail}";
             var snapshot = service.Runner.Snapshot;
             RecordAgentBridgeEvent(service, "stop", (snapshot.State is ServiceState.Stopped or ServiceState.Completed) &&
                 !service.Runner.HasManagedProcess && snapshot.ProcessIds.Count == 0 ? "completed" : "failed");
         }
         catch (Exception ex)
         {
-            Notice = $"Could not stop {service.Name}: {ex.Message}";
+            service.SetStatusMessage($"Could not stop: {ex.Message}", isError: true);
             RecordServiceMessage(service, ex.Message, ServiceLogKind.Error);
             RecordAgentBridgeEvent(service, "stop", "failed");
         }
-        finally { service.IsStopping = false; UpdateActions(); }
+        finally { service.IsStopping = false; service.SetActiveOperation(null); UpdateActions(); }
     }
 
     private void LaunchUi_Click(object sender, RoutedEventArgs e)
@@ -822,7 +808,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         var current = property switch
         {
             nameof(ProjectsVisible) => ProjectsVisible, nameof(ToolsVisible) => ToolsVisible,
-            nameof(ServicesVisible) => ServicesVisible, nameof(CodexCrewVisible) => CodexCrewVisible,
+            nameof(CodexCrewVisible) => CodexCrewVisible,
             nameof(NextCommitVisible) => NextCommitVisible, _ => visible
         };
         if (current == visible) return;
@@ -830,7 +816,6 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         {
             case nameof(ProjectsVisible): _settings.Layout.ProjectsVisible = visible; break;
             case nameof(ToolsVisible): _settings.Layout.ToolsVisible = visible; break;
-            case nameof(ServicesVisible): _settings.Layout.ServicesVisible = visible; break;
             case nameof(CodexCrewVisible): _settings.Layout.CodexCrewVisible = visible; break;
             case nameof(NextCommitVisible): _settings.Layout.NextCommitVisible = visible; break;
         }
@@ -845,16 +830,15 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         static Visibility Display(bool visible) => visible ? Visibility.Visible : Visibility.Collapsed;
         var sidebarVisible = ProjectsVisible || ToolsVisible;
         SidebarPanel.Visibility = Display(sidebarVisible);
-        SidebarColumn.Width = new GridLength(sidebarVisible ? 245 : 0);
+        ApplySidebarLayout();
         ProjectsPanel.Visibility = Display(ProjectsVisible);
         ProjectsRow.Height = ProjectsVisible ? new GridLength(1, GridUnitType.Star) : new GridLength(0);
         ToolsPanel.Visibility = Display(ToolsVisible);
         ToolsRow.Height = !ToolsVisible ? new GridLength(0) : ProjectsVisible ? GridLength.Auto : new GridLength(1, GridUnitType.Star);
         ToolsScroller.MaxHeight = ProjectsVisible ? 250 : double.PositiveInfinity;
 
-        ServicesPanel.Visibility = Display(ServicesVisible);
-        BatchControlsPanel.Visibility = Display(ServicesVisible || IsEditing);
-        EmptyWorkspace.Visibility = Display(!ServicesVisible);
+        ServicesPanel.Visibility = Visibility.Visible;
+        BatchControlsPanel.Visibility = Visibility.Visible;
         CodexCrewPanel.Visibility = Display(CodexCrewVisible);
         NextCommitPanel.Visibility = Display(NextCommitVisible);
         NextCommitSplitter.Visibility = Display(NextCommitVisible);
@@ -877,12 +861,6 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         if (sender is not Button { Tag: string section }) return;
         SetSectionVisibility(section + "Visible", false);
         // Keep keyboard focus on a visible control that can immediately reopen the section.
-        SectionsMenuToggle.Focus();
-    }
-
-    private void ShowServices_Click(object sender, RoutedEventArgs e)
-    {
-        ServicesVisible = true;
         SectionsMenuToggle.Focus();
     }
 

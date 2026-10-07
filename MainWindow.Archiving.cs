@@ -10,7 +10,7 @@ public partial class MainWindow
     private bool _refreshingProjectList;
 
     public bool ShowArchivedProjects => _showArchivedProjects;
-    public string ArchivedProjectsLabel => $"Archived ({Projects.Count(project => project.IsArchived)})";
+    public string ArchivedProjectsLabel => ShowArchivedProjects ? "View Active" : "View Archived";
     public string ArchiveProjectLabel => SelectedProject?.IsArchived == true ? "Unarchive selected project" : "Archive selected project";
     public bool CanArchiveProject => !IsEditing && CanEdit;
     public string ProjectListHint
@@ -19,14 +19,14 @@ public partial class MainWindow
         {
             var visibleCount = Projects.Count(project => project.IsArchived == ShowArchivedProjects);
             if (ShowArchivedProjects)
-                return visibleCount == 0 ? "No archived projects. Turn off Archived to return to active projects."
+                return visibleCount == 0 ? "No archived projects. Select View Active to return to active projects."
                     : "Archived projects stay saved. Select one to restore it or manage its commands.";
             var runningArchived = Projects.Count(project => project.IsArchived &&
                 _runners.GetValueOrDefault(project.Id)?.Any(service => service.Runner.HasManagedProcess ||
                     service.Runner.Snapshot.ProcessIds.Count > 0) == true);
             if (runningArchived > 0)
-                return $"{runningArchived} archived project(s) have tracked processes. Open Archived to view or stop them.";
-            return visibleCount == 0 ? "No active projects. Add a project or open Archived to restore one." : "";
+                return $"{runningArchived} archived project(s) have tracked processes. Select View Archived to view or stop them.";
+            return visibleCount == 0 ? "No active projects. Add a project or select View Archived to restore one." : "";
         }
     }
 
@@ -91,8 +91,8 @@ public partial class MainWindow
             service.Runner.Snapshot.ProcessIds.Count > 0) == true;
         Notice = archive
             ? hasProcesses
-                ? $"Archived {selected.Name}. Its running commands keep running; open Archived to view or stop them."
-                : $"Archived {selected.Name}. Open Archived to bring it back."
+                ? $"Archived {selected.Name}. Its running commands keep running; select View Archived to view or stop them."
+                : $"Archived {selected.Name}. Select View Archived to bring it back."
             : $"Restored {selected.Name} to active projects.";
     }
 }

@@ -126,6 +126,9 @@ public partial class MainWindow
                 "record_git_changes" => AgentBridgeResponse.Success(await RecordAgentGitChangesAsync(request, cancellationToken)),
                 "project_notes" => AgentBridgeResponse.Success(await ListAgentProjectNotesAsync(request, cancellationToken)),
                 "save_follow_up_note" => AgentBridgeResponse.Success(await SaveAgentFollowUpNoteAsync(request, cancellationToken)),
+                "bind_reply_inbox" => AgentBridgeResponse.Success(BindAgentReplyInbox(request)),
+                "read_reply_inbox" => AgentBridgeResponse.Success(await ReadAgentReplyInboxAsync(request, cancellationToken)),
+                "ack_reply_inbox" => AgentBridgeResponse.Success(await AcknowledgeAgentReplyInboxAsync(request, cancellationToken)),
                 "service_status" => AgentBridgeResponse.Success(await AgentServiceStatusAsync(request)),
                 "recent_activity" => AgentBridgeResponse.Success(AgentRecentActivity(request)),
                 "reservation_status" => AgentBridgeResponse.Success(_agentCoordination.ReservationStatus(RequireProject(request.ProjectId).Id)),
@@ -133,8 +136,7 @@ public partial class MainWindow
                     RequireProject(request.ProjectId).Id, request.Owner ?? "")),
                 "declare_service_use" => AgentBridgeResponse.Success(DeclareAgentServiceUse(request)),
                 "release_service_use" => AgentBridgeResponse.Success(ReleaseAgentServiceUse(request)),
-                "heartbeat_project" => AgentBridgeResponse.Success(_agentCoordination.Heartbeat(
-                    RequireProject(request.ProjectId).Id, request.SessionToken ?? "")),
+                "heartbeat_project" => AgentBridgeResponse.Success(await HeartbeatAgentProjectAsync(request, cancellationToken)),
                 "unregister_project" => AgentBridgeResponse.Success(_agentCoordination.Unregister(
                     RequireProject(request.ProjectId).Id, request.SessionToken ?? "")),
                 "project_events" => AgentBridgeResponse.Success(_agentCoordination.Events(

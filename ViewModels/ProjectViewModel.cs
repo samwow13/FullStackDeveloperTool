@@ -12,6 +12,16 @@ public sealed class ProjectViewModel(ProjectProfile profile, IReadOnlyList<Servi
 
     public ProjectProfile Profile { get; } = profile;
     public string Name => Profile.Name;
+    public string CompactName
+    {
+        get
+        {
+            var words = Name.Split([' ', '-', '_'], StringSplitOptions.RemoveEmptyEntries);
+            var initials = words.Length > 1 ? string.Concat(words.Take(3).Select(word => word[0]))
+                : string.Concat(Name.Where(char.IsUpper).Take(3));
+            return (initials.Length > 1 ? initials : string.Concat(Name.Trim().Take(2))).ToUpperInvariant();
+        }
+    }
     public bool IsArchived => Profile.IsArchived;
     public IReadOnlyList<ServiceViewModel> Services => _services;
     public IReadOnlyList<ProjectBranchViewModel> Branches => _branches;
@@ -28,7 +38,11 @@ public sealed class ProjectViewModel(ProjectProfile profile, IReadOnlyList<Servi
         Changed(nameof(Branches));
     }
 
-    public void RefreshName() => Changed(nameof(Name));
+    public void RefreshName()
+    {
+        Changed(nameof(Name));
+        Changed(nameof(CompactName));
+    }
     public void UpdateServices(IReadOnlyList<ServiceViewModel> services)
     {
         _services = services.ToArray();

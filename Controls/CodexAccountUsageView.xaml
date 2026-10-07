@@ -1,0 +1,10 @@
+<UserControl x:Class="FullStackLauncher.Controls.CodexAccountUsageView"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             x:Name="Usage" Focusable="False">
+    <TextBlock Text="{Binding Summary, ElementName=Usage}" FontSize="10" Foreground="#A6F2DE"
+               TextTrimming="CharacterEllipsis"
+               ToolTip="{Binding Detail, ElementName=Usage}"
+               AutomationProperties.Name="{Binding Summary, ElementName=Usage}"
+               AutomationProperties.HelpText="{Binding Detail, ElementName=Usage}"/>
+</UserControl>

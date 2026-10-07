@@ -1,0 +1,89 @@
+<Window x:Class="FullStackLauncher.Controls.CodexReplyWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:controls="clr-namespace:FullStackLauncher.Controls"
+        Title="Reply to Codex" Width="580" Height="490" MinWidth="420" MinHeight="390"
+        Background="{StaticResource BackgroundBrush}" Foreground="{StaticResource TextBrush}"
+        Icon="pack://application:,,,/Assets/launcher.ico" WindowStartupLocation="CenterOwner"
+        UseLayoutRounding="True" Closing="Window_Closing" PreviewKeyDown="Window_PreviewKeyDown">
+    <Grid Margin="18">
+        <Grid.RowDefinitions><RowDefinition Height="*"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
+    <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled"
+                  Focusable="False" CanContentScroll="False">
+    <Grid MinHeight="{Binding ViewportHeight, RelativeSource={RelativeSource AncestorType={x:Type ScrollViewer}}}">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
+        </Grid.RowDefinitions>
+        <Grid Margin="0,0,24,18">
+            <Grid.ColumnDefinitions><ColumnDefinition Width="58"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+            <Viewbox Width="52" Height="44" VerticalAlignment="Top" Margin="0,8,6,0" IsHitTestVisible="False">
+                <controls:CodexRobot State="Idle" Animate="False" Focusable="False"/>
+            </Viewbox>
+            <Border Grid.Column="1" Background="#EFFBF4" BorderBrush="#21464C" BorderThickness="2"
+                    CornerRadius="20,22,20,5" Padding="14,11">
+                <StackPanel>
+                    <TextBlock Text="Codex" Foreground="#31645F" FontSize="11" FontWeight="SemiBold" Margin="0,0,0,4"/>
+                    <TextBlock x:Name="ChatTitle" Foreground="#17343B" FontSize="13" FontWeight="SemiBold" TextTrimming="CharacterEllipsis"/>
+                    <ScrollViewer x:Name="AgentMessageScroll" MaxHeight="100" Visibility="Collapsed" Margin="0,9,0,0"
+                                  HorizontalScrollBarVisibility="Disabled" VerticalScrollBarVisibility="Auto"
+                                  CanContentScroll="False" PanningMode="VerticalOnly" Focusable="False">
+                        <TextBlock x:Name="AgentMessage" Foreground="#17343B" FontSize="12" LineHeight="18"
+                                   TextWrapping="Wrap" Padding="0,0,5,0"/>
+                    </ScrollViewer>
+                </StackPanel>
+            </Border>
+        </Grid>
+        <Border Grid.Row="1" Margin="44,0,0,0" MinHeight="132" MaxHeight="320" CornerRadius="20,20,5,20" Padding="14,10"
+                Background="#162A2B" BorderThickness="1">
+            <Border.Style><Style TargetType="Border">
+                <Setter Property="BorderBrush" Value="#3B605B"/>
+                <Style.Triggers><Trigger Property="IsKeyboardFocusWithin" Value="True">
+                    <Setter Property="BorderBrush" Value="{StaticResource AccentBrush}"/>
+                </Trigger></Style.Triggers>
+            </Style></Border.Style>
+            <Grid>
+                <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="*"/></Grid.RowDefinitions>
+                <DockPanel Margin="0,0,0,8">
+                    <TextBlock DockPanel.Dock="Right" Text="You" Foreground="{StaticResource AccentBrush}"
+                               FontSize="11" FontWeight="SemiBold" VerticalAlignment="Center"/>
+                    <Label Content="_Reply" Target="{Binding ElementName=ResponseBox}" Foreground="{StaticResource MutedBrush}"
+                           FontSize="11" Padding="0" VerticalAlignment="Center"/>
+                </DockPanel>
+                <Grid Grid.Row="1">
+                    <TextBox x:Name="ResponseBox" AcceptsReturn="True" TextWrapping="Wrap" Background="Transparent"
+                             BorderThickness="0" Padding="0" FontSize="13" VerticalContentAlignment="Top"
+                             VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled"
+                             AutomationProperties.Name="Response to Codex chat" TextChanged="Response_Changed">
+                        <TextBox.Template><ControlTemplate TargetType="TextBox">
+                            <ScrollViewer x:Name="PART_ContentHost" Background="{TemplateBinding Background}" Padding="{TemplateBinding Padding}"/>
+                        </ControlTemplate></TextBox.Template>
+                    </TextBox>
+                    <TextBlock Text="Write a reply…" Foreground="#91AAA7" IsHitTestVisible="False">
+                        <TextBlock.Style><Style TargetType="TextBlock">
+                            <Setter Property="Visibility" Value="Collapsed"/>
+                            <Style.Triggers><DataTrigger Binding="{Binding Text.Length, ElementName=ResponseBox}" Value="0">
+                                <Setter Property="Visibility" Value="Visible"/>
+                            </DataTrigger></Style.Triggers>
+                        </Style></TextBlock.Style>
+                    </TextBlock>
+                </Grid>
+            </Grid>
+        </Border>
+    </Grid>
+    </ScrollViewer>
+        <StackPanel Grid.Row="1" Margin="44,0,0,0">
+            <TextBlock x:Name="InboxStatus" TextWrapping="Wrap" Foreground="{StaticResource MutedBrush}" Margin="0,9,0,0" AutomationProperties.LiveSetting="Polite"/>
+            <TextBlock x:Name="DeliveryStatus" TextWrapping="Wrap" Visibility="Collapsed"
+                       Foreground="#F5A1A5" Margin="0,9,0,0" AutomationProperties.LiveSetting="Polite"/>
+        </StackPanel>
+        <Grid Grid.Row="2" Margin="0,14,0,0">
+            <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+            <StackPanel Grid.Column="1" Orientation="Horizontal">
+                <Button x:Name="CancelButton" Content="Close" Click="Cancel_Click" Margin="0,0,8,0"/>
+                <Button x:Name="SendButton" Content="_Send to inbox" Style="{StaticResource PrimaryButton}"
+                        Click="Send_Click" IsEnabled="False" ToolTip="Save reply for this chat's MCP inbox (Ctrl+Enter)"/>
+            </StackPanel>
+        </Grid>
+    </Grid>
+</Window>

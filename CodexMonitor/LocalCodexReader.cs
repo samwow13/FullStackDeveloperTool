@@ -284,10 +284,17 @@ public sealed class LocalCodexReader
                     continue;
 
                 var key = readAll ? string.Empty : owners[thread.Id].Key;
+                // Unprojected child turns still have a verified JSONL lifecycle
+                // identity. Carry that turn through to the saved-message reader;
+                // byte-offset start identities are not turn IDs.
+                var latestTurnId = projected?.TurnId ??
+                    (lifecycle?.ActivityIdentity is { } lifecycleIdentity &&
+                     lifecycleIdentity.StartsWith("turn:", StringComparison.Ordinal) && lifecycleIdentity.Length > 5
+                        ? lifecycleIdentity[5..] : null);
                 snapshots[key].Add(new AgentSnapshot(thread.Id, thread.Title, thread.ProjectPath, state,
-                    thread.ParentId, projected?.TurnId, projected?.CompletedAt)
+                    thread.ParentId, latestTurnId, projected?.CompletedAt)
                 {
-                    ActivityIdentity = projected?.TurnId is { Length: > 0 } turnId
+                    ActivityIdentity = latestTurnId is { Length: > 0 } turnId
                         ? "turn:" + turnId : lifecycle?.ActivityIdentity,
                     ActivityStartedAt = projected?.StartedAt ?? lifecycle?.StartedAt
                 });

@@ -1,20 +1,27 @@
 <UserControl x:Class="FullStackLauncher.Controls.CommitMessagePreview"
              xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
              xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:local="clr-namespace:FullStackLauncher.Controls"
              Loaded="OnLoaded" Unloaded="OnUnloaded"
              Foreground="#EDF3FC" MinHeight="100">
+    <Grid ClipToBounds="False">
     <Border Background="#0C131D" BorderBrush="#2E3D52" BorderThickness="1" CornerRadius="8" Padding="12">
         <RichTextBox x:Name="MessageText" IsReadOnly="True" IsReadOnlyCaretVisible="True"
-                     IsUndoEnabled="False" Background="Transparent" BorderThickness="0" Padding="0"
+                     IsUndoEnabled="False" IsDocumentEnabled="True" Background="Transparent" BorderThickness="0" Padding="0"
                      Foreground="#EDF3FC" SelectionBrush="#367060" SelectionOpacity="0.7"
                      FontFamily="Consolas" FontSize="13" VerticalScrollBarVisibility="Auto"
                      HorizontalScrollBarVisibility="Disabled" SpellCheck.IsEnabled="False"
                      PreviewMouseLeftButtonDown="MessageMouseDown" PreviewMouseLeftButtonUp="MessageSelectionEnded"
                      LostMouseCapture="MessageSelectionEnded" PreviewKeyDown="MessageKeyDown"
                      AutomationProperties.Name="Git commit message"
-                     AutomationProperties.HelpText="New AI text is mint and underlined. Click the message or press Enter to mark its displayed AI updates viewed."
-                     ToolTip="Mint underlined text is new. Click the message or press Enter to mark displayed AI updates viewed.">
+                     AutomationProperties.HelpText="Newest three AI updates appear first. Expand shows older updates. Click the message or press Enter to mark only displayed AI updates viewed."
+                     ToolTip="Mint underlined text is new. Expand shows older updates. Click the message or press Enter to mark displayed AI updates viewed.">
             <FlowDocument PagePadding="0" FontFamily="Consolas" FontSize="13" LineHeight="21"/>
         </RichTextBox>
     </Border>
+        <Canvas Width="0" Height="0" HorizontalAlignment="Left" VerticalAlignment="Top"
+                IsHitTestVisible="False" Focusable="False" Panel.ZIndex="1">
+            <local:CommitHammerRobot x:Name="HammerRobot" Canvas.Left="-86" Canvas.Top="6"/>
+        </Canvas>
+    </Grid>
 </UserControl>

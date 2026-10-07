@@ -8,6 +8,8 @@ using FullStackLauncher.Models;
 
 namespace FullStackLauncher.Services;
 
+public sealed record AgentGitChangeRecordResult(AgentGitSummaryEntry Entry, bool IsNew);
+
 /// <summary>Local commit suggestions, isolated per checkout and never included in tracked source or launcher settings.</summary>
 public static class AgentGitChangeStore
 {
@@ -55,7 +57,12 @@ public static class AgentGitChangeStore
         }, false), token);
     }
 
-    public static Task<AgentGitSummaryEntry> RecordAsync(string root, string branch, string remoteName, string connectionId,
+    public static async Task<AgentGitSummaryEntry> RecordAsync(string root, string branch, string remoteName, string connectionId,
+        string updateId, IReadOnlyList<string> bullets, CancellationToken token = default) =>
+        (await RecordWithResultAsync(root, branch, remoteName, connectionId, updateId, bullets, token)
+            .ConfigureAwait(false)).Entry;
+
+    public static Task<AgentGitChangeRecordResult> RecordWithResultAsync(string root, string branch, string remoteName, string connectionId,
         string updateId, IReadOnlyList<string> bullets, CancellationToken token = default)
     {
         ValidateScope(branch, remoteName, connectionId);
@@ -70,7 +77,7 @@ public static class AgentGitChangeStore
                 if (!Matches(existing, branch, remoteName, connectionId)
                     || !existing.Summary.Bullets.SequenceEqual(normalized, StringComparer.Ordinal))
                     throw new InvalidOperationException("This updateId already identifies a different change report. Retry the original report, or use a new updateId for a separate update.");
-                return (existing.Summary, false);
+                return (new AgentGitChangeRecordResult(existing.Summary, false), false);
             }
             if (document.Selection is { } selected && (selected.RemoteName != remoteName || selected.ConnectionId != connectionId))
                 throw new InvalidOperationException("The active Git connection changed. Refresh the project's Git connections before reporting changes.");
@@ -84,7 +91,7 @@ public static class AgentGitChangeStore
             {
                 Branch = branch, RemoteName = remoteName, ConnectionId = connectionId, Summary = summary
             });
-            return (summary, true);
+            return (new AgentGitChangeRecordResult(summary, true), true);
         }, token, branch);
     }
 

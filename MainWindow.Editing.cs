@@ -31,8 +31,6 @@ public partial class MainWindow
         foreach (var service in Services) service.BeginEditing();
         EditError = "";
         SetProjectEditMode(true);
-        // Reveal the fields even when the service section was previously hidden.
-        ServicesVisible = true;
         Dispatcher.BeginInvoke(DispatcherPriority.Input, () => { ProjectNameEditor.Focus(); ProjectNameEditor.SelectAll(); });
     }
 
@@ -54,10 +52,10 @@ public partial class MainWindow
         UpdateActions();
     }
 
-    private void ProjectTitle_Click(object sender, RoutedEventArgs e) => BeginProjectEditing();
-
     private async void EditProject_Click(object sender, RoutedEventArgs e)
     {
+        if (!ReferenceEquals(sender, EditModeToggle) || !ReferenceEquals(e.Source, EditModeToggle)) return;
+        e.Handled = true;
         // The toggle stays checked on validation/save failure, including while awaiting a fresh status check.
         Changed(nameof(IsEditing));
         if (IsEditing) await SaveProjectEditsAsync();

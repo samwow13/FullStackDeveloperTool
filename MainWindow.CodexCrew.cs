@@ -12,38 +12,76 @@ public partial class MainWindow
         set
         {
             if (value == CodexCrewVisibleAgents) return;
-            if (value is not (0 or 1 or 2 or 3 or 4 or 6) ||
-                !_layoutReady || _closed || _closing || _closeRequested)
+            if (value is not (0 or 1 or 2 or 3 or 4 or 6))
             {
-                RestoreCodexCrewViewPreference();
+                RestoreCodexCrewPreference(nameof(CodexCrewVisibleAgents));
                 return;
             }
 
-            try
-            {
-                // Clone at save time so every other profile and layout preference is retained.
-                var candidate = JsonSerializer.Deserialize<LauncherSettings>(JsonSerializer.Serialize(_settings))!;
-                candidate.Layout.CodexCrewVisibleAgents = value;
-                _store.Save(candidate);
-                _settings.Layout.CodexCrewVisibleAgents = candidate.Layout.CodexCrewVisibleAgents;
-                Changed(nameof(CodexCrewVisibleAgents));
-            }
-            catch (Exception ex)
-            {
-                Notice = $"Codex crew view could not be saved. The previous choice is kept. {ex.Message}";
-                RestoreCodexCrewViewPreference();
-            }
+            SaveCodexCrewPreference(nameof(CodexCrewVisibleAgents), "view", layout => layout.CodexCrewVisibleAgents = value);
         }
     }
 
-    private void RestoreCodexCrewViewPreference()
+    public bool CodexCrewThoughtBubblesEnabled
+    {
+        get => _settings.Layout.CodexCrewThoughtBubblesEnabled;
+        set
+        {
+            if (value == CodexCrewThoughtBubblesEnabled) return;
+            SaveCodexCrewPreference(nameof(CodexCrewThoughtBubblesEnabled), "thought bubble choice",
+                layout => layout.CodexCrewThoughtBubblesEnabled = value);
+        }
+    }
+
+    public int CodexCrewThoughtBubbleSeconds
+    {
+        get => _settings.Layout.CodexCrewThoughtBubbleSeconds;
+        set
+        {
+            if (value == CodexCrewThoughtBubbleSeconds) return;
+            if (value is < 3 or > 120)
+            {
+                RestoreCodexCrewPreference(nameof(CodexCrewThoughtBubbleSeconds));
+                return;
+            }
+
+            SaveCodexCrewPreference(nameof(CodexCrewThoughtBubbleSeconds), "thought bubble duration",
+                layout => layout.CodexCrewThoughtBubbleSeconds = value);
+        }
+    }
+
+    private void SaveCodexCrewPreference(string propertyName, string preferenceName, Action<WorkspaceLayout> update)
+    {
+        if (!_layoutReady || _closed || _closing || _closeRequested)
+        {
+            RestoreCodexCrewPreference(propertyName);
+            return;
+        }
+
+        try
+        {
+            // Clone at save time so every other profile and layout preference is retained.
+            var candidate = JsonSerializer.Deserialize<LauncherSettings>(JsonSerializer.Serialize(_settings))!;
+            update(candidate.Layout);
+            _store.Save(candidate);
+            update(_settings.Layout);
+            Changed(propertyName);
+        }
+        catch (Exception ex)
+        {
+            Notice = $"Codex crew {preferenceName} could not be saved. The previous choice is kept. {ex.Message}";
+            RestoreCodexCrewPreference(propertyName);
+        }
+    }
+
+    private void RestoreCodexCrewPreference(string propertyName)
     {
         if (_closed || Dispatcher.HasShutdownStarted || Dispatcher.HasShutdownFinished) return;
         // A notification inside a TwoWay source setter can be ignored during its current transfer.
-        // Refresh after that transfer finishes so the selector and cards restore the saved value.
+        // Refresh after that transfer finishes so the control restores the saved value.
         _ = Dispatcher.BeginInvoke(DispatcherPriority.DataBind, new Action(() =>
         {
-            if (!_closed) Changed(nameof(CodexCrewVisibleAgents));
+            if (!_closed) Changed(propertyName);
         }));
     }
 }

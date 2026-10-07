@@ -26,7 +26,7 @@ public partial class MainWindow
             while (elapsed.Elapsed < TimeSpan.FromSeconds(8))
             {
                 if (process.HasExited)
-                    throw new InvalidOperationException("The replacement watcher exited while opening. Open it again from Alerts.");
+                    throw new InvalidOperationException("The replacement watcher exited while opening. Open Codex Watcher again.");
                 if (MonitorLifetime.IsRunning() && CodexMonitorWindow.TrySignalCommand("resume"))
                 {
                     Notice = "Codex watcher restarted with the updated app. Saved watches, sound preference and overlay settings were retained.";
@@ -34,7 +34,7 @@ public partial class MainWindow
                 }
                 await Task.Delay(100);
             }
-            throw new InvalidOperationException("The watcher has not confirmed startup yet. Check its tray icon or open it from Alerts.");
+            throw new InvalidOperationException("The watcher has not confirmed startup yet. Check its tray icon or open Codex Watcher.");
         }
         catch (Exception ex)
         {

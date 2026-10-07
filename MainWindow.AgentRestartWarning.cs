@@ -10,14 +10,23 @@ namespace FullStackLauncher;
 public partial class MainWindow
 {
     private Window? _agentRestartWarning;
+    private TextBlock? _agentNoticeText;
+    private Button? _agentNoticeDismiss;
     private readonly DispatcherTimer _agentRestartWarningTimer = new()
     {
         Interval = TimeSpan.FromSeconds(8)
     };
 
-    private void ShowAgentRestartWarning()
+    private void ShowAgentRestartWarning() => ShowAgentNotice(AgentBridgeCoordination.AgentRestartMessage,
+        "Dismiss restart warning");
+
+    private void ShowAgentGitUpdateNotice() => ShowAgentNotice("Agent updated commit message",
+        "Dismiss commit message update");
+
+    private void ShowAgentNotice(string message, string dismissLabel)
     {
-        Notice = AgentBridgeCoordination.AgentRestartMessage;
+        if (_closeRequested || _closing || _closed) return;
+        Notice = message;
         _agentRestartWarningTimer.Stop();
         if (_agentRestartWarning is null)
         {
@@ -30,24 +39,25 @@ public partial class MainWindow
                 Height = 28,
                 Padding = new Thickness(0),
                 Margin = new Thickness(12, 0, 0, 0),
-                ToolTip = "Dismiss restart warning"
+                ToolTip = dismissLabel
             };
-            AutomationProperties.SetName(dismiss, "Dismiss restart warning");
+            AutomationProperties.SetName(dismiss, dismissLabel);
             dismiss.Click += (_, _) => CloseAgentRestartWarning();
             DockPanel.SetDock(dismiss, Dock.Right);
             content.Children.Add(dismiss);
-            content.Children.Add(new TextBlock
+            var noticeText = new TextBlock
             {
-                Text = AgentBridgeCoordination.AgentRestartMessage,
+                Text = message,
                 Foreground = warningBrush,
                 FontSize = 14,
                 FontWeight = FontWeights.SemiBold,
                 VerticalAlignment = VerticalAlignment.Center
-            });
+            };
+            content.Children.Add(noticeText);
             var workArea = SystemParameters.WorkArea;
             var warning = new Window
             {
-                Title = "Agent initiated restart",
+                Title = message,
                 Width = 330,
                 Height = 68,
                 Left = Math.Max(workArea.Left, workArea.Right - 346),
@@ -73,9 +83,23 @@ public partial class MainWindow
             {
                 _agentRestartWarningTimer.Stop();
                 _agentRestartWarning = null;
+                _agentNoticeText = null;
+                _agentNoticeDismiss = null;
             };
             _agentRestartWarning = warning;
+            _agentNoticeText = noticeText;
+            _agentNoticeDismiss = dismiss;
             warning.Show();
+        }
+        else
+        {
+            _agentRestartWarning.Title = message;
+            if (_agentNoticeText is not null) _agentNoticeText.Text = message;
+            if (_agentNoticeDismiss is not null)
+            {
+                _agentNoticeDismiss.ToolTip = dismissLabel;
+                AutomationProperties.SetName(_agentNoticeDismiss, dismissLabel);
+            }
         }
         _agentRestartWarningTimer.Start();
     }

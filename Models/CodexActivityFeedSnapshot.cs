@@ -2,6 +2,9 @@ using FullStackLauncher.CodexMonitor;
 
 namespace FullStackLauncher.Models;
 
+/// <summary>A bounded, redacted public chat excerpt retained only in dashboard memory.</summary>
+public sealed record CodexActivityMessage(string Identity, string Text);
+
 /// <summary>Transient dashboard content. Never serialize this into launcher or monitor settings.</summary>
 public sealed record CodexActivityAgent(
     string Id,
@@ -29,6 +32,8 @@ public sealed record CodexActivityAgent(
     public bool HasInputBlockedChildren { get; init; }
     public bool CanDismiss { get; init; }
     public string? ActivityIdentity { get; init; }
+    public string? FeedbackIdentity { get; init; }
+    public IReadOnlyList<CodexActivityMessage> MessageHistory { get; init; } = [];
     public IReadOnlyList<CodexActivityAgent> Subagents { get; init; } = [];
     public bool HasSubagents => Subagents.Count > 0;
     public string StateText => HasFailedChildren ? "Team needs attention" : HasInputBlockedChildren ? "Team needs answer" : WaitingForChildren ? "Team working" :

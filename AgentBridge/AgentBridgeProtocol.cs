@@ -18,6 +18,8 @@ internal sealed class AgentBridgeRequest
     public string? Purpose { get; set; }
     public string? LeaseToken { get; set; }
     public string? SessionToken { get; set; }
+    public string? ChatId { get; set; }
+    public string[]? ReplyIds { get; set; }
     public string? Ticket { get; set; }
     public string? RepositoryId { get; set; }
     public string? ConnectionId { get; set; }

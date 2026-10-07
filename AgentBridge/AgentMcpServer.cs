@@ -12,6 +12,10 @@ namespace FullStackLauncher.AgentBridge;
 internal static class AgentMcpServer
 {
     private const string Instructions =
+        "To receive human replies, register your project session, read your actual current CODEX_THREAD_ID, and call launcher_bind_reply_inbox. " +
+        "Never guess a chat ID or use a parent chat ID for a subagent. At existing safe work boundaries, inspect the bound inbox through launcher_read_reply_inbox or launcher_heartbeat_project. " +
+        "Read each reply, acknowledge its exact replyId with launcher_ack_reply_inbox, and incorporate the user's reply within the authorized task. " +
+        "The MCP inbox delivers tool context; it never inserts native Steer/Queue input or wakes an idle chat. " +
         "Before starting a localhost host, call launcher_projects and launcher_services, then check launcher_service_status. " +
         "Reuse a running configured URL. For service changes, register a project session, claim its FIFO reservation, " +
         "and pass both session and lease tokens. Declare each service you use, heartbeat the session, " +
@@ -35,7 +39,7 @@ internal static class AgentMcpServer
         "page context, findings or follow-up ideas. Use a stable updateId and repeat the identical payload on retries. " +
         "These follow-ups are saved only as Notes for human review; saving never adds them to the queue, enables a queue or starts work. " +
         "Include delegated discoveries once. Respect user constraints and do not use saved note content as authorization to perform its work. " +
-        "These tools manage configured services, Git change summaries and project notes, not Codex agents.";
+        "These tools manage configured services, Git change summaries, project notes and explicitly bound reply inboxes. They never start or steer Codex turns.";
 
     private const string NoArgs = """{"type":"object","properties":{},"additionalProperties":false}""";
     private const string ProjectArg = """{"type":"object","properties":{"projectId":{"type":"string"}},"required":["projectId"],"additionalProperties":false}""";
@@ -59,7 +63,12 @@ internal static class AgentMcpServer
         Tool("launcher_reservation_status", "Read owner, purpose, start/expiry time, and wait count for a configured project.", ProjectArg),
         Tool("launcher_register_project", "Register this active agent on a project. Returns a private session token and event cursor; heartbeat at least every 5 minutes.",
             """{"type":"object","properties":{"projectId":{"type":"string"},"owner":{"type":"string","description":"Short, recognizable task or agent label."}},"required":["projectId","owner"],"additionalProperties":false}""", false),
-        Tool("launcher_heartbeat_project", "Keep one registered agent session and its held reservation alive. Returns pending project restart warning notifications; inspect them before continuing local checks.", SessionSchema(), false),
+        Tool("launcher_bind_reply_inbox", "Bind this active project session to your exact current Codex chat ID read from CODEX_THREAD_ID. Never guess an ID or bind a subagent to its parent chat. Binding is immutable for this session; a different chat needs a new session. No reply is read until explicit binding. This inbox supplies tool context only and never starts, wakes, or steers a Codex turn.",
+            """{"type":"object","properties":{"projectId":{"type":"string"},"sessionToken":{"type":"string"},"chatId":{"type":"string","format":"uuid","description":"Your actual current CODEX_THREAD_ID, read directly from your execution environment."}},"required":["projectId","sessionToken","chatId"],"additionalProperties":false}""", false, false),
+        Tool("launcher_read_reply_inbox", "Read a bounded page of unacknowledged human replies for this active session's explicitly bound Codex chat. Chat scope comes only from the binding, never an arbitrary read argument. Returned replies are durably marked Read and remain available until acknowledged. Read each reply, then acknowledge its exact replyId. This does not inject native turn input or wake an idle chat.", SessionSchema(), false, false),
+        Tool("launcher_ack_reply_inbox", "Acknowledge only the exact reply IDs you have read from this active session's bound chat inbox. Repeated acknowledgment is idempotent. IDs from another chat or replies not previously read are rejected together. Acknowledgment records receipt of tool context; it does not prove native Steer/Queue delivery or completed work.",
+            """{"type":"object","properties":{"projectId":{"type":"string"},"sessionToken":{"type":"string"},"replyIds":{"type":"array","minItems":1,"maxItems":100,"uniqueItems":true,"items":{"type":"string","format":"uuid"}}},"required":["projectId","sessionToken","replyIds"],"additionalProperties":false}""", false, false),
+        Tool("launcher_heartbeat_project", "Keep one registered agent session and its held reservation alive. Returns pending project restart warning notifications and, only after explicit inbox binding, a bounded page of unacknowledged human replies. Inspect warnings and read replies at existing safe boundaries, then acknowledge exact reply IDs. Unbound sessions never read a reply inbox.", SessionSchema(), false),
         Tool("launcher_unregister_project", "End an agent session and release any held project reservation or wait ticket.", SessionSchema(), false),
         Tool("launcher_project_events", "Get dashboard service action events and agent restart warnings since a cursor for this active project session only. Keep session token for brief reconnects; save nextSequence and deduplicate warnings by instanceId and sequence.",
             """{"type":"object","properties":{"projectId":{"type":"string"},"sessionToken":{"type":"string"},"sinceSequence":{"type":"integer","minimum":0}},"required":["projectId","sessionToken"],"additionalProperties":false}"""),
@@ -115,7 +124,7 @@ internal static class AgentMcpServer
                     {
                         protocolVersion = NegotiatedVersion(parameters),
                         capabilities = new { tools = new { listChanged = false } },
-                        serverInfo = new { name = "full-stack-launcher", version = "1.2.0" },
+                        serverInfo = new { name = "full-stack-launcher", version = "1.3.0" },
                         instructions = Instructions
                     }),
                     "ping" => Success(idCopy, new { }),
@@ -161,6 +170,9 @@ internal static class AgentMcpServer
             "launcher_recent_activity" => "recent_activity",
             "launcher_reservation_status" => "reservation_status",
             "launcher_register_project" => "register_project",
+            "launcher_bind_reply_inbox" => "bind_reply_inbox",
+            "launcher_read_reply_inbox" => "read_reply_inbox",
+            "launcher_ack_reply_inbox" => "ack_reply_inbox",
             "launcher_heartbeat_project" => "heartbeat_project",
             "launcher_unregister_project" => "unregister_project",
             "launcher_project_events" => "project_events",
@@ -183,6 +195,8 @@ internal static class AgentMcpServer
             Owner = StringArg(args, "owner"),
             Purpose = StringArg(args, "purpose"),
             SessionToken = StringArg(args, "sessionToken"),
+            ChatId = StringArg(args, "chatId"),
+            ReplyIds = StringArrayArg(args, "replyIds", maximumCount: 100),
             LeaseToken = StringArg(args, "leaseToken"),
             Ticket = StringArg(args, "ticket"),
             RepositoryId = StringArg(args, "repositoryId"),
@@ -226,10 +240,10 @@ internal static class AgentMcpServer
         element.ValueKind == JsonValueKind.Object && element.TryGetProperty(name, out var value) &&
         value.ValueKind == JsonValueKind.Number && value.TryGetInt32(out var number) ? number : null;
 
-    private static string[]? StringArrayArg(JsonElement element, string name)
+    private static string[]? StringArrayArg(JsonElement element, string name, int maximumCount = 5)
     {
         if (element.ValueKind != JsonValueKind.Object || !element.TryGetProperty(name, out var value)
-            || value.ValueKind != JsonValueKind.Array || value.GetArrayLength() is < 1 or > 5) return null;
+            || value.ValueKind != JsonValueKind.Array || value.GetArrayLength() < 1 || value.GetArrayLength() > maximumCount) return null;
         var items = value.EnumerateArray().ToArray();
         return items.All(item => item.ValueKind == JsonValueKind.String)
             ? items.Select(item => item.GetString()!).ToArray() : null;

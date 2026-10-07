@@ -26,6 +26,11 @@ public partial class MainWindow
         if (_closed) return true;
         if (_closeRequested || _closing) return false;
         cancellationToken.ThrowIfCancellationRequested();
+        if (automaticReplacement && CodexCrewPanel.HasReplyDrafts)
+        {
+            Notice = "Finish or clear unsent Codex replies, then open the new launcher again. Apps remain running.";
+            return false;
+        }
         if (automaticReplacement && (!IsEnabled || _checkingStartupServices || _savingProjectEdits ||
             _addingProjectService || _batchBusy || _forceStopBatchBusy ||
             HasOpenReplacementDialog() ||
@@ -67,6 +72,7 @@ public partial class MainWindow
             try { if (!await ResolveProjectEditsForCloseAsync()) return false; }
             finally { _resolvingCloseDrafts = false; UpdateActions(); }
             if (_projectTasksWindow?.PrepareToClose() == false) return false;
+            if (!CodexCrewPanel.PrepareReplyDraftsForClose()) return false;
             cancellationToken.ThrowIfCancellationRequested();
             // Inspect idle services across every project. Busy services remain in
             // the choice without waiting for a potentially long maintenance command.
@@ -147,7 +153,10 @@ public partial class MainWindow
                 cancellationToken.ThrowIfCancellationRequested();
                 await Task.Run(() => { foreach (var runner in runners) runner.DisposeKeepingServicesRunning(); });
             }
+            // Finish owned account-reader cleanup before OnMainWindowClose can terminate the process.
+            await StopCodexAccountUsageAsync();
             _closed = true;
+            CodexCrewPanel.DiscardReplyDraftsAfterClose();
             Close();
             return true;
         }

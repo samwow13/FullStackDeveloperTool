@@ -78,6 +78,7 @@ public partial class MainWindow
         request.CancelAfter(TimeSpan.FromSeconds(25));
         _frontendBrowserRequests[service.Runner] = request;
         service.SetBrowserOpenStatus("Checking existing browser tabs…");
+        service.SetStatusMessage("Checking existing browser tabs…");
         var monitor = MonitorFrontendRequestAsync(project, service, generation, request);
         try
         {
@@ -89,7 +90,7 @@ public partial class MainWindow
             }, request.Token);
             if (!CanOpenFrontend(project, service, generation)) return;
             service.SetBrowserOpenStatus(result.Status);
-            Notice = $"{service.Name}: {result.Status}";
+            service.SetStatusMessage(result.Status);
         }
         catch (OperationCanceledException)
         {
@@ -97,7 +98,7 @@ public partial class MainWindow
             {
                 const string status = "Browser tab checking timed out. Automatic opening was skipped.";
                 service.SetBrowserOpenStatus(status);
-                Notice = $"{service.Name}: {status}";
+                service.SetStatusMessage(status);
             }
         }
         catch
@@ -106,7 +107,7 @@ public partial class MainWindow
             {
                 const string status = "Browser tab access was unavailable. Automatic opening was skipped.";
                 service.SetBrowserOpenStatus(status);
-                Notice = $"{service.Name}: {status}";
+                service.SetStatusMessage(status);
             }
         }
         finally

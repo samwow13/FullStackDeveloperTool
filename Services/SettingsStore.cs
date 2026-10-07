@@ -245,6 +245,8 @@ public sealed class SettingsStore
             settings.Layout.ServicesHeightShare = 0.35;
         if (settings.Layout.CodexCrewVisibleAgents is not (0 or 1 or 2 or 3 or 4 or 6))
             settings.Layout.CodexCrewVisibleAgents = 0;
+        if (settings.Layout.CodexCrewThoughtBubbleSeconds is < 3 or > 120)
+            settings.Layout.CodexCrewThoughtBubbleSeconds = 10;
         var toolIds = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         foreach (var tool in settings.DeveloperTools)
         {

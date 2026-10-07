@@ -180,7 +180,10 @@ public sealed class CodexActivityFeedService
             {
                 foreach (var (id, summary) in summaries)
                     if (_tracked.TryGetValue(id, out var tracked) && tracked.Agent.LatestTurnId == summary.TurnId)
+                    {
                         tracked.Summary = summary;
+                        tracked.MessageHistory = summary.MessageHistory;
+                    }
                 return _current = CreateSnapshot(true, _unlistedUnknownCount > 0
                     ? $"All local projects · {_unlistedUnknownCount} other chats have unknown status"
                     : "All local projects", now);
@@ -200,6 +203,26 @@ public sealed class CodexActivityFeedService
                 .Select(agent => agent.Id).ToHashSet(StringComparer.Ordinal);
             foreach (var id in _tracked.Values.Where(item => removable.Contains(ResolveFamilyRoot(item.Agent).Id))
                          .Select(item => item.Agent.Id).ToArray())
+                _tracked.Remove(id);
+            return _current = CreateSnapshot(_current.IsAvailable, _current.StatusText, _current.CheckedAt);
+        }
+    }
+
+    /// <summary>Removes one settled chat family from this dashboard's transient feed.</summary>
+    public CodexActivityFeedSnapshot DismissRecent(string agentId, string? activityIdentity)
+    {
+        lock (_stateLock)
+        {
+            var row = _current.Agents.FirstOrDefault(agent => agent.Id == agentId);
+            if (!_current.IsAvailable || row is not { CanDismiss: true } ||
+                row.ActivityIdentity != activityIdentity ||
+                !TryGetFamilyRoot(agentId, out var root) || ActivityIdentity(root) != activityIdentity ||
+                !FamilyMembers(agentId).All(item => !item.Missing && IsSettled(item)))
+                return _current;
+
+            // Remove hidden children too, so they cannot recreate the dismissed chat.
+            // A later observed active turn is tracked normally.
+            foreach (var id in FamilyMembers(agentId).Select(item => item.Agent.Id).ToArray())
                 _tracked.Remove(id);
             return _current = CreateSnapshot(_current.IsAvailable, _current.StatusText, _current.CheckedAt);
         }
@@ -350,6 +373,20 @@ public sealed class CodexActivityFeedService
             var text = summary?.Text ?? "Reading saved chat…";
             var source = summary?.Source ?? "Chat title";
             if (summary?.Text.Length == 0) text = title;
+            var feedbackIdentity = summary?.FeedbackIdentity;
+            if (feedbackIdentity is null && !string.IsNullOrWhiteSpace(agent.ParentId) &&
+                !tracked.Missing && agent.State == AgentRunState.Running)
+            {
+                // A newly observed child can start before its first saved update.
+                // Use its own assigned request when readable, otherwise report only the observed lifecycle.
+                feedbackIdentity = "subagent-start:" + agent.Id + ":" + (ActivityIdentity(agent) ??
+                    "observed:" + tracked.ObservedAt.Ticks.ToString(System.Globalization.CultureInfo.InvariantCulture));
+                if (summary is not { Text.Length: > 0 })
+                {
+                    text = "Started work.";
+                    source = "Local lifecycle";
+                }
+            }
             var stateDetail = tracked.Missing
                 ? "This agent is missing from readable local status. Completion is unconfirmed."
                 : unknownChild
@@ -380,7 +417,9 @@ public sealed class CodexActivityFeedService
                     HasFailedChildren = failedChildren && state == AgentRunState.Failed,
                     HasInputBlockedChildren = inputBlockedChildren && state == AgentRunState.NeedsInput,
                     CanDismiss = IsSettled(tracked) && !HasUnresolvedDescendant(agent.Id),
-                    ActivityIdentity = ActivityIdentity(agent) });
+                    ActivityIdentity = ActivityIdentity(agent),
+                    FeedbackIdentity = feedbackIdentity,
+                    MessageHistory = tracked.MessageHistory });
         }
         var chats = GroupChatRows(rows);
         return new(chats.OrderBy(row => row.NeedsInput ? 0 : row.IsRunning ? 1 : row.IsWaiting ? 2 : row.IsUnknown ? 3 : 4)
@@ -611,6 +650,7 @@ public sealed class CodexActivityFeedService
         public DateTimeOffset CompletionLastSeen { get; set; }
         public int CompletionScans { get; set; }
         public CodexActivityFeedSummary? Summary { get; set; }
+        public IReadOnlyList<CodexActivityMessage> MessageHistory { get; set; } = [];
     }
     private sealed record FamilyRoot(string Id);
 }

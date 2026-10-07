@@ -34,7 +34,14 @@ public partial class MainWindow
         get => _selectedNextCommitRepository;
         set
         {
+            // Picker rebuilding must not discard a same-scope arrival animation.
+            if (_updatingNextCommitRepositories) return;
             if (ReferenceEquals(_selectedNextCommitRepository, value)) return;
+            if (_selectedNextCommitRepository?.RepositoryId != value?.RepositoryId
+                || _selectedNextCommitRepository?.Branch != value?.Branch
+                || _selectedNextCommitRepository?.ConnectionId != value?.ConnectionId
+                || _selectedNextCommitRepository?.RemoteName != value?.RemoteName)
+                NextCommitMessagePreview?.StopNewEntryAnimation();
             _selectedNextCommitRepository = value;
             if (value is not null && SelectedProject is { } project && NextCommitRepositories.Contains(value))
                 _nextCommitRepositorySelections[project.Id] = value.RepositoryId;
@@ -48,7 +55,6 @@ public partial class MainWindow
     public bool HasNextCommitStatusNotice => _nextCommitStatus != NextCommitLiveStatus;
     public string NextCommitDraftHint => _nextCommitDraftHint;
     public bool HasNextCommitDraftHint => _nextCommitDraftHint.Length > 0;
-    public bool HasNextCommitMessage => _nextCommitMessage.Length > 0;
     public bool NextCommitOverLimit => _nextCommitMessage.Length > GitCommitMessage.MaximumLength;
     public string NextCommitCharacterCount => $"Commit message: {_nextCommitMessage.Length:N0} / {GitCommitMessage.MaximumLength:N0} characters";
     public string NextCommitLimitStatus => NextCommitOverLimit
@@ -86,8 +92,7 @@ public partial class MainWindow
 
     private async void GitCommit_Click(object sender, RoutedEventArgs e)
     {
-        if (SelectedProject is null || IsEditing || _closeRequested || _closing || _closed) return;
-        NextCommitVisible = true;
+        if (!NextCommitVisible || SelectedProject is null || IsEditing || _closeRequested || _closing || _closed) return;
         await RefreshNextCommitAsync(force: true);
     }
 
@@ -97,7 +102,7 @@ public partial class MainWindow
     private void CloseGitCommit_Click(object sender, RoutedEventArgs e)
     {
         NextCommitVisible = false;
-        if (!GitCommitButton.Focus()) SectionsMenuToggle.Focus();
+        SectionsMenuToggle.Focus();
     }
 
     private void ResetNextCommitProject()
@@ -169,15 +174,15 @@ public partial class MainWindow
                 {
                     NextCommitRepositories.Clear();
                     foreach (var choice in choices) NextCommitRepositories.Add(choice);
-                    SelectedNextCommitRepository = NextCommitRepositories.FirstOrDefault(choice => choice.RepositoryId == oldId)
-                        ?? NextCommitRepositories.FirstOrDefault();
                 }
                 finally { _updatingNextCommitRepositories = false; }
+                SelectedNextCommitRepository = NextCommitRepositories.FirstOrDefault(choice => choice.RepositoryId == oldId)
+                    ?? NextCommitRepositories.FirstOrDefault();
                 Changed(nameof(HasNextCommitRepositoryChoices));
             }
             UpdateNextCommitUnreadCount();
             _nextCommitStatus = discovery.Warning is not null
-                ? "Some repository folders could not be checked. Refresh or open Git."
+                ? "Some repository folders could not be checked. Open Git."
                 : choices.Length == 0
                 ? discovery.Folders.Any(folder => folder.State != nameof(GitBranchState.NotRepository))
                     ? "Git information is unavailable. Open Git to review the configured folders."
@@ -192,7 +197,7 @@ public partial class MainWindow
             _dashboardGitScopePending = false;
             _nextCommitBatches.Clear();
             _nextCommitUnviewedCount = 0;
-            _nextCommitStatus = "Preview unavailable. Refresh or open Git to review the configured folders.";
+            _nextCommitStatus = "Preview unavailable. Open Git to review the configured folders.";
             PresentNextCommit();
         }
         finally
@@ -245,17 +250,8 @@ public partial class MainWindow
         SynchronizeDashboardGitScope();
         UpdateNextCommitReminder();
         foreach (var name in new[] { nameof(NextCommitMessage), nameof(NextCommitPresentation), nameof(NextCommitStatus), nameof(HasNextCommitStatusNotice), nameof(NextCommitDraftHint), nameof(HasNextCommitDraftHint),
-            nameof(HasNextCommitMessage), nameof(NextCommitOverLimit), nameof(NextCommitCharacterCount),
+            nameof(NextCommitOverLimit), nameof(NextCommitCharacterCount),
             nameof(NextCommitLimitStatus), nameof(GitCommitButtonLabel) }) Changed(name);
-    }
-
-    private async void RefreshNextCommit_Click(object sender, RoutedEventArgs e) => await RefreshNextCommitAsync(force: true);
-
-    private void CopyNextCommit_Click(object sender, RoutedEventArgs e)
-    {
-        if (!HasNextCommitMessage) return;
-        try { Clipboard.SetText(NextCommitMessage); Notice = "Copied the next commit message."; }
-        catch (Exception) { Notice = "The commit message could not be copied. Try again."; }
     }
 
     private async void NextCommitMessage_ReadRequested(object? sender, CommitMessageReadEventArgs e)
@@ -329,7 +325,26 @@ public partial class MainWindow
         var displayed = batch.Entries.Where(entry => entry.ViewedAt is null && entry.Bullets.All(lines.ContainsKey)).ToArray();
         var ranges = displayed.SelectMany(entry => entry.Bullets).Distinct(StringComparer.OrdinalIgnoreCase)
             .SelectMany(bullet => lines[bullet]).Distinct().OrderBy(range => range.Start).ToArray();
-        return new(message, ranges, displayed.Length == 0 ? null : batch with { Entries = displayed });
+        CommitMessageHistory? history = null;
+        if (!includePlainLines && batch.Entries.Count > 3)
+        {
+            // Collapse only an exact generated message. Custom and captured review text
+            // retain their wording and order, even while newer ledger reports arrive.
+            var titleEnd = message.IndexOf("\n\n", StringComparison.Ordinal);
+            if (titleEnd >= 0 && message == GitCommitMessage.Compose(message[..titleEnd], batch))
+            {
+                var recent = GitCommitMessage.NewestFirst(batch).Take(3).ToArray();
+                var recentMessage = GitCommitMessage.Compose(message[..titleEnd], batch with { Entries = recent });
+                var recentDisplayed = displayed.Where(entry => recent.Any(item => item.Id == entry.Id)).ToArray();
+                var recentRanges = recentDisplayed.SelectMany(entry => entry.Bullets).Distinct(StringComparer.OrdinalIgnoreCase)
+                    .SelectMany(bullet => lines[bullet]).Distinct().OrderBy(range => range.Start).ToArray();
+                var scopeKey = string.Join("\0", GitConnectionService.NormalizeRoot(batch.RepositoryRoot).ToUpperInvariant(),
+                    batch.Branch, batch.RemoteName, batch.ConnectionId);
+                history = new(recentMessage.Length, recentRanges,
+                    recentDisplayed.Length == 0 ? null : batch with { Entries = recentDisplayed }, scopeKey);
+            }
+        }
+        return new(message, ranges, displayed.Length == 0 ? null : batch with { Entries = displayed }, history);
     }
 
     public sealed record NextCommitRepository(string RepositoryId, string RepositoryRoot, string? Branch, string? ConnectionId, string? RemoteName,

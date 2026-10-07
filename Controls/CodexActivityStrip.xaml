@@ -6,24 +6,208 @@
              UseLayoutRounding="True" SnapsToDevicePixels="True"
              AutomationProperties.Name="Codex crew, activity across all local chats">
     <UserControl.Resources>
+        <Style x:Key="DismissAgentButton" TargetType="Button">
+            <Setter Property="Width" Value="26"/>
+            <Setter Property="Height" Value="26"/>
+            <Setter Property="Foreground" Value="#F2D7A3"/>
+            <Setter Property="Background" Value="#182733"/>
+            <Setter Property="BorderBrush" Value="#42546B"/>
+            <Setter Property="BorderThickness" Value="1"/>
+            <Setter Property="Opacity" Value="0"/>
+            <Setter Property="IsHitTestVisible" Value="False"/>
+            <Setter Property="Visibility" Value="Collapsed"/>
+            <Setter Property="Cursor" Value="Hand"/>
+            <Setter Property="Template"><Setter.Value>
+                <ControlTemplate TargetType="Button">
+                    <Border x:Name="Frame" Background="{TemplateBinding Background}" BorderBrush="{TemplateBinding BorderBrush}"
+                            BorderThickness="{TemplateBinding BorderThickness}" CornerRadius="6">
+                        <ContentPresenter x:Name="WaveHand" HorizontalAlignment="Center" VerticalAlignment="Center"
+                                          RenderTransformOrigin="0.7,0.9">
+                            <ContentPresenter.RenderTransform><RotateTransform Angle="0"/></ContentPresenter.RenderTransform>
+                        </ContentPresenter>
+                    </Border>
+                    <ControlTemplate.Triggers>
+                        <Trigger Property="IsMouseOver" Value="True"><Setter TargetName="Frame" Property="Background" Value="#293F50"/></Trigger>
+                        <Trigger Property="IsKeyboardFocused" Value="True"><Setter TargetName="Frame" Property="BorderBrush" Value="#72E6CB"/></Trigger>
+                        <Trigger Property="IsPressed" Value="True"><Setter TargetName="Frame" Property="Background" Value="#315A57"/></Trigger>
+                        <Trigger Property="IsEnabled" Value="False"><Setter TargetName="Frame" Property="Opacity" Value="0.45"/></Trigger>
+                        <MultiDataTrigger>
+                            <MultiDataTrigger.Conditions>
+                                <Condition Binding="{Binding Animate}" Value="True"/>
+                                <Condition Binding="{Binding Opacity, RelativeSource={RelativeSource Self}}" Value="1"/>
+                                <Condition Binding="{Binding IsEnabled, RelativeSource={RelativeSource Self}}" Value="True"/>
+                                <Condition Binding="{Binding IsVisible, RelativeSource={RelativeSource Self}}" Value="True"/>
+                                <Condition Binding="{Binding IsPressed, RelativeSource={RelativeSource Self}}" Value="False"/>
+                                <Condition Binding="{Binding GoodbyeWaveEnabled, RelativeSource={RelativeSource AncestorType={x:Type controls:CodexActivityStrip}}}" Value="True"/>
+                            </MultiDataTrigger.Conditions>
+                            <MultiDataTrigger.EnterActions>
+                                <BeginStoryboard x:Name="GoodbyeWave">
+                                    <Storyboard RepeatBehavior="Forever">
+                                        <DoubleAnimationUsingKeyFrames Storyboard.TargetName="WaveHand"
+                                                Storyboard.TargetProperty="(UIElement.RenderTransform).(RotateTransform.Angle)" Duration="0:0:1.6">
+                                            <SplineDoubleKeyFrame KeyTime="0:0:0" Value="0"/>
+                                            <SplineDoubleKeyFrame KeyTime="0:0:0.12" Value="-16" KeySpline="0.4,0,0.2,1"/>
+                                            <SplineDoubleKeyFrame KeyTime="0:0:0.26" Value="14" KeySpline="0.4,0,0.2,1"/>
+                                            <SplineDoubleKeyFrame KeyTime="0:0:0.4" Value="-14" KeySpline="0.4,0,0.2,1"/>
+                                            <SplineDoubleKeyFrame KeyTime="0:0:0.54" Value="11" KeySpline="0.4,0,0.2,1"/>
+                                            <SplineDoubleKeyFrame KeyTime="0:0:0.66" Value="-6" KeySpline="0.4,0,0.2,1"/>
+                                            <SplineDoubleKeyFrame KeyTime="0:0:0.8" Value="0" KeySpline="0.4,0,0.2,1"/>
+                                            <SplineDoubleKeyFrame KeyTime="0:0:1.6" Value="0"/>
+                                        </DoubleAnimationUsingKeyFrames>
+                                    </Storyboard>
+                                </BeginStoryboard>
+                            </MultiDataTrigger.EnterActions>
+                            <MultiDataTrigger.ExitActions><RemoveStoryboard BeginStoryboardName="GoodbyeWave"/></MultiDataTrigger.ExitActions>
+                        </MultiDataTrigger>
+                    </ControlTemplate.Triggers>
+                </ControlTemplate>
+            </Setter.Value></Setter>
+            <Style.Triggers>
+                <DataTrigger Binding="{Binding CanClear}" Value="True"><Setter Property="Visibility" Value="Visible"/></DataTrigger>
+                <DataTrigger Binding="{Binding IsMouseOver, ElementName=ChatCard}" Value="True">
+                    <Setter Property="Opacity" Value="1"/>
+                    <Setter Property="IsHitTestVisible" Value="True"/>
+                </DataTrigger>
+                <Trigger Property="IsKeyboardFocusWithin" Value="True">
+                    <Setter Property="Opacity" Value="1"/>
+                    <Setter Property="IsHitTestVisible" Value="True"/>
+                </Trigger>
+            </Style.Triggers>
+        </Style>
+        <Style x:Key="ReplyAgentButton" TargetType="Button">
+            <Setter Property="Width" Value="26"/>
+            <Setter Property="Height" Value="26"/>
+            <Setter Property="Foreground" Value="#A6F2DE"/>
+            <Setter Property="Background" Value="#182733"/>
+            <Setter Property="BorderBrush" Value="#42546B"/>
+            <Setter Property="BorderThickness" Value="1"/>
+            <Setter Property="Opacity" Value="0"/>
+            <Setter Property="IsHitTestVisible" Value="False"/>
+            <Setter Property="Cursor" Value="Hand"/>
+            <Setter Property="Margin" Value="0,10,7,0"/>
+            <Setter Property="Template"><Setter.Value>
+                <ControlTemplate TargetType="Button">
+                    <Border x:Name="Frame" Background="{TemplateBinding Background}" BorderBrush="{TemplateBinding BorderBrush}"
+                            BorderThickness="{TemplateBinding BorderThickness}" CornerRadius="6">
+                        <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                    </Border>
+                    <ControlTemplate.Triggers>
+                        <Trigger Property="IsMouseOver" Value="True"><Setter TargetName="Frame" Property="Background" Value="#293F50"/></Trigger>
+                        <Trigger Property="IsKeyboardFocused" Value="True"><Setter TargetName="Frame" Property="BorderBrush" Value="#72E6CB"/></Trigger>
+                        <Trigger Property="IsPressed" Value="True"><Setter TargetName="Frame" Property="Background" Value="#315A57"/></Trigger>
+                    </ControlTemplate.Triggers>
+                </ControlTemplate>
+            </Setter.Value></Setter>
+            <Style.Triggers>
+                <DataTrigger Binding="{Binding CanClear}" Value="True"><Setter Property="Margin" Value="0,10,38,0"/></DataTrigger>
+                <DataTrigger Binding="{Binding IsMouseOver, ElementName=ChatCard}" Value="True">
+                    <Setter Property="Opacity" Value="1"/>
+                    <Setter Property="IsHitTestVisible" Value="True"/>
+                </DataTrigger>
+                <DataTrigger Binding="{Binding IsKeyboardFocusWithin, ElementName=ChatCard}" Value="True">
+                    <Setter Property="Opacity" Value="1"/>
+                    <Setter Property="IsHitTestVisible" Value="True"/>
+                </DataTrigger>
+            </Style.Triggers>
+        </Style>
+        <Style x:Key="ThoughtHistoryButton" TargetType="Button">
+            <Setter Property="Width" Value="25"/>
+            <Setter Property="Height" Value="23"/>
+            <Setter Property="Margin" Value="3,0,0,0"/>
+            <Setter Property="Foreground" Value="#21464C"/>
+            <Setter Property="Background" Value="#DFEEE5"/>
+            <Setter Property="BorderBrush" Value="#7FABA0"/>
+            <Setter Property="BorderThickness" Value="1"/>
+            <Setter Property="Focusable" Value="False"/>
+            <Setter Property="Template"><Setter.Value>
+                <ControlTemplate TargetType="Button">
+                    <Border x:Name="Frame" Background="{TemplateBinding Background}" BorderBrush="{TemplateBinding BorderBrush}"
+                            BorderThickness="{TemplateBinding BorderThickness}" CornerRadius="5">
+                        <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                    </Border>
+                    <ControlTemplate.Triggers>
+                        <Trigger Property="IsMouseOver" Value="True"><Setter TargetName="Frame" Property="Background" Value="#C8E3D5"/></Trigger>
+                        <Trigger Property="IsPressed" Value="True"><Setter TargetName="Frame" Property="Background" Value="#B4D5C5"/></Trigger>
+                        <Trigger Property="IsEnabled" Value="False">
+                            <Setter Property="Foreground" Value="#516D61"/>
+                            <Setter TargetName="Frame" Property="Background" Value="#E8F2EC"/>
+                            <Setter TargetName="Frame" Property="BorderBrush" Value="#B6CABE"/>
+                        </Trigger>
+                    </ControlTemplate.Triggers>
+                </ControlTemplate>
+            </Setter.Value></Setter>
+        </Style>
+        <DataTemplate x:Key="ThoughtBubble">
+            <DockPanel Margin="4,5,7,3" Background="Transparent" Focusable="False" KeyboardNavigation.TabNavigation="None"
+                        AutomationProperties.LiveSetting="Polite" AutomationProperties.Name="{Binding ThoughtBubbleText}">
+                <Canvas Height="24" Width="36" HorizontalAlignment="Left" Background="Transparent"
+                        Margin="{Binding ThoughtBubbleTailMargin}" DockPanel.Dock="{Binding ThoughtBubbleTailDock}"
+                        RenderTransformOrigin="0.5,0.5">
+                    <Canvas.RenderTransform><ScaleTransform ScaleY="{Binding ThoughtBubbleTailScaleY}"/></Canvas.RenderTransform>
+                    <Ellipse Width="12" Height="10" Canvas.Left="0" Canvas.Top="-2" Fill="#EFFBF4" Stroke="#21464C" StrokeThickness="2"/>
+                    <Ellipse Width="8" Height="7" Canvas.Left="2" Canvas.Top="10" Fill="#EFFBF4" Stroke="#21464C" StrokeThickness="1.5"/>
+                    <Ellipse Width="4" Height="4" Canvas.Left="4" Canvas.Top="20" Fill="#EFFBF4" Stroke="#21464C" StrokeThickness="1"/>
+                </Canvas>
+                <Border CornerRadius="20,24,20,22" Background="#EFFBF4" BorderBrush="#21464C" BorderThickness="2" Padding="12,8">
+                    <Border.Effect><DropShadowEffect Color="#000000" BlurRadius="9" ShadowDepth="3" Opacity="0.35"/></Border.Effect>
+                    <StackPanel>
+                    <TextBlock Text="{Binding Title}" Foreground="#31645F" FontSize="10" FontWeight="SemiBold"
+                               TextTrimming="CharacterEllipsis" Margin="0,0,0,4"/>
+                    <ScrollViewer MaxHeight="{Binding ThoughtBubbleMaxHeight}" HorizontalScrollBarVisibility="Disabled" VerticalScrollBarVisibility="Auto"
+                                  Background="Transparent" Padding="0,0,5,0" PreviewMouseWheel="ThoughtScroll_PreviewMouseWheel"
+                                  CanContentScroll="False" PanningMode="VerticalOnly" Focusable="False"
+                                  KeyboardNavigation.TabNavigation="None" KeyboardNavigation.ControlTabNavigation="None">
+                        <TextBlock Text="{Binding ThoughtBubbleText, NotifyOnTargetUpdated=True}" TargetUpdated="ThoughtMessage_TargetUpdated"
+                                   Foreground="#17343B" FontSize="12" FontWeight="Medium"
+                                   LineHeight="17" TextWrapping="Wrap"/>
+                    </ScrollViewer>
+                    <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,6,0,0">
+                        <TextBlock Text="{Binding ThoughtMessagePosition}" Foreground="#31645F" FontSize="10" VerticalAlignment="Center" Margin="0,0,4,0"/>
+                        <Button Content="‹" FontSize="18" Style="{StaticResource ThoughtHistoryButton}"
+                                IsEnabled="{Binding CanShowPreviousThought}" Click="PreviousThought_Click"
+                                ToolTip="Previous message" AutomationProperties.Name="Previous agent message"/>
+                        <Button Content="›" FontSize="18" Style="{StaticResource ThoughtHistoryButton}"
+                                IsEnabled="{Binding CanShowNextThought}" Click="NextThought_Click"
+                                ToolTip="Next message" AutomationProperties.Name="Next agent message"/>
+                    </StackPanel>
+                    </StackPanel>
+                </Border>
+            </DockPanel>
+        </DataTemplate>
         <Style x:Key="CrewViewMenuItem" TargetType="MenuItem">
             <Setter Property="Foreground" Value="{StaticResource TextBrush}"/>
             <Setter Property="Padding" Value="9,7"/>
             <Setter Property="Template"><Setter.Value>
                 <ControlTemplate TargetType="MenuItem">
-                    <Border x:Name="Frame" Background="Transparent" CornerRadius="4" Padding="{TemplateBinding Padding}">
-                        <Grid>
-                            <Grid.ColumnDefinitions><ColumnDefinition Width="20"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
-                            <TextBlock x:Name="Check" Text="✓" Foreground="{StaticResource AccentBrush}" Visibility="Hidden"/>
-                            <ContentPresenter Grid.Column="1" ContentSource="Header" RecognizesAccessKey="True"/>
-                        </Grid>
-                    </Border>
+                    <Grid>
+                        <Border x:Name="Frame" Background="Transparent" CornerRadius="4" Padding="{TemplateBinding Padding}">
+                            <Grid>
+                                <Grid.ColumnDefinitions><ColumnDefinition Width="20"/><ColumnDefinition Width="*"/><ColumnDefinition Width="14"/></Grid.ColumnDefinitions>
+                                <TextBlock x:Name="Check" Text="✓" Foreground="{StaticResource AccentBrush}" Visibility="Hidden"/>
+                                <ContentPresenter Grid.Column="1" ContentSource="Header" RecognizesAccessKey="True"/>
+                                <TextBlock x:Name="SubmenuArrow" Grid.Column="2" Text="›" HorizontalAlignment="Right" Visibility="Hidden"/>
+                            </Grid>
+                        </Border>
+                        <Popup x:Name="PART_Popup" Placement="Right" HorizontalOffset="2" AllowsTransparency="True" Focusable="False"
+                               IsOpen="{Binding IsSubmenuOpen, RelativeSource={RelativeSource TemplatedParent}}"
+                               PlacementTarget="{Binding RelativeSource={RelativeSource TemplatedParent}}">
+                            <Border Background="{StaticResource SurfaceBrush}" BorderBrush="{StaticResource BorderBrush}"
+                                    BorderThickness="1" CornerRadius="6" Padding="4" MinWidth="156">
+                                <ItemsPresenter KeyboardNavigation.DirectionalNavigation="Cycle" KeyboardNavigation.TabNavigation="Cycle"/>
+                            </Border>
+                        </Popup>
+                    </Grid>
                     <ControlTemplate.Triggers>
                         <Trigger Property="IsHighlighted" Value="True"><Setter TargetName="Frame" Property="Background" Value="#293F50"/></Trigger>
                         <Trigger Property="IsChecked" Value="True"><Setter TargetName="Check" Property="Visibility" Value="Visible"/></Trigger>
+                        <Trigger Property="HasItems" Value="True"><Setter TargetName="SubmenuArrow" Property="Visibility" Value="Visible"/></Trigger>
+                        <Trigger Property="IsEnabled" Value="False"><Setter Property="Foreground" Value="{StaticResource MutedBrush}"/></Trigger>
                     </ControlTemplate.Triggers>
                 </ControlTemplate>
             </Setter.Value></Setter>
+        </Style>
+        <Style x:Key="CrewForceClearMenuItem" TargetType="MenuItem" BasedOn="{StaticResource CrewViewMenuItem}">
+            <Setter Property="Foreground" Value="#F0D6A5"/>
         </Style>
         <Style x:Key="CrewViewMenu" TargetType="ContextMenu">
             <Setter Property="Foreground" Value="{StaticResource TextBrush}"/>
@@ -42,7 +226,8 @@
             </Setter.Value></Setter>
         </Style>
     </UserControl.Resources>
-    <Border CornerRadius="11" BorderThickness="1" BorderBrush="#34484E" Padding="14,11,14,10">
+    <Grid>
+    <Border CornerRadius="11" BorderThickness="1" BorderBrush="#42546B" Margin="0,10,0,0" Padding="12,22,12,10">
         <Border.Background>
             <LinearGradientBrush StartPoint="0,0" EndPoint="1,1">
                 <GradientStop Color="#18272D" Offset="0"/>
@@ -52,83 +237,8 @@
         </Border.Background>
         <Grid DataContext="{Binding ElementName=Crew}">
             <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
-            <Grid Margin="0,0,0,10">
-                <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
-                <Grid.ColumnDefinitions><ColumnDefinition Width="Auto"/><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
-                <StackPanel VerticalAlignment="Center" Margin="0,0,16,0"
-                            ToolTip="One card per local chat. Subagents appear under their chat title, sleep when finished, and do not add to chat counts. Codex must remain open; remote and cloud-only tasks are not covered.">
-                    <TextBlock Text="CODEX CREW" FontSize="11" FontWeight="Bold" Foreground="#A6F2DE"/>
-                    <TextBlock Text="All local chats" FontSize="10" Foreground="{StaticResource MutedBrush}" Margin="0,2,0,0"/>
-                </StackPanel>
-                <StackPanel VerticalAlignment="Center">
-                    <StackPanel.Style>
-                        <Style TargetType="StackPanel">
-                            <Setter Property="Grid.Column" Value="1"/>
-                            <Setter Property="Margin" Value="0,0,10,0"/>
-                            <Style.Triggers>
-                                <DataTrigger Binding="{Binding CompactHeader}" Value="True">
-                                    <Setter Property="Grid.Column" Value="0"/>
-                                    <Setter Property="Grid.Row" Value="1"/>
-                                    <Setter Property="Grid.ColumnSpan" Value="3"/>
-                                    <Setter Property="Margin" Value="0,8,0,0"/>
-                                </DataTrigger>
-                            </Style.Triggers>
-                        </Style>
-                    </StackPanel.Style>
-                    <TextBlock Text="{Binding ActivitySummary}" FontSize="13" FontWeight="SemiBold"
-                               TextTrimming="CharacterEllipsis" ToolTip="{Binding ActivitySummary}"
-                               AutomationProperties.LiveSetting="Polite"/>
-                    <TextBlock Text="{Binding ActivityHint}" Foreground="{StaticResource MutedBrush}" FontSize="10"
-                               TextTrimming="CharacterEllipsis" ToolTip="{Binding ActivityDetail}" Margin="0,2,0,0"
-                               AutomationProperties.LiveSetting="Polite" AutomationProperties.HelpText="{Binding ActivityDetail}"/>
-                </StackPanel>
-                <WrapPanel Orientation="Horizontal" VerticalAlignment="Center">
-                    <WrapPanel.Style>
-                        <Style TargetType="WrapPanel">
-                            <Setter Property="Grid.Column" Value="2"/>
-                            <Style.Triggers>
-                                <DataTrigger Binding="{Binding NarrowHeader}" Value="True">
-                                    <Setter Property="Grid.Column" Value="0"/>
-                                    <Setter Property="Grid.Row" Value="2"/>
-                                    <Setter Property="Grid.ColumnSpan" Value="3"/>
-                                    <Setter Property="Margin" Value="0,8,0,0"/>
-                                </DataTrigger>
-                            </Style.Triggers>
-                        </Style>
-                    </WrapPanel.Style>
-                <Button Content="Codex Watcher" Click="Watcher_Click"
-                        Padding="9,5" FontSize="11" Margin="0,0,6,0" Background="#1A2831"
-                        AutomationProperties.Name="Open Codex Watcher"
-                        ToolTip="Open Codex watcher, alerts, and watched-project settings."/>
-                <Button x:Name="ViewButton" Content="View ▾" Click="View_Click" PreviewKeyDown="View_PreviewKeyDown"
-                        Padding="9,5" FontSize="11" Margin="0,0,6,0" Background="#1A2831"
-                        AutomationProperties.Name="View, choose chats visible at once" AutomationProperties.HelpText="{Binding ViewDescription}"
-                        ToolTip="{Binding ViewDescription}">
-                    <Button.ContextMenu>
-                        <ContextMenu x:Name="ViewMenu" Style="{StaticResource CrewViewMenu}" Placement="Bottom"
-                                     Opened="ViewMenu_Opened" PreviewKeyDown="ViewMenu_PreviewKeyDown">
-                            <MenuItem Header="Auto (fit panel)" Tag="0" IsCheckable="True" Style="{StaticResource CrewViewMenuItem}" Click="ViewCount_Click"/>
-                            <MenuItem Header="1 chat" Tag="1" IsCheckable="True" Style="{StaticResource CrewViewMenuItem}" Click="ViewCount_Click"/>
-                            <MenuItem Header="2 chats" Tag="2" IsCheckable="True" Style="{StaticResource CrewViewMenuItem}" Click="ViewCount_Click"/>
-                            <MenuItem Header="3 chats" Tag="3" IsCheckable="True" Style="{StaticResource CrewViewMenuItem}" Click="ViewCount_Click"/>
-                            <MenuItem Header="4 chats" Tag="4" IsCheckable="True" Style="{StaticResource CrewViewMenuItem}" Click="ViewCount_Click"/>
-                            <MenuItem Header="6 chats" Tag="6" IsCheckable="True" Style="{StaticResource CrewViewMenuItem}" Click="ViewCount_Click"/>
-                        </ContextMenu>
-                    </Button.ContextMenu>
-                </Button>
-                <Button Content="Clear" Click="Clear_Click" IsEnabled="{Binding CanClear}"
-                        Padding="10,5" FontSize="11" Background="#1A2831" VerticalAlignment="Center"
-                        AutomationProperties.Name="Clear recent finished chats"
-                        ToolTip="Dismiss recent finished or interrupted chat families from this view. Active chats and their subagents stay visible. Chats and queue history are preserved."
-                        ToolTipService.ShowOnDisabled="True"/>
-                <Button Content="Force Clear" Click="ForceClear_Click" IsEnabled="{Binding CanForceClear}"
-                        Padding="10,5" FontSize="11" Margin="6,0,0,0" Background="#302B24" BorderBrush="#62523A" Foreground="#F0D6A5"
-                        AutomationProperties.Name="Force clear all tracked chats and watch for new work"
-                        AutomationProperties.HelpText="{Binding ActivityDetail}"
-                        ToolTip="Reset this view, including entries marked running or waiting. Old turns stay hidden across launcher restarts; new chats and new turns can appear. This does not stop Codex tasks or change queues."
-                        ToolTipService.ShowOnDisabled="True"/>
-                </WrapPanel>
-            </Grid>
+            <TextBlock Text="{Binding ActivityError}" Foreground="#FFACA9" FontSize="11" TextWrapping="Wrap" Margin="0,0,0,10"
+                       Visibility="{Binding HasActivityError, Converter={StaticResource BoolToVisibility}}" AutomationProperties.LiveSetting="Polite"/>
             <ScrollViewer x:Name="AgentScroller" Grid.Row="1" HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Disabled"
                           CanContentScroll="False" PanningMode="HorizontalOnly" PreviewMouseWheel="AgentScroller_PreviewMouseWheel"
                           Visibility="{Binding HasAgents, Converter={StaticResource BoolToVisibility}}"
@@ -137,65 +247,100 @@
                     <ItemsControl.ItemsPanel><ItemsPanelTemplate><StackPanel Orientation="Horizontal"/></ItemsPanelTemplate></ItemsControl.ItemsPanel>
                     <ItemsControl.ItemTemplate>
                         <DataTemplate>
-                            <Border Width="{Binding CardWidth, RelativeSource={RelativeSource AncestorType={x:Type controls:CodexActivityStrip}}}"
-                                    MinHeight="88" Margin="0,0,8,0" CornerRadius="8" BorderThickness="1"
-                                    BorderBrush="{Binding CardBorder}" Background="#111A24" Padding="8,7,11,7"
-                                    AutomationProperties.Name="{Binding AccessibleDescription}">
-                                <Border.ToolTip>
-                                    <ToolTip MaxWidth="460">
-                                        <StackPanel>
-                                            <TextBlock Text="{Binding Title}" FontWeight="SemiBold" TextWrapping="Wrap"/>
-                                            <TextBlock Text="{Binding Detail}" TextWrapping="Wrap" Margin="0,5,0,0"/>
-                                        </StackPanel>
-                                    </ToolTip>
-                                </Border.ToolTip>
+                            <Grid x:Name="ChatCard" Width="{Binding CardWidth, RelativeSource={RelativeSource AncestorType={x:Type controls:CodexActivityStrip}}}"
+                                  MinHeight="88" Margin="0,0,8,0"
+                                  AutomationProperties.Name="{Binding AccessibleDescription}" AutomationProperties.HelpText="{Binding Detail}">
+                                <Border CornerRadius="8" BorderThickness="1" Margin="0,8,0,7"
+                                        BorderBrush="{Binding CardBorder}" Background="#111A24" Padding="8,7,11,7">
                                 <Grid>
                                     <Grid.ColumnDefinitions><ColumnDefinition Width="72"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
-                                    <controls:CodexRobot State="{Binding State}" Animate="{Binding Animate}"
-                                                         VerticalAlignment="Center" HorizontalAlignment="Left"/>
+                                    <Border x:Name="ChatRobot" Width="68" Height="56" Background="Transparent"
+                                            MouseEnter="RobotHover_Enter" MouseLeave="RobotHover_Leave"
+                                            VerticalAlignment="Center" HorizontalAlignment="Left">
+                                        <controls:CodexRobot State="{Binding State}" Animate="{Binding Animate}"
+                                                             IsWaitingToSpeak="{Binding IsWaitingToSpeak}"
+                                                             IsHovered="{Binding IsMouseOver, ElementName=ChatRobot}"
+                                                             IsSpeaking="{Binding IsOpen, ElementName=ChatThoughtPopup}"/>
+                                    </Border>
+                                    <Popup x:Name="ChatThoughtPopup" PlacementTarget="{Binding ElementName=ChatRobot}" Placement="Custom"
+                                           AllowsTransparency="True" StaysOpen="True" PopupAnimation="None" Focusable="False"
+                                           KeyboardNavigation.TabNavigation="None" Loaded="ThoughtPopup_Loaded" Unloaded="ThoughtPopup_Unloaded">
+                                        <ContentControl Content="{Binding}" ContentTemplate="{StaticResource ThoughtBubble}"
+                                                        MouseEnter="ThoughtHover_Enter" MouseLeave="ThoughtHover_Leave"
+                                                        Width="300" Focusable="False" KeyboardNavigation.TabNavigation="None"/>
+                                    </Popup>
                                     <Grid Grid.Column="1">
-                                        <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="*"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
-                                        <TextBlock Text="{Binding Title}" FontSize="12" FontWeight="SemiBold" TextTrimming="CharacterEllipsis"/>
-                                        <ScrollViewer Grid.Row="1" MaxHeight="62" Margin="0,3,0,1"
+                                        <ScrollViewer MaxHeight="62" VerticalAlignment="Center"
                                                       HorizontalScrollBarVisibility="Disabled" VerticalScrollBarVisibility="Auto"
                                                       CanContentScroll="False" PanningMode="VerticalOnly"
                                                       Visibility="{Binding HasSubagents, Converter={StaticResource BoolToVisibility}}"
-                                                      ToolTip="{Binding SubagentSummary}" AutomationProperties.Name="{Binding SubagentSummary}">
+                                                      AutomationProperties.Name="{Binding SubagentSummary}">
                                         <ItemsControl ItemsSource="{Binding Subagents}">
                                             <ItemsControl.ItemsPanel><ItemsPanelTemplate><WrapPanel/></ItemsPanelTemplate></ItemsControl.ItemsPanel>
                                             <ItemsControl.ItemTemplate>
                                                 <DataTemplate>
-                                                    <Border Width="34" Height="28" Background="Transparent" Margin="0,0,3,2"
-                                                            AutomationProperties.Name="{Binding AccessibleDescription}">
-                                                        <Border.ToolTip>
-                                                            <ToolTip MaxWidth="380">
-                                                                <StackPanel>
-                                                                    <TextBlock Text="{Binding Title}" FontWeight="SemiBold" TextWrapping="Wrap"/>
-                                                                    <TextBlock Text="{Binding StateText}" Foreground="{Binding StateColor}" Margin="0,3,0,0"/>
-                                                                    <TextBlock Text="{Binding Detail}" TextWrapping="Wrap" Margin="0,5,0,0"/>
-                                                                </StackPanel>
-                                                            </ToolTip>
-                                                        </Border.ToolTip>
-                                                        <!-- Scale the complete native-size control, including every animated pose. -->
-                                                        <Viewbox Width="34" Height="28" Stretch="Uniform" StretchDirection="Both">
-                                                            <controls:CodexRobot Width="68" Height="56" State="{Binding State}" Animate="{Binding Animate}"/>
-                                                        </Viewbox>
+                                                    <Border x:Name="SubagentRobot" Background="Transparent" Width="34" Height="28" Margin="0,0,3,2"
+                                                            MouseEnter="RobotHover_Enter" MouseLeave="RobotHover_Leave"
+                                                            AutomationProperties.Name="{Binding AccessibleDescription}" AutomationProperties.HelpText="{Binding Detail}">
+                                                        <Grid>
+                                                            <!-- Scale the complete native-size control, including every animated pose. -->
+                                                            <Viewbox Width="34" Height="28" Stretch="Uniform" StretchDirection="Both" HorizontalAlignment="Left">
+                                                                <controls:CodexRobot Width="68" Height="56" State="{Binding State}" Animate="{Binding Animate}"
+                                                                                     IsWaitingToSpeak="{Binding IsWaitingToSpeak}"
+                                                                                     IsHovered="{Binding IsMouseOver, ElementName=SubagentRobot}"
+                                                                                     IsSpeaking="{Binding IsOpen, ElementName=SubagentThoughtPopup}"/>
+                                                            </Viewbox>
+                                                            <Popup x:Name="SubagentThoughtPopup" PlacementTarget="{Binding ElementName=SubagentRobot}" Placement="Custom"
+                                                                   AllowsTransparency="True" StaysOpen="True"
+                                                                   PopupAnimation="None" Focusable="False" KeyboardNavigation.TabNavigation="None"
+                                                                   Loaded="ThoughtPopup_Loaded" Unloaded="ThoughtPopup_Unloaded">
+                                                                <ContentControl Content="{Binding}" ContentTemplate="{StaticResource ThoughtBubble}"
+                                                                                MouseEnter="ThoughtHover_Enter" MouseLeave="ThoughtHover_Leave"
+                                                                                Width="300" Focusable="False" KeyboardNavigation.TabNavigation="None"/>
+                                                            </Popup>
+                                                        </Grid>
                                                     </Border>
                                                 </DataTemplate>
                                             </ItemsControl.ItemTemplate>
                                         </ItemsControl>
                                         </ScrollViewer>
-                                        <TextBlock Grid.Row="2" Text="{Binding TaskSummary}" FontSize="11" LineHeight="14" MaxHeight="29"
-                                                   Foreground="#AFBDCF" TextWrapping="Wrap" TextTrimming="CharacterEllipsis" Margin="0,3,0,3"/>
-                                        <DockPanel Grid.Row="3" LastChildFill="True">
-                                            <Ellipse Width="5" Height="5" Fill="{Binding StateColor}" VerticalAlignment="Center" Margin="0,0,5,0"/>
-                                            <TextBlock Text="{Binding StateText}" Foreground="{Binding StateColor}" FontSize="10"/>
-                                            <TextBlock Text="{Binding ProjectLabel, StringFormat= · folder: {0}}" Foreground="#899AAF" FontSize="10" TextTrimming="CharacterEllipsis"
-                                                       ToolTip="Workspace folder recorded by Codex. This may be a temporary or projectless folder, not a saved launcher project."/>
-                                        </DockPanel>
                                     </Grid>
                                 </Grid>
-                            </Border>
+                                </Border>
+                                <Border Background="#111A24" Padding="6,0"
+                                        HorizontalAlignment="Left" VerticalAlignment="Top">
+                                    <Border.Style>
+                                        <Style TargetType="Border">
+                                            <Setter Property="Margin" Value="12,0,44,0"/>
+                                            <Style.Triggers>
+                                                <DataTrigger Binding="{Binding CanClear}" Value="True"><Setter Property="Margin" Value="12,0,75,0"/></DataTrigger>
+                                            </Style.Triggers>
+                                        </Style>
+                                    </Border.Style>
+                                    <TextBlock Text="{Binding Title}" FontSize="12" FontWeight="SemiBold"
+                                               TextTrimming="CharacterEllipsis" ToolTip="{Binding Title}"/>
+                                </Border>
+                                <Border Background="#111A24" Padding="6,0" Margin="12,0,12,0"
+                                        HorizontalAlignment="Left" VerticalAlignment="Bottom">
+                                    <DockPanel LastChildFill="True">
+                                        <Ellipse Width="5" Height="5" Fill="{Binding StateColor}" VerticalAlignment="Center" Margin="0,0,5,0"/>
+                                        <TextBlock Text="{Binding StateText}" Foreground="{Binding StateColor}" FontSize="10"
+                                                   TextTrimming="CharacterEllipsis"/>
+                                    </DockPanel>
+                                </Border>
+                                <Button Style="{StaticResource ReplyAgentButton}" HorizontalAlignment="Right" VerticalAlignment="Top"
+                                        Click="ReplyAgent_Click" ToolTip="Reply to this chat" AutomationProperties.Name="Reply to chat"
+                                        AutomationProperties.HelpText="Save a response to this exact chat's MCP inbox and follow its receipt status.">
+                                    <TextBlock Text="&#xE97A;" FontFamily="Segoe MDL2 Assets" FontSize="14"/>
+                                </Button>
+                                <Button Style="{StaticResource DismissAgentButton}" HorizontalAlignment="Right" VerticalAlignment="Top"
+                                        Margin="0,10,7,0" Click="DismissAgent_Click"
+                                        IsEnabled="{Binding CanDismissCards, RelativeSource={RelativeSource AncestorType={x:Type controls:CodexActivityStrip}}}"
+                                        ToolTip="Dismiss finished chat" AutomationProperties.Name="Dismiss finished chat"
+                                        AutomationProperties.HelpText="Clear this finished chat and its subagents from Codex Crew. Chat and queue history are preserved.">
+                                    <TextBlock Text="👋" FontFamily="Segoe UI Emoji" FontSize="16"/>
+                                </Button>
+                            </Grid>
                         </DataTemplate>
                     </ItemsControl.ItemTemplate>
                 </ItemsControl>
@@ -214,4 +359,61 @@
             </Border>
         </Grid>
     </Border>
+    <Grid Margin="16,0,12,0" VerticalAlignment="Top">
+        <Grid.ColumnDefinitions><ColumnDefinition Width="Auto"/><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+        <Border Background="{StaticResource BackgroundBrush}" Padding="8,0" VerticalAlignment="Center">
+            <TextBlock Text="Codex Crew" Foreground="#A6F2DE" FontSize="15" FontWeight="SemiBold"/>
+        </Border>
+        <Border Grid.Column="1" Background="{StaticResource BackgroundBrush}" BorderBrush="#42546B" BorderThickness="1" CornerRadius="5"
+                Padding="8,2" Margin="12,0,0,0" HorizontalAlignment="Right" VerticalAlignment="Center">
+            <controls:CodexAccountUsageView Snapshot="{Binding AccountUsage, ElementName=Crew}"/>
+        </Border>
+        <Button x:Name="SettingsButton" Grid.Column="2" Content="&#xE713;" FontFamily="Segoe MDL2 Assets"
+                DataContext="{Binding ElementName=Crew}" Click="Settings_Click" PreviewKeyDown="Settings_PreviewKeyDown"
+                Width="28" Height="24" Padding="0" FontSize="13" Margin="6,0,0,0" VerticalAlignment="Center"
+                Background="{StaticResource BackgroundBrush}" BorderBrush="#42546B"
+                AutomationProperties.Name="Codex Crew settings" ToolTip="Codex Crew actions and settings">
+            <Button.ContextMenu>
+                <ContextMenu x:Name="SettingsMenu" Style="{StaticResource CrewViewMenu}" Placement="Bottom" MinWidth="240"
+                             DataContext="{Binding PlacementTarget.DataContext, RelativeSource={RelativeSource Self}}"
+                             Opened="SettingsMenu_Opened" Closed="SettingsMenu_Closed" PreviewKeyDown="SettingsMenu_PreviewKeyDown">
+                    <MenuItem x:Name="WatcherMenuItem" Header="Codex Watcher" Click="Watcher_Click" Style="{StaticResource CrewViewMenuItem}"
+                              AutomationProperties.Name="Open Codex Watcher" ToolTip="Open Codex watcher, alerts, and watched-project settings."/>
+                    <MenuItem x:Name="ViewOptionsItem" Header="View" Style="{StaticResource CrewViewMenuItem}"
+                              AutomationProperties.Name="View, choose chats visible at once" AutomationProperties.HelpText="{Binding ViewDescription}"
+                              ToolTip="{Binding ViewDescription}">
+                        <MenuItem Header="Auto (fit panel)" Tag="0" IsCheckable="True" Style="{StaticResource CrewViewMenuItem}" Click="ViewCount_Click"/>
+                        <MenuItem Header="1 chat" Tag="1" IsCheckable="True" Style="{StaticResource CrewViewMenuItem}" Click="ViewCount_Click"/>
+                        <MenuItem Header="2 chats" Tag="2" IsCheckable="True" Style="{StaticResource CrewViewMenuItem}" Click="ViewCount_Click"/>
+                        <MenuItem Header="3 chats" Tag="3" IsCheckable="True" Style="{StaticResource CrewViewMenuItem}" Click="ViewCount_Click"/>
+                        <MenuItem Header="4 chats" Tag="4" IsCheckable="True" Style="{StaticResource CrewViewMenuItem}" Click="ViewCount_Click"/>
+                        <MenuItem Header="6 chats" Tag="6" IsCheckable="True" Style="{StaticResource CrewViewMenuItem}" Click="ViewCount_Click"/>
+                    </MenuItem>
+                    <Separator/>
+                    <MenuItem Header="Clear" Click="Clear_Click" IsEnabled="{Binding CanClear}" Style="{StaticResource CrewViewMenuItem}"
+                              AutomationProperties.Name="Clear recent finished chats"
+                              ToolTip="Dismiss recent finished or interrupted chat families from this view. Active chats and their subagents stay visible. Chats and queue history are preserved."
+                              ToolTipService.ShowOnDisabled="True"/>
+                    <MenuItem Header="Force Clear" Click="ForceClear_Click" IsEnabled="{Binding CanForceClear}" Style="{StaticResource CrewForceClearMenuItem}"
+                              AutomationProperties.Name="Force clear all tracked chats and watch for new work"
+                              AutomationProperties.HelpText="{Binding ActivityDetail}"
+                              ToolTip="Reset this view, including entries marked running or waiting. Old turns stay hidden across launcher restarts; new chats and new turns can appear. This does not stop Codex tasks or change queues."
+                              ToolTipService.ShowOnDisabled="True"/>
+                    <Separator/>
+                    <MenuItem x:Name="BubbleEnabledItem" Header="Automatic thought bubbles" IsCheckable="True" StaysOpenOnClick="True"
+                              Style="{StaticResource CrewViewMenuItem}" Click="BubbleEnabled_Click"/>
+                    <MenuItem x:Name="BubbleDurationItem" Header="Show each update for" Style="{StaticResource CrewViewMenuItem}">
+                        <MenuItem Header="3 seconds" Tag="3" IsCheckable="True" Style="{StaticResource CrewViewMenuItem}" Click="BubbleDuration_Click"/>
+                        <MenuItem Header="5 seconds" Tag="5" IsCheckable="True" Style="{StaticResource CrewViewMenuItem}" Click="BubbleDuration_Click"/>
+                        <MenuItem Header="10 seconds" Tag="10" IsCheckable="True" Style="{StaticResource CrewViewMenuItem}" Click="BubbleDuration_Click"/>
+                        <MenuItem Header="15 seconds" Tag="15" IsCheckable="True" Style="{StaticResource CrewViewMenuItem}" Click="BubbleDuration_Click"/>
+                        <MenuItem Header="30 seconds" Tag="30" IsCheckable="True" Style="{StaticResource CrewViewMenuItem}" Click="BubbleDuration_Click"/>
+                        <MenuItem Header="60 seconds" Tag="60" IsCheckable="True" Style="{StaticResource CrewViewMenuItem}" Click="BubbleDuration_Click"/>
+                        <MenuItem Header="120 seconds" Tag="120" IsCheckable="True" Style="{StaticResource CrewViewMenuItem}" Click="BubbleDuration_Click"/>
+                    </MenuItem>
+                </ContextMenu>
+            </Button.ContextMenu>
+        </Button>
+    </Grid>
+    </Grid>
 </UserControl>

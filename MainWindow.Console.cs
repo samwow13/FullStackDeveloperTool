@@ -112,6 +112,21 @@ public partial class MainWindow
     {
         CloseCopyErrorsFeedback();
         if (ServiceFrom(sender) is not { } service) return;
+        CopyServiceErrorOutput(service, sender as FrameworkElement);
+    }
+
+    private void CopyServiceStatusError_Click(object sender, RoutedEventArgs e)
+    {
+        e.Handled = true;
+        CloseCopyErrorsFeedback();
+        if (ServiceFrom(sender) is not { } service) return;
+        service.Update();
+        if (!service.HasCopyableStatusError) return;
+        CopyServiceErrorOutput(service, sender as FrameworkElement, service.CardStatusDetail);
+    }
+
+    private void CopyServiceErrorOutput(ServiceViewModel service, FrameworkElement? target, string? currentError = null)
+    {
         var lines = service.ConsoleLines.ToArray();
         var included = new bool[lines.Length];
         var errorCount = 0;
@@ -123,17 +138,21 @@ public partial class MainWindow
             for (var context = Math.Max(0, index - 10); context <= index; context++)
                 included[context] = true;
         }
-        if (errorCount == 0)
+        if (errorCount == 0 && currentError is null)
         {
             Notice = $"No retained errors to copy for {service.Name}.";
             return;
         }
         try
         {
-            Clipboard.SetText(string.Join(Environment.NewLine,
-                lines.Where((_, index) => included[index]).Select(line => line.PlainText)));
-            Notice = $"Copied {errorCount:N0} {(errorCount == 1 ? "error" : "errors")} from {service.Name} with up to 10 preceding console entries per error.";
-            if (sender is FrameworkElement target) ShowCopyErrorsFeedback(target);
+            var copiedLines = lines.Where((_, index) => included[index]).ToArray();
+            var text = string.Join(Environment.NewLine, copiedLines.Select(line => line.PlainText));
+            if (currentError is not null && !copiedLines.Any(line => line.Message == currentError))
+                text = (text.Length == 0 ? "" : text + Environment.NewLine) + $"[ERROR] [{service.Name}] {currentError}";
+            Clipboard.SetText(text);
+            Notice = currentError is not null ? $"Copied current error from {service.Name}."
+                : $"Copied {errorCount:N0} {(errorCount == 1 ? "error" : "errors")} from {service.Name} with up to 10 preceding console entries per error.";
+            if (target is not null) ShowCopyErrorsFeedback(target);
         }
         catch (ExternalException)
         {

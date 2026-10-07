@@ -13,12 +13,16 @@ public sealed class LauncherSettings
 public sealed class WorkspaceLayout
 {
     public bool ProjectsVisible { get; set; } = true;
+    public bool SidebarAutoHide { get; set; }
     public bool ToolsVisible { get; set; } = true;
+    // Retained for settings compatibility; Services and batch controls are always visible.
     public bool ServicesVisible { get; set; } = true;
     public bool NextCommitVisible { get; set; }
     public bool CodexCrewVisible { get; set; } = true;
     // Zero lets the Codex crew choose a comfortable card count for the available width.
     public int CodexCrewVisibleAgents { get; set; }
+    public bool CodexCrewThoughtBubblesEnabled { get; set; } = true;
+    public int CodexCrewThoughtBubbleSeconds { get; set; } = 10;
     public bool ConsoleVisible { get; set; } = true;
     public bool DatabaseVisible { get; set; } = true;
     public double ConsoleShare { get; set; } = 0.47;

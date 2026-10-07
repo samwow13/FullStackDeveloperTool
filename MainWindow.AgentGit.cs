@@ -72,8 +72,25 @@ public partial class MainWindow
         EnsureAgentGitProjectCurrent(discovery);
         _ = _agentCoordination.SessionIdentity(project.Id, request.SessionToken ?? "");
         token.ThrowIfCancellationRequested();
-        var entry = await AgentGitChangeStore.RecordAsync(repository.RepositoryRoot, request.Branch,
+        var recorded = await AgentGitChangeStore.RecordWithResultAsync(repository.RepositoryRoot, request.Branch,
             connection.RemoteName, connection.ConnectionId, request.UpdateId, request.Bullets, token);
+        var entry = recorded.Entry;
+        if (recorded.IsNew)
+        {
+            ShowAgentGitUpdateNotice();
+            if (ReferenceEquals(SelectedProject, project))
+            {
+                if (SelectedNextCommitRepository is { } selected && selected.RepositoryId == repository.RepositoryId
+                    && selected.Branch == request.Branch && selected.ConnectionId == connection.ConnectionId
+                    && selected.RemoteName == connection.RemoteName)
+                    NextCommitMessagePreview.AnimateNewEntry(new AgentGitSummaryBatch
+                    {
+                        RepositoryRoot = repository.RepositoryRoot, Branch = request.Branch,
+                        RemoteName = connection.RemoteName, ConnectionId = connection.ConnectionId
+                    }, entry.Id);
+                _ = RefreshNextCommitAsync(force: true);
+            }
+        }
         return new
         {
             instanceId = _agentCoordination.InstanceId,
