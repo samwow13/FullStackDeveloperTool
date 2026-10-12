@@ -32,15 +32,22 @@ public partial class CodexStartAgentWindow : Window, IDashboardReplacementWindow
     private bool _preferencesAvailable;
     private bool _restoringModels;
     private bool _closingContext;
-    private bool _recoveryAvailable;
+    private bool _recoveryAvailable = true;
     private bool _showingFrozenModel;
     private bool _loadingAccess;
     private bool _accessAvailable;
     private bool _showingFrozenAccess;
     private CodexAgentChatReceipt? _pendingReceipt;
+    private string? _previousAttemptId;
+    private ComposerDraft? _composerDraft;
 
-    public string Draft => PromptBox.Text;
-    public bool DraftKeepAwake => KeepAwakeChoice.IsChecked == true;
+    // Submitted messages are immutable receipts, not unsent drafts for the next chat.
+    public string Draft => _composerDraft?.Text ?? (PendingAttemptId is null ? PromptBox.Text : "");
+    public bool DraftKeepAwake => _composerDraft?.KeepAwake ??
+        (PendingAttemptId is null && KeepAwakeChoice.IsChecked == true);
+    public IReadOnlyList<CodexAgentChatImage> UnsentDraftImages => _composerDraft?.Images ??
+        (PendingAttemptId is null ? DraftImages : []);
+    public string? RecoveryAttemptId => PendingAttemptId ?? _previousAttemptId;
     public bool HasUnsavedContext => !_discardContext && _preferences is not null &&
         !string.Equals(ContextBox.Text, _preferences.Context, StringComparison.Ordinal);
     public bool IsSubmitting { get; private set; }
@@ -55,7 +62,7 @@ public partial class CodexStartAgentWindow : Window, IDashboardReplacementWindow
         _projectId = projectId;
         _projectName = projectName;
         _folder = folder;
-        PendingAttemptId = pendingAttemptId;
+        _previousAttemptId = pendingAttemptId;
         InitializeComponent();
         ProjectTitle.Text = projectName;
         ProjectTitle.ToolTip = folder;
@@ -85,8 +92,9 @@ public partial class CodexStartAgentWindow : Window, IDashboardReplacementWindow
         {
             PromptBox.Focus();
             PromptBox.CaretIndex = PromptBox.Text.Length;
-            await CheckStatusAsync();
-            if (!_closed && PendingAttemptId is null && _recoveryAvailable && _preferencesAvailable)
+            // Start Agent always opens a composer. Old receipts are inspected only
+            // through Previous submission, never adopted as this draft's identity.
+            if (!_closed && _preferencesAvailable)
             {
                 await LoadAccessAsync();
                 if (_accessAvailable) await LoadModelsAsync();
@@ -102,7 +110,7 @@ public partial class CodexStartAgentWindow : Window, IDashboardReplacementWindow
 
     private async Task LoadModelsAsync()
     {
-        if (_loadingModels || IsSubmitting || PendingAttemptId is not null) return;
+        if (_loadingModels || IsSubmitting || PendingAttemptId is not null || _composerDraft is not null) return;
         _loadingModels = true;
         var wantedModel = (ModelChoice.SelectedItem as CodexModelOption)?.Id ?? _preferences?.ModelId ?? "";
         var wantedEffort = (EffortChoice.SelectedItem as CodexReasoningEffortOption)?.Id ?? _preferences?.ReasoningEffort ?? "";
@@ -164,7 +172,7 @@ public partial class CodexStartAgentWindow : Window, IDashboardReplacementWindow
 
     private async Task LoadAccessAsync()
     {
-        if (_loadingAccess || IsSubmitting || PendingAttemptId is not null || _accessAvailable) return;
+        if (_loadingAccess || IsSubmitting || PendingAttemptId is not null || _composerDraft is not null || _accessAvailable) return;
         _loadingAccess = true;
         UpdateControls();
         try
@@ -210,7 +218,8 @@ public partial class CodexStartAgentWindow : Window, IDashboardReplacementWindow
     private void UpdateControls()
     {
         if (_initializing) return;
-        var locked = IsSubmitting || _checkingStatus || _savingContext || _pastingImage || PendingAttemptId is not null;
+        var locked = IsSubmitting || _checkingStatus || _savingContext || _pastingImage ||
+            PendingAttemptId is not null || _composerDraft is not null;
         var canChoose = !locked && !_loadingModels && !_loadingAccess;
         ModelChoice.IsEnabled = canChoose;
         EffortChoice.IsEnabled = canChoose;
@@ -230,10 +239,21 @@ public partial class CodexStartAgentWindow : Window, IDashboardReplacementWindow
             AccessChoice.SelectedItem is AgentAccessOption &&
             (!string.IsNullOrWhiteSpace(PromptBox.Text) || _messageImages.Count > 0);
         StartButton.Content = IsSubmitting ? "Starting…" : "_Start Agent";
+        var showingSubmission = PendingAttemptId is not null || _composerDraft is not null;
+        Title = showingSubmission ? "Agent submission" : "Start Agent";
+        ChatModeTitle.Text = showingSubmission ? "Submitted Codex chat" : "New Codex chat";
+        StartButton.Visibility = showingSubmission ? Visibility.Collapsed : Visibility.Visible;
         CheckStatusButton.Visibility = PendingAttemptId is not null || !_recoveryAvailable ? Visibility.Visible : Visibility.Collapsed;
         CheckStatusButton.IsEnabled = !_checkingStatus && !IsSubmitting;
         ReviewButton.Visibility = _pendingReceipt?.RequiresReview == true ? Visibility.Visible : Visibility.Collapsed;
         ReviewButton.IsEnabled = !_checkingStatus && !IsSubmitting;
+        PreviousSubmissionButton.Visibility = PendingAttemptId is null && _composerDraft is null
+            ? Visibility.Visible : Visibility.Collapsed;
+        PreviousSubmissionButton.IsEnabled = canChoose && !_closingContext;
+        NewChatButton.Visibility = PendingAttemptId is not null || _composerDraft is not null
+            ? Visibility.Visible : Visibility.Collapsed;
+        NewChatButton.IsEnabled = !IsSubmitting && !_checkingStatus && !_savingContext && !_pastingImage &&
+            !_loadingAccess && !_loadingModels && !_closingContext;
     }
 
     private async void Refresh_Click(object sender, RoutedEventArgs e)
@@ -339,11 +359,13 @@ public partial class CodexStartAgentWindow : Window, IDashboardReplacementWindow
 
     private void ApplyReceipt(CodexAgentChatReceipt receipt)
     {
+        if (receipt.Request.ProjectId != _projectId)
+            throw new InvalidOperationException("The saved submission belongs to another project. Its receipt was preserved.");
         ThreadId = receipt.ThreadId;
         KeepAwakeChoice.IsChecked = receipt.Request.KeepAwake;
         if (receipt.IsAccepted)
         {
-            SentSuccessfully = true;
+            if (_composerDraft is null) SentSuccessfully = true;
             PendingAttemptId = null;
             _pendingReceipt = null;
             PromptBox.Clear();
@@ -364,7 +386,6 @@ public partial class CodexStartAgentWindow : Window, IDashboardReplacementWindow
             if (string.IsNullOrEmpty(PromptBox.Text))
             {
                 PromptBox.Text = receipt.Request.Prompt;
-                if (!HasUnsavedContext) ContextBox.Text = receipt.Request.Context;
             }
             if (ModelChoice.Items.Count == 0 || _showingFrozenModel)
             {
@@ -386,7 +407,7 @@ public partial class CodexStartAgentWindow : Window, IDashboardReplacementWindow
                 .First(option => option.Mode == receipt.Request.AccessMode);
             _showingFrozenAccess = true;
             ShowStatus((string.IsNullOrWhiteSpace(receipt.Summary) ? "Chat submission is not confirmed." : receipt.Summary) +
-                " Your message is kept. Check status before starting another chat.", error: true);
+                " Submission is kept. Check status to inspect this request, or choose New chat for a separate conversation.", error: true);
         }
         else
         {
@@ -397,6 +418,87 @@ public partial class CodexStartAgentWindow : Window, IDashboardReplacementWindow
                 error: true);
         }
         UpdateControls();
+    }
+
+    private sealed record ComposerDraft(string Text, IReadOnlyList<CodexAgentChatImage> Images, bool KeepAwake,
+        System.Collections.IEnumerable? Models, CodexModelOption? Model, CodexReasoningEffortOption? Effort,
+        AgentAccessOption? Access);
+
+    private async void PreviousSubmission_Click(object sender, RoutedEventArgs e)
+    {
+        if (!PreviousSubmissionButton.IsEnabled) return;
+        _checkingStatus = true;
+        UpdateControls();
+        try
+        {
+            var receipt = await Task.Run(() => _previousAttemptId is { } attemptId
+                ? _client.ReadReceipt(attemptId) : _client.FindPendingReceipt(_projectId));
+            if (_closed) return;
+            if (receipt is null)
+            {
+                ShowStatus("No unresolved agent submissions for this project.");
+                return;
+            }
+            if (receipt.Request.ProjectId != _projectId)
+                throw new InvalidOperationException("The saved submission belongs to another project. Its receipt was preserved.");
+            _composerDraft = new(PromptBox.Text, DraftImages, KeepAwakeChoice.IsChecked == true,
+                ModelChoice.ItemsSource, ModelChoice.SelectedItem as CodexModelOption,
+                EffortChoice.SelectedItem as CodexReasoningEffortOption, AccessChoice.SelectedItem as AgentAccessOption);
+            _previousAttemptId = receipt.AttemptId;
+            PromptBox.Clear();
+            ModelChoice.ItemsSource = null;
+            ApplyReceipt(receipt);
+        }
+        catch (Exception ex)
+        {
+            if (!_closed) ShowStatus("Previous submission could not be read. Your draft is kept. " +
+                SensitiveDataProtection.Redact(ex.Message), error: true);
+        }
+        finally
+        {
+            _checkingStatus = false;
+            if (!_closed) UpdateControls();
+        }
+    }
+
+    private async void NewChat_Click(object sender, RoutedEventArgs e)
+    {
+        if (NewChatButton.IsEnabled) await RestoreComposerAsync();
+    }
+
+    private async Task RestoreComposerAsync()
+    {
+        _previousAttemptId = PendingAttemptId ?? _previousAttemptId;
+        PendingAttemptId = null;
+        _pendingReceipt = null;
+        _recoveryAvailable = true;
+        ClearFrozenModel();
+        var draft = _composerDraft;
+        _composerDraft = null;
+        PromptBox.Text = draft?.Text ?? "";
+        RestoreMessageImages(draft?.Images ?? []);
+        KeepAwakeChoice.IsChecked = draft?.KeepAwake == true;
+        if (draft is not null)
+        {
+            _restoringModels = true;
+            try
+            {
+                ModelChoice.ItemsSource = draft.Models;
+                ModelChoice.SelectedItem = draft.Model;
+                SetEfforts(draft.Model, draft.Effort?.Id ?? "");
+                AccessChoice.SelectedItem = draft.Access;
+                _accessAvailable = draft.Access is not null;
+            }
+            finally { _restoringModels = false; }
+        }
+        ClearStatus();
+        UpdateControls();
+        if (_preferencesAvailable)
+        {
+            await LoadAccessAsync();
+            if (_accessAvailable && ModelChoice.Items.Count == 0) await LoadModelsAsync();
+        }
+        if (!_closed) PromptBox.Focus();
     }
 
     private void ClearFrozenModel()
@@ -430,7 +532,7 @@ public partial class CodexStartAgentWindow : Window, IDashboardReplacementWindow
             "Submission outcome is unknown. Review this chat in Codex, or recent tasks if no chat ID was recorded.\n\n" +
             $"Chat ID: {receipt.ThreadId ?? "Not recorded"}\nTurn ID: {receipt.TurnId ?? "Not recorded"}\n\n" +
             "Have you confirmed the original request is no longer active and want to prepare a separate new chat?\n\n" +
-            "Yes keeps the saved submission receipt and clears this message editor. It does not send another message.",
+            "Yes keeps the saved submission receipt and returns to the new chat draft. It does not send another message.",
             "Review agent submission", MessageBoxButton.YesNo, MessageBoxImage.Question, MessageBoxResult.No);
         if (choice != MessageBoxResult.Yes) return;
         _checkingStatus = true;
@@ -441,11 +543,8 @@ public partial class CodexStartAgentWindow : Window, IDashboardReplacementWindow
             if (_closed) return;
             PendingAttemptId = null;
             _pendingReceipt = null;
+            _previousAttemptId = null;
             _recoveryAvailable = true;
-            PromptBox.Clear();
-            ClearMessageImages();
-            ClearFrozenModel();
-            ShowStatus("Submission review recorded. Write a message to start a separate new chat.");
         }
         catch (Exception ex)
         {
@@ -457,17 +556,18 @@ public partial class CodexStartAgentWindow : Window, IDashboardReplacementWindow
             _checkingStatus = false;
             if (!_closed) UpdateControls();
         }
-        if (!_closed && PendingAttemptId is null && _preferencesAvailable)
+        if (!_closed && PendingAttemptId is null)
         {
-            await LoadAccessAsync();
-            if (_accessAvailable) await LoadModelsAsync();
+            await RestoreComposerAsync();
+            ShowStatus("Submission review recorded.");
         }
     }
 
     private async void CheckStatus_Click(object sender, RoutedEventArgs e)
     {
         await CheckStatusAsync();
-        if (!_closed && PendingAttemptId is null && _preferencesAvailable && _recoveryAvailable && ModelChoice.Items.Count == 0)
+        if (!_closed && PendingAttemptId is null && _composerDraft is null && _preferencesAvailable &&
+            _recoveryAvailable && ModelChoice.Items.Count == 0)
         {
             await LoadAccessAsync();
             if (_accessAvailable) await LoadModelsAsync();
@@ -476,19 +576,16 @@ public partial class CodexStartAgentWindow : Window, IDashboardReplacementWindow
 
     private async Task CheckStatusAsync()
     {
-        if (_checkingStatus) return;
+        if (_checkingStatus || PendingAttemptId is null) return;
         var attemptId = PendingAttemptId;
         _checkingStatus = true;
         UpdateControls();
         try
         {
-            var receipt = await Task.Run(() => attemptId is null
-                ? _client.FindPendingReceipt(_projectId) : _client.ReadReceipt(attemptId));
+            var receipt = await Task.Run(() => _client.ReadReceipt(attemptId));
             if (_closed) return;
             _recoveryAvailable = true;
-            if (receipt is null && attemptId is not null)
-                ShowStatus("The saved submission could not be found. Your message is kept; submission remains locked to prevent a duplicate chat.", error: true);
-            else if (receipt is not null) ApplyReceipt(receipt);
+            ApplyReceipt(receipt);
         }
         catch (Exception ex)
         {

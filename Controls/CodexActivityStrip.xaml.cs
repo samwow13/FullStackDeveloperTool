@@ -168,7 +168,11 @@ public partial class CodexActivityStrip : UserControl, INotifyPropertyChanged
     private async void Strip_Loaded(object sender, RoutedEventArgs e)
     {
         if (_lifetime is not null) return;
-        _lifetime = new CancellationTokenSource();
+        var lifetime = _lifetime = new CancellationTokenSource();
+        var token = lifetime.Token;
+        _muteLoaded = false;
+        ApplyMuteCards();
+        NotifyView();
         SystemParameters.StaticPropertyChanged += MotionPreferenceChanged;
         PropertyChanged?.Invoke(this, new(nameof(GoodbyeWaveEnabled)));
         _hostWindow = Window.GetWindow(this);
@@ -179,6 +183,8 @@ public partial class CodexActivityStrip : UserControl, INotifyPropertyChanged
             _hostWindow.Deactivated += HostActivityChanged;
             _hostWindow.LocationChanged += HostLocationChanged;
         }
+        await LoadMuteAsync(token);
+        if (!ReferenceEquals(_lifetime, lifetime) || token.IsCancellationRequested) return;
         UpdateCardSize();
         _timer.Start();
         await RefreshAsync();
@@ -240,10 +246,11 @@ public partial class CodexActivityStrip : UserControl, INotifyPropertyChanged
         var scopeVersion = _projectScopeVersion;
         var projectId = _selectedProjectId;
         var keepAwakeRevision = _keepAwakeRevision;
-        var muteRevision = _muteRevision;
         _refreshing = true;
         try
         {
+            await LoadMuteAsync(token);
+            if (token.IsCancellationRequested) return;
             var read = await Task.Run(() =>
             {
                 token.ThrowIfCancellationRequested();
@@ -253,13 +260,12 @@ public partial class CodexActivityStrip : UserControl, INotifyPropertyChanged
                 _feed ??= new CodexActivityFeedService(codexHome,
                     new SettingsStore().SettingsPath + ".codex-crew-reset.json");
                 var snapshot = _feed.ReadSnapshot(projects, token);
-                return (Snapshot: snapshot, KeepAwake: ReadKeepAwake(snapshot, projectId), Mute: ReadMute(token));
+                return (Snapshot: snapshot, KeepAwake: ReadKeepAwake(snapshot, projectId));
             }, token);
             if (token.IsCancellationRequested) return;
             if (scopeVersion != _projectScopeVersion) { _projectRefreshPending = true; return; }
             _readFailed = false;
             if (keepAwakeRevision == _keepAwakeRevision) ApplyKeepAwakeRead(read.KeepAwake);
-            if (muteRevision == _muteRevision) ApplyMuteRead(read.Mute);
             Apply(read.Snapshot);
         }
         catch (OperationCanceledException) when (token.IsCancellationRequested) { }
@@ -275,6 +281,7 @@ public partial class CodexActivityStrip : UserControl, INotifyPropertyChanged
                 StatusText = "Local Codex activity could not be read. The launcher will retry automatically."
             });
             foreach (var agent in Agents) agent.MarkUnavailable();
+            ApplyMuteCards();
             ApplyKeepAwakeCards();
             NotifyView();
         }
@@ -307,6 +314,7 @@ public partial class CodexActivityStrip : UserControl, INotifyPropertyChanged
         {
             HideThoughtPopups();
             foreach (var agent in Agents) agent.MarkUnavailable();
+            ApplyMuteCards();
             ApplyKeepAwakeCards();
             NotifyView();
             return;
@@ -1025,20 +1033,24 @@ public partial class CodexActivityStrip : UserControl, INotifyPropertyChanged
         private CodexAgentKeepAwakeStatus _keepAwake = new(false, false, "Keep awake requires a connected Launcher-started agent.");
         private bool _changingKeepAwake;
         private bool _muted;
+        private bool _muteAll;
         private bool _canChangeMute = true;
         public bool IsMuted => _muted;
         public bool CanChangeMute => _canChangeMute;
         public string MuteButtonText => _muted ? "Muted" : "Mute";
-        public string MuteDescription => _muted
+        public string MuteDescription => _muteAll
+            ? "Unmute All to change this chat's mute choice. Messages remain available by hovering, clicking or focusing each robot."
+            : _muted
             ? "Unmute this chat and its subagents. Messages remain available by hovering, clicking or focusing each robot."
             : "Mute automatic messages and waving/talking for this chat and its subagents. Work, completion and sleep remain visible.";
-        public void SetMuted(bool muted, bool canChange = true)
+        public void SetMuted(bool muted, bool canChange = true, bool muteAll = false)
         {
-            var changed = _muted != muted || _canChangeMute != canChange;
+            var changed = _muted != muted || _canChangeMute != canChange || _muteAll != muteAll;
             _muted = muted;
+            _muteAll = muteAll;
             _canChangeMute = canChange;
             if (muted) HideBubbles();
-            foreach (var subagent in Subagents) subagent.SetMuted(muted, canChange);
+            foreach (var subagent in Subagents) subagent.SetMuted(muted, canChange, muteAll);
             if (changed) PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(null));
         }
         public bool KeepAwakeEnabled => _keepAwake.IsEnabled;
@@ -1391,7 +1403,7 @@ public partial class CodexActivityStrip : UserControl, INotifyPropertyChanged
                     if (oldIndex != index) Subagents.Move(oldIndex, index);
                     existing.Animate = _animate;
                 }
-                existing.SetMuted(_muted, _canChangeMute);
+                existing.SetMuted(_muted, _canChangeMute, _muteAll);
             }
         }
     }

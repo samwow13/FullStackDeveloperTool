@@ -19,7 +19,7 @@
                     <Border Grid.Column="1" Background="#EFFBF4" BorderBrush="#21464C" BorderThickness="2"
                             CornerRadius="20,22,20,5" Padding="14,11">
                         <StackPanel>
-                            <TextBlock Text="New Codex chat" Foreground="#31645F" FontSize="11" FontWeight="SemiBold" Margin="0,0,0,4"/>
+                            <TextBlock x:Name="ChatModeTitle" Text="New Codex chat" Foreground="#31645F" FontSize="11" FontWeight="SemiBold" Margin="0,0,0,4"/>
                             <TextBlock x:Name="ProjectTitle" Foreground="#17343B" FontSize="13" FontWeight="SemiBold"
                                        TextTrimming="CharacterEllipsis"/>
                         </StackPanel>
@@ -128,12 +128,16 @@
                  Visibility="Collapsed" AutomationProperties.Name="Agent start status" AutomationProperties.LiveSetting="Polite"/>
         <Grid Grid.Row="2" Margin="0,14,0,0">
             <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
-            <StackPanel Orientation="Horizontal">
+            <WrapPanel Margin="0,0,8,0">
+                <Button x:Name="PreviousSubmissionButton" Content="Previous submission…" Click="PreviousSubmission_Click"
+                        Padding="9,7" FontSize="11" ToolTip="Inspect a saved submission without changing your new chat draft"/>
                 <Button x:Name="CheckStatusButton" Content="Check status" Click="CheckStatus_Click" Visibility="Collapsed"
                         Padding="9,7" FontSize="11"/>
                 <Button x:Name="ReviewButton" Content="Review submission…" Click="Review_Click" Visibility="Collapsed"
                         Padding="9,7" FontSize="11" Margin="6,0,0,0"/>
-            </StackPanel>
+                <Button x:Name="NewChatButton" Content="New chat" Click="NewChat_Click" Visibility="Collapsed"
+                        Padding="9,7" FontSize="11" Margin="6,0,0,0" ToolTip="Return to your new chat draft; the saved submission is kept"/>
+            </WrapPanel>
             <StackPanel Grid.Column="1" Orientation="Horizontal">
                 <Button x:Name="CloseButton" Content="Close" Click="Close_Click" Margin="0,0,8,0"/>
                 <Button x:Name="StartButton" Content="_Start Agent" Style="{StaticResource PrimaryButton}"

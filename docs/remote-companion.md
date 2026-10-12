@@ -4,6 +4,10 @@ The companion is a separate Windows app whose source lives in `RemoteCompanion/`
 
 ## Connect another PC
 
+On the PC you want to access remotely, run Launcher and choose **Sections → Remote → Install Agent** at the top right. No computer selection is required. The launcher installs its bundled companion locally under the signed-in user's `%LOCALAPPDATA%\FullStackLauncher\RemoteCompanion` folder and opens local setup. Windows requests administrator approval or credentials for the existing Private/Domain LAN firewall rules. Setup then enables the companion's existing Windows sign-in startup preference and opens its pairing window in the original signed-in user's session, even when a different administrator approves UAC. Enable pairing there, then enter the code and approve the matching fingerprint from your remoting PC. Desktop permission remains a separate target-side choice. Existing running companions and background-service installations remain available for explicit review instead of being terminated or silently replaced.
+
+The manual route remains available:
+
 1. Copy `FullStackRemoteCompanion.exe` to the other Windows PC and run it there.
 2. Allow the companion on the private LAN using its firewall setup action. This requests administrator approval and creates rules only for the companion's discovery and management ports, restricted to local subnets on Private/Domain profiles.
 3. Enable pairing in the companion. It displays a temporary 12-character code.
@@ -12,7 +16,7 @@ The companion is a separate Windows app whose source lives in `RemoteCompanion/`
 
 Pairings persist using Windows-user DPAPI. Reopening Launcher reconnects to an approved companion without a Windows password. The companion can revoke an approved controller. Launcher's **Forget pairing** action in the companion options menu removes local trust; it does not revoke permission stored on the remote PC.
 
-The selected computer shows its available actions and companion connection status. **Companion setup** in the sidebar contains setup guidance. **Windows sign-in (advanced)** contains the separate WinRM connection form. **Device details** starts collapsed; requesting **System info** or **Processes** reveals the results.
+The selected computer shows its available actions and companion connection status. **Companion setup** in the sidebar contains setup guidance. **Windows sign-in (advanced)** contains the separate WinRM connection form for Windows management; local agent installation uses Windows UAC. **Device details** starts collapsed; requesting **System info** or **Processes** reveals the results.
 
 ## View and control the signed-in desktop
 

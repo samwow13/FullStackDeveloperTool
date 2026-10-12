@@ -24,6 +24,7 @@
 **/codex-monitor.settings.json*
 **/*.codex-crew-reset.json*
 **/*.codex-crew-mute.json*
+**/codex-crew-mute.dat*
 **/codex-reply-inbox.json*
 **/*.codex-reply-inbox.json*
 **/codex-project-associations.json*

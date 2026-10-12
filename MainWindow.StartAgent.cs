@@ -41,9 +41,9 @@ public partial class MainWindow
         {
             if (window is not null)
             {
-                if (!string.IsNullOrEmpty(window.Draft) || window.DraftImages.Count > 0 || window.PendingAttemptId is not null ||
+                if (!string.IsNullOrEmpty(window.Draft) || window.UnsentDraftImages.Count > 0 || window.RecoveryAttemptId is not null ||
                     (window.DraftKeepAwake && !window.SentSuccessfully))
-                    _startAgentDrafts[project.Id] = new(window.Draft, window.PendingAttemptId, window.DraftImages, window.DraftKeepAwake);
+                    _startAgentDrafts[project.Id] = new(window.Draft, window.RecoveryAttemptId, window.UnsentDraftImages, window.DraftKeepAwake);
                 else _startAgentDrafts.Remove(project.Id);
             }
             _startAgentWindow = null;

@@ -479,10 +479,11 @@
                     IsEnabled="{Binding CanStartAgent, ElementName=Crew}"
                     AutomationProperties.Name="Start Agent" ToolTip="Start a new Codex chat for the selected project"
                     ToolTipService.ShowOnDisabled="True"/>
-            <Button Content="Mute All" Click="MuteAll_Click" Margin="0,0,8,0" Padding="10,4"
+            <Button Content="{Binding MuteAllButtonText, ElementName=Crew}" Click="MuteAll_Click" Margin="0,0,8,0" Padding="10,4"
                     IsEnabled="{Binding CanMuteAll, ElementName=Crew}"
-                    AutomationProperties.Name="Mute all chats in selected project"
-                    ToolTip="Mute automatic messages and waving/talking for this project's current chats and their subagents"
+                    AutomationProperties.Name="{Binding MuteAllButtonText, ElementName=Crew}"
+                    AutomationProperties.HelpText="{Binding MuteAllDescription, ElementName=Crew}"
+                    ToolTip="{Binding MuteAllDescription, ElementName=Crew}"
                     ToolTipService.ShowOnDisabled="True"/>
         </StackPanel>
         <Border Grid.Column="1" Background="{StaticResource BackgroundBrush}" BorderBrush="#42546B" BorderThickness="1" CornerRadius="5"

@@ -98,6 +98,7 @@
                 <TextBlock x:Name="NetworkSummaryText" Foreground="{DynamicResource MutedBrush}" FontSize="12" Margin="0,3,12,0" TextTrimming="CharacterEllipsis"/>
             </StackPanel>
             <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center">
+                <Button x:Name="InstallAgentButton" Content="Install Agent" Click="InstallAgent_Click" Padding="12,7" Margin="0,0,8,0" AutomationProperties.Name="Install agent on this computer" ToolTip="Install the bundled agent on this PC. Windows requests administrator credentials for LAN firewall access; then pair from your remoting PC."/>
                 <Button x:Name="NetworkSettingsButton" Content="Network ▾" Click="NetworkSettings_Click" Padding="11,7" Margin="0,0,8,0" AutomationProperties.Name="Network settings" ToolTip="Choose a network or change the scan range."/>
                 <Button x:Name="ScanButton" Content="Scan LAN" Click="Scan_Click" Style="{StaticResource PrimaryButton}" MinWidth="94" Padding="12,7" ToolTip="Find other devices on the selected network. Companion PCs appear automatically."/>
                 <Button x:Name="CancelButton" Content="Cancel" Click="Cancel_Click" MinWidth="94" Padding="12,7" Visibility="Collapsed" AutomationProperties.Name="Cancel current remote operation"/>

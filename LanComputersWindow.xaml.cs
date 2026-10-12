@@ -308,7 +308,7 @@ public partial class LanComputersWindow : Window
         }, "Checking file sharing…");
     }
 
-    private async Task RunAsync(Func<CancellationToken, Task> operation, string status)
+    private async Task RunAsync(Func<CancellationToken, Task> operation, string status, string? cancellationStatus = null)
     {
         if (_busy || _closed) return;
         using var cancellation = new CancellationTokenSource();
@@ -319,7 +319,7 @@ public partial class LanComputersWindow : Window
         SetStatus(status);
         UpdateControls();
         try { await operation(cancellation.Token); }
-        catch (OperationCanceledException) { SetStatus($"Canceled · {_computers.Count} discovered device(s) retained."); }
+        catch (OperationCanceledException) { SetStatus(cancellationStatus ?? $"Canceled · {_computers.Count} discovered device(s) retained."); }
         catch (Exception ex) { SetStatus(ex.Message, error: true); }
         finally
         {
@@ -334,6 +334,7 @@ public partial class LanComputersWindow : Window
         if (!_ready || _closed) return;
         var computer = Selected;
         var remote = computer is { IsLocal: false, IsOnline: true };
+        InstallAgentButton.IsEnabled = !_busy;
         NetworkBox.IsEnabled = !_busy;
         RangeBox.IsEnabled = !_busy && NetworkBox.SelectedItem != null;
         NetworksButton.IsEnabled = !_busy;

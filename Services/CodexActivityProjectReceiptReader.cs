@@ -138,7 +138,7 @@ public sealed class CodexActivityProjectReceiptReader
     private static ReceiptIdentity[] ReadChatReceipt(JsonElement root, string attemptId)
     {
         RequireUniqueProperties(root);
-        if (Required(root, "version", JsonValueKind.Number).GetInt32() != 1 ||
+        if (Required(root, "version", JsonValueKind.Number).GetInt32() is not (1 or 2) ||
             Required(root, "attemptId", JsonValueKind.String).GetString() != attemptId) throw new InvalidDataException();
         var request = Required(root, "request", JsonValueKind.Object);
         RequireUniqueProperties(request);

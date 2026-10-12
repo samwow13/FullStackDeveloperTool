@@ -10,6 +10,7 @@
     <AssemblyName>FullStackLauncher</AssemblyName>
     <RootNamespace>FullStackLauncher</RootNamespace>
     <ApplicationIcon>Assets\launcher.ico</ApplicationIcon>
+    <RemoteCompanionPayloadDirectory>$(MSBuildProjectDirectory)\RemoteCompanion\publish\install-agent-payload</RemoteCompanionPayloadDirectory>
     <!-- Local data must never become implicit compile, resource, or content items. -->
     <DefaultItemExcludes>$(DefaultItemExcludes);Tests\**;artifacts\**;portable\**;publish\**;**\bin\**;**\obj\**;**\TestResults\**;**\node_modules\**;**\.git\**;**\.vs\**;**\monitor-runtime\**;**\api-runtime\**</DefaultItemExcludes>
     <DefaultItemExcludes>$(DefaultItemExcludes);**\.env;**\.env.*;**\secrets.json*;**\appsettings.Local.json*;**\appsettings.*.Local.json*;**\database-connections\**;**\database-connections*.dat*;**\api-secrets\**;**\api-secrets*.dat*;**\*.pfx;**\*.p12;**\*.key;**\*.pem</DefaultItemExcludes>
@@ -17,7 +18,7 @@
     <DefaultItemExcludes>$(DefaultItemExcludes);**\codex-reply-inbox.json*;**\*.codex-reply-inbox.json*;**\codex-agent-prompts.json*;**\*.codex-agent-prompts.json*;**\codex-agent-chats\**;**\*.codex-agent-chats\**</DefaultItemExcludes>
     <DefaultItemExcludes>$(DefaultItemExcludes);**\codex-project-associations.json*;**\*.codex-project-associations.json*</DefaultItemExcludes>
     <DefaultItemExcludes>$(DefaultItemExcludes);**\codex-agent-keep-awake\**;**\*.codex-agent-keep-awake\**</DefaultItemExcludes>
-    <DefaultItemExcludes>$(DefaultItemExcludes);**\*.codex-crew-mute.json*</DefaultItemExcludes>
+    <DefaultItemExcludes>$(DefaultItemExcludes);**\*.codex-crew-mute.json*;**\codex-crew-mute.dat*</DefaultItemExcludes>
     <DefaultItemExcludes>$(DefaultItemExcludes);RemoteCompanion\**</DefaultItemExcludes>
     <DefaultItemExcludes>$(DefaultItemExcludes);**\azure-devops-tokens\**</DefaultItemExcludes>
   </PropertyGroup>
@@ -37,5 +38,12 @@
     <EmbeddedResource Include="BrowserCaptureExtension\options.html" LogicalName="FullStackLauncher.BrowserCaptureExtension.options.html" />
     <EmbeddedResource Include="BrowserCaptureExtension\options.js" LogicalName="FullStackLauncher.BrowserCaptureExtension.options.js" />
     <EmbeddedResource Include="BrowserCaptureExtension\README.md" LogicalName="FullStackLauncher.BrowserCaptureExtension.README.md" />
+    <EmbeddedResource Include="$(RemoteCompanionPayloadDirectory)\FullStackRemoteCompanion.exe" LogicalName="FullStackLauncher.RemoteCompanion.exe" />
+    <RemoteCompanionPayloadSource Include="RemoteCompanion\*.cs;RemoteCompanion\RemoteCompanion.csproj;CompanionProtocol\RemoteProtocol.cs;Services\WindowsUserSecretProtection.cs;Assets\launcher.ico" />
   </ItemGroup>
+  <Target Name="PrepareRemoteCompanionPayload" BeforeTargets="PrepareResources"
+          Inputs="@(RemoteCompanionPayloadSource)"
+          Outputs="$(RemoteCompanionPayloadDirectory)\FullStackRemoteCompanion.exe">
+    <Exec Command="dotnet publish &quot;$(MSBuildProjectDirectory)\RemoteCompanion\RemoteCompanion.csproj&quot; --configuration $(Configuration) --runtime win-x64 --self-contained true -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true -p:PublishTrimmed=false -p:DebugType=None -p:DebugSymbols=false --output &quot;$(RemoteCompanionPayloadDirectory)&quot; --nologo" />
+  </Target>
 </Project>
