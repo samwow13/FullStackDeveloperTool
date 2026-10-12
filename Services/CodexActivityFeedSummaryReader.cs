@@ -10,6 +10,7 @@ namespace FullStackLauncher.Services;
 internal sealed record CodexActivityFeedSummary(string? TurnId, string Text, string Source)
 {
     public string? FeedbackIdentity { get; init; }
+    public string? ActivityIdentity { get; init; }
     public IReadOnlyList<CodexActivityFeedHistoryEntry> HistoryEntries { get; init; } = [];
     public IReadOnlyList<CodexActivityMessage> MessageHistory => HistoryEntries.Select(entry => entry.Message).ToArray();
 }
@@ -31,6 +32,7 @@ internal sealed partial class CodexActivityFeedSummaryReader(string codexHome)
     private const int MaximumMessageBytes = 48 * 1024;
     private const int MaximumHistoryMessages = 100;
     private readonly string _codexHome = NormalizePath(codexHome);
+    private readonly CodexLocalMetadata _metadata = new(NormalizePath(codexHome));
     private readonly Dictionary<string, CacheEntry> _cache = new(StringComparer.Ordinal);
     private int _nextOffset;
 
@@ -44,16 +46,16 @@ internal sealed partial class CodexActivityFeedSummaryReader(string codexHome)
         var current = agents.ToDictionary(agent => agent.Id, StringComparer.Ordinal);
         foreach (var id in requestedIds)
             if (_cache.TryGetValue(id, out var cached) && current.TryGetValue(id, out var agent) &&
-                cached.Summary.TurnId == agent.LatestTurnId && !IsOpaqueEncodedText(cached.Summary.Text))
+                cached.Summary.TurnId == agent.LatestTurnId && cached.ActivityIdentity == agent.ActivityIdentity &&
+                !IsOpaqueEncodedText(cached.Summary.Text))
                 result[id] = cached.Summary;
 
         try
         {
-            using var database = new NativeSqlite(Path.Combine(_codexHome, "state_5.sqlite"));
-            // Query paths only. Message content is restricted to explicitly selected JSONL files below.
-            var paths = database.Query("SELECT id, rollout_path FROM threads")
-                .Where(row => row[0] is not null && requested.Contains(row[0]!))
-                .ToDictionary(row => row[0]!, row => row[1], StringComparer.Ordinal);
+            // Reuse paths from the same verified lifecycle snapshot, including pre-SQLite CLI history.
+            // Message content remains restricted to explicitly selected JSONL files below.
+            var paths = current.Values.Where(agent => requested.Contains(agent.Id))
+                .ToDictionary(agent => agent.Id, agent => agent.RolloutPath, StringComparer.Ordinal);
             var readCount = Math.Min(MaximumReadsPerPoll, requestedIds.Count);
             var start = _nextOffset % requestedIds.Count;
             for (var index = 0; index < readCount; index++)
@@ -77,12 +79,13 @@ internal sealed partial class CodexActivityFeedSummaryReader(string codexHome)
                     var file = new FileInfo(path!);
                     if (_cache.TryGetValue(id, out var cached) && cached.Path == path &&
                         cached.Length == file.Length && cached.Modified == file.LastWriteTimeUtc &&
-                        cached.Summary.TurnId == agent.LatestTurnId && !IsOpaqueEncodedText(cached.Summary.Text))
+                        cached.Summary.TurnId == agent.LatestTurnId && cached.ActivityIdentity == agent.ActivityIdentity &&
+                        !IsOpaqueEncodedText(cached.Summary.Text))
                     {
                         result[id] = cached.Summary;
                         continue;
                     }
-                    var summary = ReadTail(path!, agent.LatestTurnId, token);
+                    var summary = ReadTail(path!, agent.LatestTurnId, token, agent.ActivityIdentity);
                     // Keep earlier messages as the bounded tail advances, including prior turns.
                     // A changed path or a truncated/rewritten file starts a separate history.
                     var history = MergeHistory(cached is not null && cached.Path == path &&
@@ -91,6 +94,7 @@ internal sealed partial class CodexActivityFeedSummaryReader(string codexHome)
                     // A bounded tail can lose earlier same-turn content. Do not replace a known
                     // actual update with a request/start fallback and replay it after recovery.
                     if (cached is not null && cached.Summary.TurnId == agent.LatestTurnId &&
+                        cached.ActivityIdentity == agent.ActivityIdentity &&
                         !IsOpaqueEncodedText(cached.Summary.Text) &&
                         (summary.Text.Length == 0 || summary.FeedbackIdentity is null && HasActualFeedback(cached.Summary)))
                     {
@@ -104,7 +108,7 @@ internal sealed partial class CodexActivityFeedSummaryReader(string codexHome)
                         summary = summary with { FeedbackIdentity = latest.Message.Identity };
                     summary = summary with { HistoryEntries = history };
                     result[id] = summary;
-                    _cache[id] = new(path!, file.Length, file.LastWriteTimeUtc, summary);
+                    _cache[id] = new(path!, file.Length, file.LastWriteTimeUtc, summary, agent.ActivityIdentity);
                 }
                 catch (OperationCanceledException) { throw; }
                 catch (Exception ex) when (IsReadFailure(ex))
@@ -121,7 +125,8 @@ internal sealed partial class CodexActivityFeedSummaryReader(string codexHome)
                 if (!result.ContainsKey(id) && current.TryGetValue(id, out var agent))
                     result[id] = new(agent.LatestTurnId, "", "Chat title · saved chat unavailable");
         }
-        return result;
+        return result.ToDictionary(pair => pair.Key, pair => current.TryGetValue(pair.Key, out var agent)
+            ? pair.Value with { ActivityIdentity = agent.ActivityIdentity } : pair.Value, StringComparer.Ordinal);
     }
 
     private static bool HasActualFeedback(CodexActivityFeedSummary summary) =>
@@ -164,8 +169,12 @@ internal sealed partial class CodexActivityFeedSummaryReader(string codexHome)
         result[id] = new(turnId, "", "Chat title · saved chat unavailable");
     }
 
-    private static CodexActivityFeedSummary ReadTail(string path, string? expectedTurnId, CancellationToken token)
+    private static CodexActivityFeedSummary ReadTail(string path, string? expectedTurnId, CancellationToken token,
+        string? activityIdentity = null)
     {
+        var summaryTurnId = expectedTurnId;
+        if (expectedTurnId is null && activityIdentity?.StartsWith("start:", StringComparison.Ordinal) == true)
+            expectedTurnId = activityIdentity;
         using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
         var offset = Math.Max(0, stream.Length - MaximumTailBytes);
         stream.Seek(offset, SeekOrigin.Begin);
@@ -204,6 +213,11 @@ internal sealed partial class CodexActivityFeedSummaryReader(string codexHome)
                 try
                 {
                     var record = ReadLine(bytes.AsSpan(lineStart, index - lineStart));
+                    if (record.StartsTurn && record.TurnId is null)
+                        record = record with
+                        {
+                            TurnId = "start:" + (offset + lineStart).ToString(System.Globalization.CultureInfo.InvariantCulture)
+                        };
                     if (record.TurnId is not null && record.TurnId != currentTurnId)
                     {
                         if (expectedTurnSeen && expectedTurnId is not null && record.TurnId != expectedTurnId)
@@ -289,10 +303,10 @@ internal sealed partial class CodexActivityFeedSummaryReader(string codexHome)
                 finally { lineStart = index + 1; }
             }
             var summary = !string.IsNullOrWhiteSpace(commentary)
-                ? new CodexActivityFeedSummary(expectedTurnId, commentary, commentarySource ?? "Latest saved update") { FeedbackIdentity = feedbackIdentity }
+                ? new CodexActivityFeedSummary(summaryTurnId, commentary, commentarySource ?? "Latest saved update") { FeedbackIdentity = feedbackIdentity }
                 : !string.IsNullOrWhiteSpace(user)
-                    ? new CodexActivityFeedSummary(expectedTurnId, user, "Latest saved request")
-                    : new(expectedTurnId, "", "Chat title · recent message unavailable");
+                    ? new CodexActivityFeedSummary(summaryTurnId, user, "Latest saved request")
+                    : new(summaryTurnId, "", "Chat title · recent message unavailable");
             return summary with
             {
                 // Without this turn's attribution, a racing future turn cannot supply its history.
@@ -329,7 +343,8 @@ internal sealed partial class CodexActivityFeedSummaryReader(string codexHome)
         payload = document.RootElement;
         var payloadType = String(payload, "type");
         if (type == "turn_context" || (type == "event_msg" && payloadType == "task_started"))
-            return new(String(payload, "turn_id"), null, null);
+            return new(String(payload, "turn_id"), null, null,
+                StartsTurn: type == "event_msg" && payloadType == "task_started");
         if (type == "event_msg")
         {
             if (payloadType == "user_message") return new(recordTurnId, ReadPublicText(payload, "message"), null,
@@ -570,8 +585,9 @@ internal sealed partial class CodexActivityFeedSummaryReader(string codexHome)
     private static bool IsReadFailure(Exception ex) => ex is IOException or InvalidOperationException or
         UnauthorizedAccessException or System.Security.SecurityException or ArgumentException or NotSupportedException or
         JsonException or RegexMatchTimeoutException;
-    private sealed record CacheEntry(string Path, long Length, DateTime Modified, CodexActivityFeedSummary Summary);
+    private sealed record CacheEntry(string Path, long Length, DateTime Modified, CodexActivityFeedSummary Summary,
+        string? ActivityIdentity);
     private sealed record MessageRecord(string? TurnId, string? UserText, string? Commentary, string? MessageId = null,
         string IdentityKind = "saved-message", string Source = "Latest saved update", string Representation = "response",
-        string? Phase = null);
+        string? Phase = null, bool StartsTurn = false);
 }

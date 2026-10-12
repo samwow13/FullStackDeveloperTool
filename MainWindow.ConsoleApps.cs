@@ -15,7 +15,7 @@ public partial class MainWindow
     private async void AddService_Click(object sender, RoutedEventArgs e) =>
         await AddProjectServiceAsync();
 
-    private async Task AddProjectServiceAsync()
+    private async Task AddProjectServiceAsync(string? initialFolder = null)
     {
         if (!CanAddService || SelectedProject is not { } selected) return;
         var serviceType = "Service";
@@ -29,7 +29,8 @@ public partial class MainWindow
                 Title = "Choose the service folder", Multiselect = false
             };
             var projectRoot = _store.ResolveRoot(selected);
-            if (Directory.Exists(projectRoot)) picker.InitialDirectory = projectRoot;
+            if (initialFolder is not null && Directory.Exists(initialFolder)) picker.InitialDirectory = initialFolder;
+            else if (Directory.Exists(projectRoot)) picker.InitialDirectory = projectRoot;
             if (picker.ShowDialog(this) != true) return;
 
             var typePicker = new ServiceTypeWindow(picker.FolderName) { Owner = this };

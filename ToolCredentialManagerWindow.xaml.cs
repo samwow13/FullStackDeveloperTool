@@ -8,8 +8,11 @@ using FullStackLauncher.Services;
 
 namespace FullStackLauncher;
 
-public partial class ToolCredentialManagerWindow : Window
+public partial class ToolCredentialManagerWindow : Window, IDashboardReplacementWindow
 {
+    public bool IsDashboardReplacementReady => !_busy && !_childOpen;
+    public bool IsDashboardReplacementClosePending => false;
+
     private readonly string? _preferredKind;
     private readonly string? _websiteOrigin;
     private readonly IReadOnlyList<DeveloperTool> _tools;

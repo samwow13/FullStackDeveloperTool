@@ -26,17 +26,11 @@ internal sealed partial class CodexActivityFeedSummaryReader
         token.ThrowIfCancellationRequested();
         var canonicalId = threadId.ToString("D");
         string path;
-        using (var database = new NativeSqlite(Path.Combine(_codexHome, "state_5.sqlite")))
-        {
-            // The validated canonical GUID is the only SQL input. Do not enumerate other chats.
-            var rows = database.Query($"SELECT id, rollout_path FROM threads WHERE id = '{canonicalId}' LIMIT 2");
-            if (rows.Count != 1 || !Guid.TryParseExact(rows[0][0], "D", out var storedId) || storedId != threadId ||
-                string.IsNullOrWhiteSpace(rows[0][1]))
-                throw new InvalidOperationException("Saved history for this exact Codex chat is unavailable. Refresh and try again.");
-            path = NormalizePath(rows[0][1]!);
-            if (!IsSafeRollout(path))
-                throw new InvalidOperationException("Saved history for this Codex chat is outside its allowed local history folder.");
-        }
+        // Metadata lookup never reads other chat content; the selected header is
+        // checked again below before any public transcript can be exported.
+        path = NormalizePath(_metadata.ReadRolloutPath(canonicalId));
+        if (!IsSafeRollout(path))
+            throw new InvalidOperationException("Saved history for this Codex chat is outside its allowed local history folder.");
 
         token.ThrowIfCancellationRequested();
         try

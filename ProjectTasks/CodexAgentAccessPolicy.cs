@@ -38,8 +38,24 @@ public static class CodexAgentAccessPolicy
         ArgumentNullException.ThrowIfNull(connection);
         using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         timeout.CancelAfter(TimeSpan.FromSeconds(30));
-        var response = await connection.RequestAsync("config/read", new { includeLayers = false, cwd = folder },
-            timeout.Token).ConfigureAwait(false);
+        if (requireSupportedMode && !await CodexProtocolCapabilities.SupportsProjectConfigReadAsync(
+                connection.NativeExecutablePath, timeout.Token).ConfigureAwait(false))
+            throw new CodexCommandAccessException(
+                "This Codex installation could not verify project-scoped access configuration. Choose access explicitly in Start Agent, or use a CLI that reports the project configuration capability before automatic queue dispatch. No task or prompt was submitted.");
+        JsonElement response;
+        try
+        {
+            response = await connection.RequestAsync("config/read", new { includeLayers = false, cwd = folder },
+                timeout.Token).ConfigureAwait(false);
+        }
+        catch (CodexRequestException ex) when (!requireSupportedMode && ex.IsMethodUnavailable)
+        {
+            // Only the manual composer has a visible, explicit access choice.
+            // A server without config/read cannot authorize automatic dispatch.
+            // Keep the conservative workspace default; the command preflight and
+            // returned thread permissions must still pass before any prompt.
+            return CodexAgentAccessMode.Workspace;
+        }
         if (!response.TryGetProperty("config", out var config) || config.ValueKind != JsonValueKind.Object)
             throw new InvalidOperationException(CodexAppServerConnection.IncompatibleMessage);
 

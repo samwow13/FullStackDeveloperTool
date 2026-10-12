@@ -4,11 +4,25 @@
 
 On first use, **Start Agent** loads the effective access configuration for the selected project through an owned native App Server connection. It initializes the connection, then sends `config/read` with the project folder as `cwd`. Model discovery follows that lookup. These operations create no chat and submit no prompt.
 
-Older Launcher diagnostics replace an unclassified RPC error with advice to open an exact chat. That advice is misleading at this stage because the composer has not created a chat. Startup failures now retain the operation (`initialize`, `config/read`, or `model/list`), numeric RPC code when reported, and fixed setup guidance. Raw server messages, configuration values, and credentials remain private. Failed access discovery still blocks submission; Launcher never guesses a permission mode or broadens access to get past the failure.
+Older Launcher diagnostics replace an unclassified RPC error with advice to open an exact chat. That advice is misleading at this stage because the composer has not created a chat. Startup failures retain the operation (`initialize`, `config/read`, or `model/list`), numeric RPC code when reported, and fixed setup guidance. Raw server messages, configuration values, and credentials remain private. Configuration and permission failures still block submission. An explicitly unsupported `config/read` method permits only the manual composer's conservative Workspace default, which the user reviews before sending; the command preflight and returned thread permissions must still pass. Automatic dispatch never uses that fallback.
 
 The reported work-machine failure was not reproduced on this machine. Its installed `codex-cli 0.162.0-alpha.2` accepts the project-scoped configuration lookup with both stable and experimental initialization. This does not establish compatibility or configuration health on the work machine.
 
-Possible machine differences include an older native executable found first on `PATH`, different user/project/managed configuration, and an already-saved access preference on the working machine that bypasses default discovery. These are investigation leads, not confirmed causes. Launcher selects a native `codex.exe`; a terminal's npm command shim can resolve differently.
+Possible machine differences include an older native executable found first on `PATH`, different user/project/managed configuration, and an already-saved access preference on the working machine that bypasses default discovery. These are investigation leads, not confirmed causes. Launcher honors `PATH` ordering for native executables and recognized official npm installations, then checks the desktop native installation. It resolves npm's bundled native executable without parsing or executing the shell shim.
+
+## CLI compatibility
+
+Compatibility follows installed capabilities and documented protocol shapes, rather than a hardcoded minimum version or a guessed model list. The owned child starts with `codex app-server`, whose default transport is stdio in older and current CLIs. Only the optional initialization capability field may be retried after an explicit invalid-parameters rejection. Thread creation, prompt submission, permission failures, and failed command checks are never replayed for compatibility.
+
+Model discovery sends the shared `cursor` and `limit` parameters. Wire model names and supported thinking levels remain mandatory and are revalidated before submission. Older thread responses may omit the newer approval-reviewer field or return a null thinking level. Supplied values must still match; the exact thinking level is explicitly sent with the turn. Folder, model, sandbox, and `never` approval echoes remain required.
+
+Older servers can report an unknown method as RPC `-32600` with an exact `Invalid request: unknown variant` prefix, rather than `-32601`. Launcher recognizes only the bounded prefix naming its pending method. An unsupported turn-pagination read can fall back to `thread/read(includeTurns: true)` without resuming a thread. Reads remain bounded to 500 turns with exact saved identities and duplicate-ID checks. Missing history or ambiguous terminal evidence does not establish completion.
+
+Some older `config/read` implementations accept but ignore `cwd`. Before resolving automatic access, Launcher runs the selected native executable's local schema generator and verifies that `ConfigReadParams` declares a string `cwd`. The generator creates no server, thread, or provider request, and its temporary files are removed. Capability evidence is cached only for the unchanged executable. Unsupported, unreadable, or changed schema evidence blocks automatic dispatch before any prompt.
+
+Crew monitoring supports older state schemas and pre-SQLite session headers. It uses the highest present store and validates required columns; unreadable newer stores never fall back to stale older stores. Installations without the newer turn projection use bounded explicit rollout lifecycle records. Current projection databases retain their required queue and question checks. Legacy start positions scope excerpts and working-folder evidence when no turn ID is available. Partial records, missing lifecycle evidence, and failed or interrupted work cannot trigger successful completion. Codex metadata remains read-only.
+
+Current native CLI inspection reports `codex-cli 0.162.0-alpha.17.2`. Historical protocol and npm layouts were reviewed against official source tags `rust-v0.50.0`, `rust-v0.70.0`, `rust-v0.77.0`, `rust-v0.80.0`, `rust-v0.90.0`, `rust-v0.100.0`, and `rust-v0.110.0`. This is source compatibility evidence, not an end-to-end run on every release or the work machine. Keep awake still suspends when the installed CLI cannot supply its required exact lifecycle evidence.
 
 On the failing machine, collect the updated red startup error and the following non-secret output under the same Windows account:
 
@@ -55,7 +69,7 @@ Live diagnosis using the newly built application and the Luna folder verified fu
 
 ## Activating the new queue runner
 
-Queue-owner protocol 11 requires the corrected access policy and command preflight. Dashboard replacement deliberately preserves the independent queue owner. An older owner continues using its original immutable EXE and is rejected by the new dashboard before queue commands are applied.
+Queue-owner protocol 12 requires project-aware access capability evidence, the command preflight, and the compatible history reader. Dashboard replacement deliberately preserves the independent queue owner. An older owner continues using its original immutable EXE and is rejected by the new dashboard before queue commands are applied. Dashboard start permits are protocol-scoped, so a surviving older owner cannot borrow the replacement dashboard's permit for later work. Active owned work continues.
 
 When the old owner has no active work, use its tray menu **Exit queue owner**, then reopen **Notes & queue**. Launcher never force-terminates it for an upgrade. Original blocked or uncertain attempts retain their exact receipts and require the existing explicit review/retry controls. Updating the dashboard or continuing the Codex conversation does not clear a queue hold, change a recorded outcome, or enable a queue.
 

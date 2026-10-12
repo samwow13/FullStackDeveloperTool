@@ -126,6 +126,15 @@
                     <Label Content="_Project URL" Target="{Binding ElementName=ProjectUrlBox}"/>
                     <TextBox x:Name="ProjectUrlBox" TextChanged="ProjectUrl_Changed"
                              AutomationProperties.Name="Azure DevOps project URL in connection settings"/>
+                    <StackPanel x:Name="TokenSettingsPanel" Visibility="Collapsed" Margin="0,12,0,0">
+                        <Label Content="Personal access _token" Target="{Binding ElementName=TokenSettingsBox}"/>
+                        <PasswordBox x:Name="TokenSettingsBox" PasswordChanged="Token_Changed" MaxLength="512" MinHeight="36"
+                                     Background="{StaticResource BackgroundBrush}" Foreground="{StaticResource TextBrush}" Padding="8"
+                                     AutomationProperties.Name="Azure DevOps personal access token in connection settings"/>
+                        <TextBlock Text="Leave blank to use saved token. Encrypted for this Windows user. Code: Read for cloning; Read &amp; write for pushes."
+                                   Style="{StaticResource HelpText}" Margin="0,6,0,0"/>
+                        <Button x:Name="ForgetTokenButton" Content="Forget saved token" Click="ForgetToken_Click" HorizontalAlignment="Left" Margin="0,8,0,0"/>
+                    </StackPanel>
                     <WrapPanel Margin="0,12,0,0">
                         <Button x:Name="CheckButton" Content="_Check connection" Click="Check_Click" Margin="0,0,8,6"/>
                         <Button x:Name="SignInButton" Content="_Sign in &amp; load" Click="SignIn_Click" Margin="0,0,0,6"/>
@@ -140,15 +149,33 @@
                     <Label Content="_Project URL" Target="{Binding ElementName=InlineProjectUrlBox}"/>
                     <TextBox x:Name="InlineProjectUrlBox" TextChanged="ProjectUrl_Changed"
                              AutomationProperties.Name="Azure DevOps project URL"/>
+                    <StackPanel x:Name="InlineTokenPanel" Visibility="Collapsed" Margin="0,12,0,0">
+                        <Label Content="Personal access _token" Target="{Binding ElementName=InlineTokenBox}"/>
+                        <PasswordBox x:Name="InlineTokenBox" PasswordChanged="Token_Changed" MaxLength="512" MinHeight="36"
+                                     Background="{StaticResource BackgroundBrush}" Foreground="{StaticResource TextBrush}" Padding="8"
+                                     AutomationProperties.Name="Azure DevOps personal access token"/>
+                        <TextBlock Text="Leave blank to use saved token. Encrypted for this Windows user. Code: Read for cloning; Read &amp; write for pushes."
+                                   Style="{StaticResource HelpText}" Margin="0,6,0,0"/>
+                    </StackPanel>
                     <WrapPanel Margin="0,12,0,0">
                         <Button x:Name="InlineCheckButton" Content="_Check connection" Click="Check_Click" Margin="0,0,8,6"/>
                         <Button x:Name="InlineSignInButton" Content="_Sign in &amp; load" Click="SignIn_Click" Margin="0,0,0,6"/>
                     </WrapPanel>
                 </StackPanel>
                 <StackPanel x:Name="WorkspacePage" Visibility="Collapsed">
-                    <Label Content="_Workspace name" Target="{Binding ElementName=WorkspaceNameBox}"/>
-                    <TextBox x:Name="WorkspaceNameBox" TextChanged="WorkspaceName_Changed" MaxLength="120"
-                             AutomationProperties.Name="Workspace name" Margin="0,0,0,16"/>
+                    <ComboBox x:Name="DestinationModeBox" SelectedIndex="0" SelectionChanged="DestinationMode_Changed"
+                              AutomationProperties.Name="Workspace destination mode" Margin="0,0,0,12">
+                        <ComboBoxItem Content="New workspace"/>
+                        <ComboBoxItem Content="Existing workspace"/>
+                    </ComboBox>
+                    <Label x:Name="DestinationFolderLabel" Content="_Location" Target="{Binding ElementName=DestinationFolderBox}"/>
+                    <Grid Margin="0,0,0,6">
+                        <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+                        <TextBox x:Name="DestinationFolderBox" TextChanged="DestinationFolder_Changed"
+                                 AutomationProperties.Name="Workspace parent folder"/>
+                        <Button x:Name="BrowseDestinationButton" Grid.Column="1" Content="_Browse…" Click="BrowseDestination_Click"
+                                Margin="8,0,0,0" AutomationProperties.Name="Browse workspace location"/>
+                    </Grid>
                     <Button x:Name="StartRepositoryButton" Content="_Add repository" Click="StartRepository_Click"
                             HorizontalAlignment="Left" Margin="0,0,0,18"/>
                     <Border BorderBrush="{StaticResource BorderBrush}" BorderThickness="1">
@@ -273,17 +300,17 @@
                              AutomationProperties.Name="New feature branch" MaxLength="250"/>
                 </StackPanel>
                 <StackPanel x:Name="ReviewPage" Visibility="Collapsed">
-                    <TextBox x:Name="ReviewFolderText" IsReadOnly="True" TextWrapping="Wrap"
-                             AutomationProperties.Name="Workspace destination" Margin="0,0,0,16"/>
+                    <StackPanel x:Name="WorkspaceNamePanel">
+                        <Label Content="_Workspace name" Target="{Binding ElementName=WorkspaceNameBox}"/>
+                        <TextBox x:Name="WorkspaceNameBox" TextChanged="WorkspaceName_Changed" MaxLength="120"
+                                 AutomationProperties.Name="Workspace name" Margin="0,0,0,16"/>
+                    </StackPanel>
                     <ContentControl Content="Repositories" ContentTemplate="{StaticResource RepositoryHeaders}" Margin="0,0,0,4"/>
                     <ItemsControl x:Name="ReviewRepositoriesList" AutomationProperties.Name="Repositories to clone">
                         <ItemsControl.ItemTemplate>
                             <DataTemplate>
                                 <Border BorderBrush="{StaticResource BorderBrush}" BorderThickness="0,0,0,1" Padding="0,12">
-                                    <StackPanel>
-                                        <ContentControl Content="{Binding}" ContentTemplate="{StaticResource RepositorySummary}"/>
-                                        <TextBlock Text="{Binding Folder}" Style="{StaticResource HelpText}" Margin="0,7,0,0"/>
-                                    </StackPanel>
+                                    <ContentControl Content="{Binding}" ContentTemplate="{StaticResource RepositorySummary}"/>
                                 </Border>
                             </DataTemplate>
                         </ItemsControl.ItemTemplate>
@@ -312,8 +339,8 @@
                 <Button x:Name="NextButton" Content="_Next" Click="Next_Click" Visibility="Collapsed" Style="{StaticResource PrimaryButton}"/>
                 <Button x:Name="AddRepositoryButton" Content="_Add repository" Click="AddRepository_Click"
                         Visibility="Collapsed" Style="{StaticResource PrimaryButton}"/>
-                <Button x:Name="ChooseFolderButton" Content="Choose _folder…" Click="ChooseFolder_Click" Visibility="Collapsed"
-                        Style="{StaticResource PrimaryButton}" ToolTip="Choose the folder containing your new workspace."/>
+                <Button x:Name="ChooseFolderButton" Content="_Review workspace" Click="ChooseFolder_Click" Visibility="Collapsed"
+                        Style="{StaticResource PrimaryButton}"/>
                 <Button x:Name="CloneButton" Content="_Clone &amp; download" Click="Clone_Click" Visibility="Collapsed"
                         Style="{StaticResource PrimaryButton}"/>
             </WrapPanel>

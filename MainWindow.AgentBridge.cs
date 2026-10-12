@@ -111,6 +111,7 @@ public partial class MainWindow
         {
             return request.Action switch
             {
+                "agent_setup" => AgentBridgeResponse.Success(GetAgentSetup()),
                 "projects" => AgentBridgeResponse.Success(new
                 {
                     instanceId = _agentCoordination.InstanceId,
@@ -158,6 +159,25 @@ public partial class MainWindow
         {
             return AgentBridgeResponse.Failure("Launcher bridge could not complete this request.");
         }
+    }
+
+    private object GetAgentSetup()
+    {
+        // Generate from this dashboard, never the adapter's potentially older executable or selected project.
+        var content = FirstTimeSetupContent.Create(_store.SettingsPath, projectRoot: null);
+        return new
+        {
+            schemaVersion = 1,
+            instanceId = _agentCoordination.InstanceId,
+            serverName = "fullStackLauncher",
+            resourceUri = FirstTimeSetupContent.AgentsResourceUri,
+            sectionHeading = FirstTimeSetupContent.AgentsSectionHeading,
+            connection = new { content.Command, content.Arguments, content.WorkingDirectory },
+            agentsInstructions = content.AgentsInstructions,
+            installationPrompt = content.ConnectedSetupPrompt,
+            writeGuidance = FirstTimeSetupContent.AgentsWriteGuidance,
+            verification = new { connectionVerified = true, instructionsFileWritten = false }
+        };
     }
 
     private ProjectProfile RequireProject(string? id) =>

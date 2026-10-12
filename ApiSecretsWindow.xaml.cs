@@ -7,8 +7,11 @@ using FullStackLauncher.Services;
 
 namespace FullStackLauncher;
 
-public partial class ApiSecretsWindow : Window
+public partial class ApiSecretsWindow : Window, IDashboardReplacementWindow
 {
+    public bool IsDashboardReplacementReady => !_busy;
+    public bool IsDashboardReplacementClosePending => false;
+
     private readonly ApiSecretStore _store;
     private ApiSecretSnapshot? _snapshot;
     private Dictionary<string, string> _working = new(StringComparer.OrdinalIgnoreCase);

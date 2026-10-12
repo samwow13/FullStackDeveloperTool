@@ -99,7 +99,6 @@ public partial class App : Application
                 MainWindow.Show();
                 _dashboardInstance.CompleteStartup();
                 ShutdownMode = ShutdownMode.OnMainWindowClose;
-                RestoreQueueOwnerAfterStartup();
             }
             catch (Exception ex)
             {
@@ -120,18 +119,4 @@ public partial class App : Application
         base.OnExit(e);
     }
 
-    private async void RestoreQueueOwnerAfterStartup()
-    {
-        try { await ProjectTasks.QueueOwnerClient.StartIfSavedWorkAsync(); }
-        catch (Exception ex) when (ex is System.IO.IOException or UnauthorizedAccessException or InvalidOperationException)
-        {
-            var guidance = ex is System.IO.IOException &&
-                (ex.Message.StartsWith("An older queue owner", StringComparison.Ordinal) ||
-                 ex.Message.StartsWith("The queue owner is running", StringComparison.Ordinal))
-                ? ex.Message : "The queue owner could not start or finish recovery. Open Notes & queue to inspect its status.";
-            MessageBox.Show("Queue owner compatibility check failed. Saved task data was preserved. " +
-                "No new queue item will be submitted. " + guidance,
-                "Queue owner unavailable", MessageBoxButton.OK, MessageBoxImage.Warning);
-        }
-    }
 }

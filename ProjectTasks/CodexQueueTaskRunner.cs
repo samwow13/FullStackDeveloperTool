@@ -239,10 +239,10 @@ public sealed class CodexQueueTaskRunner : ICodexQueueTaskRunner
             var effectiveSandbox = RequiredObject(threadResponse, "sandbox");
             if (!folderMatches
                 || !string.Equals(RequiredString(threadResponse, "model"), snapshot.ModelId, StringComparison.Ordinal)
-                || !string.Equals(OptionalString(threadResponse, "reasoningEffort"), snapshot.ReasoningEffort, StringComparison.Ordinal)
+                || !MatchesOptionalConfiguration(threadResponse, "reasoningEffort", snapshot.ReasoningEffort, allowNull: true)
                 || !string.Equals(RequiredString(threadResponse, "approvalPolicy"), ApprovalPolicy, StringComparison.Ordinal)
                 || !string.Equals(RequiredString(effectiveSandbox, "type"), CodexAgentAccessPolicy.EffectiveSandbox(accessMode), StringComparison.Ordinal)
-                || !string.Equals(OptionalString(threadResponse, "approvalsReviewer"), "user", StringComparison.Ordinal))
+                || !MatchesOptionalConfiguration(threadResponse, "approvalsReviewer", "user"))
                 return await TerminalAsync(ProjectTaskRunState.NeedsAttention, ProjectTaskOutcome.Blocked,
                     "Codex did not confirm the assigned folder, model, thinking level, configured access mode, or noninteractive approval policy. No prompt was submitted.").ConfigureAwait(false);
 
@@ -337,19 +337,19 @@ public sealed class CodexQueueTaskRunner : ICodexQueueTaskRunner
                         if (!started)
                             return await TerminalAsync(ProjectTaskRunState.NeedsAttention, ProjectTaskOutcome.Unknown,
                                 "The exact turn ended without a matching start event. Review this task in Codex.").ConfigureAwait(false);
-                        if (status == "interrupted")
-                            return await TerminalAsync(ProjectTaskRunState.Interrupted, ProjectTaskOutcome.Interrupted,
-                                "Codex confirmed that the exact turn was interrupted.", true).ConfigureAwait(false);
-                        if (status == "failed")
-                            return await TerminalAsync(ProjectTaskRunState.Failed, ProjectTaskOutcome.Failed,
-                                FailureSummary(turn), true).ConfigureAwait(false);
-                        if (status != "completed")
+                        if (status is not ("completed" or "interrupted" or "failed"))
                             return await TerminalAsync(ProjectTaskRunState.NeedsAttention, ProjectTaskOutcome.Unknown,
                                 "Codex returned an unsupported terminal status. Review this task in Codex.").ConfigureAwait(false);
                         terminalConfirmed = true;
                         if (!CollectFinalItems(turn, observedItems, completedItemIds, finalMessages, ThreadId!))
                             return await TerminalAsync(ProjectTaskRunState.NeedsAttention, ProjectTaskOutcome.Unknown,
                                 "One or more tool or child-work items lack a confirmed final status. Review this task in Codex.", true).ConfigureAwait(false);
+                        if (status == "interrupted")
+                            return await TerminalAsync(ProjectTaskRunState.Interrupted, ProjectTaskOutcome.Interrupted,
+                                "Codex confirmed that the exact turn was interrupted and its tool and child-work items have final status.", true).ConfigureAwait(false);
+                        if (status == "failed")
+                            return await TerminalAsync(ProjectTaskRunState.Failed, ProjectTaskOutcome.Failed,
+                                FailureSummary(turn), true).ConfigureAwait(false);
                         var parsed = ParseOutcome(finalMessages, turn);
                         finalResponse = parsed.FinalResponse;
                         return await TerminalAsync(parsed.State, parsed.Outcome, parsed.Summary, true).ConfigureAwait(false);
@@ -483,17 +483,17 @@ public sealed class CodexQueueTaskRunner : ICodexQueueTaskRunner
             if (!MatchesFrozenPrompt(storedTurn, snapshot))
                 return new(ProjectTaskRunState.NeedsAttention, ProjectTaskOutcome.Unknown,
                     threadId, turnId, "The stored turn does not contain this attempt's frozen text and images.", true);
-            if (status == "interrupted")
-                return new(ProjectTaskRunState.Interrupted, ProjectTaskOutcome.Interrupted,
-                    threadId, turnId, "Codex storage confirms that the exact turn was interrupted.", true);
-            if (status == "failed")
-                return new(ProjectTaskRunState.Failed, ProjectTaskOutcome.Failed,
-                    threadId, turnId, FailureSummary(storedTurn), true);
             var finalMessages = new Dictionary<string, string>(StringComparer.Ordinal);
             if (!CollectFinalItems(storedTurn, new Dictionary<string, JsonElement>(StringComparer.Ordinal),
                 new HashSet<string>(StringComparer.Ordinal), finalMessages, threadId))
                 return new(ProjectTaskRunState.NeedsAttention, ProjectTaskOutcome.Unknown,
                     threadId, turnId, "A stored tool or child-work item lacks confirmed final status.", true);
+            if (status == "interrupted")
+                return new(ProjectTaskRunState.Interrupted, ProjectTaskOutcome.Interrupted,
+                    threadId, turnId, "Codex storage confirms that the exact turn was interrupted and its tool and child-work items have final status.", true);
+            if (status == "failed")
+                return new(ProjectTaskRunState.Failed, ProjectTaskOutcome.Failed,
+                    threadId, turnId, FailureSummary(storedTurn), true);
             var parsed = ParseOutcome(finalMessages, storedTurn);
             return new(parsed.State, parsed.Outcome, threadId, turnId,
                 parsed.Summary, true, parsed.FinalResponse);
@@ -745,14 +745,22 @@ public sealed class CodexQueueTaskRunner : ICodexQueueTaskRunner
         var seenCursors = new HashSet<string>(StringComparer.Ordinal);
         for (var page = 0; page < 20; page++)
         {
-            var turns = await connection.RequestAsync("thread/turns/list", new
+            JsonElement turns;
+            try
             {
-                threadId,
-                limit = 25,
-                sortDirection = "desc",
-                itemsView = "full",
-                cursor
-            }, token).ConfigureAwait(false);
+                turns = await connection.RequestAsync("thread/turns/list", new
+                {
+                    threadId,
+                    limit = 25,
+                    sortDirection = "desc",
+                    itemsView = "full",
+                    cursor
+                }, token).ConfigureAwait(false);
+            }
+            catch (CodexRequestException ex) when (ex.IsMethodUnavailable)
+            {
+                return await ReadLegacyStoredExactAsync(connection, threadId, turnId, token).ConfigureAwait(false);
+            }
             if (!turns.TryGetProperty("data", out var entries) || entries.ValueKind != JsonValueKind.Array
                 || entries.GetArrayLength() > 25)
                 throw new InvalidOperationException(CodexAppServerConnection.IncompatibleMessage);
@@ -769,6 +777,49 @@ public sealed class CodexQueueTaskRunner : ICodexQueueTaskRunner
             if (!seenCursors.Add(cursor)) throw new InvalidOperationException(CodexAppServerConnection.IncompatibleMessage);
         }
         return (thread, null);
+    }
+
+    private static async Task<(JsonElement Thread, JsonElement? Turn)> ReadLegacyStoredExactAsync(
+        CodexAppServerConnection connection, string threadId, string turnId, CancellationToken token)
+    {
+        // Only a specifically rejected pagination method reaches this read-only
+        // fallback. Never resume the thread or retry a submission for compatibility.
+        var response = await connection.RequestAsync("thread/read", new
+        {
+            threadId, includeTurns = true
+        }, token).ConfigureAwait(false);
+        var thread = RequiredObject(response, "thread");
+        if (RequiredString(thread, "id") != threadId
+            || (thread.TryGetProperty("historyMode", out var historyMode)
+                && (historyMode.ValueKind != JsonValueKind.String || historyMode.GetString() != "legacy"))
+            || !thread.TryGetProperty("turns", out var turns) || turns.ValueKind != JsonValueKind.Array
+            || turns.GetArrayLength() > 500)
+            throw new InvalidOperationException(CodexAppServerConnection.IncompatibleMessage);
+        JsonElement? exact = null;
+        var identities = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var turn in turns.EnumerateArray())
+        {
+            var id = RequiredString(turn, "id");
+            if (!identities.Add(id)) throw new InvalidOperationException(CodexAppServerConnection.IncompatibleMessage);
+            if (id != turnId) continue;
+            if (!turn.TryGetProperty("items", out var items) || items.ValueKind != JsonValueKind.Array
+                || items.GetArrayLength() > 2048
+                || (turn.TryGetProperty("itemsView", out var view)
+                    && (view.ValueKind != JsonValueKind.String || view.GetString() != "full")))
+                throw new InvalidOperationException(CodexAppServerConnection.IncompatibleMessage);
+            exact = turn.Clone();
+        }
+        return (thread, exact);
+    }
+
+    private static bool MatchesOptionalConfiguration(JsonElement response, string name, string expected,
+        bool allowNull = false)
+    {
+        // These response fields are absent or nullable in older schemas. Explicit
+        // turn/start effort and all required permission echoes remain unchanged.
+        return !response.TryGetProperty(name, out var value)
+            || (allowNull && value.ValueKind == JsonValueKind.Null)
+            || (value.ValueKind == JsonValueKind.String && value.GetString() == expected);
     }
 
     private static async Task WaitForThreadStartedAsync(CodexAppServerConnection connection, string threadId, CancellationToken token)

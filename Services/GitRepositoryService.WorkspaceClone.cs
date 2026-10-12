@@ -25,13 +25,32 @@ public static partial class GitRepositoryService
         }, token);
     }
 
-    /// <summary>Creates the reviewed workspace once, then clones and creates each local feature branch in order.</summary>
+    /// <summary>Reviews new repository folders within an existing non-Git workspace without creating or modifying files.</summary>
+    public static Task<GitWorkspaceCloneReview> PrepareExistingWorkspaceCloneAsync(string workspaceFolder,
+        IReadOnlyList<AzureDevOpsWorkspaceRepository> repositories, CancellationToken token = default)
+    {
+        ArgumentNullException.ThrowIfNull(repositories);
+        var selections = repositories.ToArray();
+        return Task.Run(async () =>
+        {
+            var workspace = RequireFolder(workspaceFolder);
+            using var directory = OpenCloneDirectory(workspace, out var workspaceIdentity);
+            await RequireNonRepositoryCloneFolderAsync(workspace, token).ConfigureAwait(false);
+            var planned = await ReviewWorkspaceRepositoriesAsync(workspace, workspace, selections, token).ConfigureAwait(false);
+            RequireMissingRepositoryFolders(planned);
+            return new GitWorkspaceCloneReview(workspace, Path.GetFileName(workspace), workspace, workspaceIdentity,
+                planned, usesExistingWorkspace: true);
+        }, token);
+    }
+
+    /// <summary>Clones into reviewed new child folders and creates each local feature branch in order.</summary>
     public static Task<string> CloneWorkspaceAsync(GitWorkspaceCloneReview review, IProgress<string>? progress = null,
         CancellationToken token = default) => Task.Run(async () =>
         {
             ArgumentNullException.ThrowIfNull(review);
             var parent = RequireFolder(review.ParentFolder);
-            var workspace = RequireWorkspaceChildPath(parent, review.WorkspaceName, "workspace");
+            var workspace = review.UsesExistingWorkspace
+                ? parent : RequireWorkspaceChildPath(parent, review.WorkspaceName, "workspace");
             if (!string.Equals(workspace, review.Folder, StringComparison.OrdinalIgnoreCase))
                 throw new InvalidOperationException("The workspace destination changed. Review it again before cloning.");
             var gate = RepositoryGates.GetOrAdd(parent, _ => new SemaphoreSlim(1, 1));
@@ -44,7 +63,7 @@ public static partial class GitRepositoryService
                 if (!string.Equals(parentIdentity, review.ParentDirectoryIdentity, StringComparison.Ordinal))
                     throw new InvalidOperationException("The parent folder changed. Review the workspace again before cloning.");
                 await RequireNonRepositoryCloneFolderAsync(parent, token).ConfigureAwait(false);
-                RequireMissingWorkspaceFolder(workspace);
+                if (!review.UsesExistingWorkspace) RequireMissingWorkspaceFolder(workspace);
                 var planned = await ReviewWorkspaceRepositoriesAsync(parent, workspace,
                     review.Repositories.Select(repository => repository.Selection).ToArray(), token).ConfigureAwait(false);
                 if (planned.Count != review.Repositories.Count || planned.Where((repository, index) =>
@@ -53,12 +72,16 @@ public static partial class GitRepositoryService
                     throw new InvalidOperationException("The repository selections changed. Review the workspace again before cloning.");
 
                 token.ThrowIfCancellationRequested();
-                CreateNewWorkspaceDirectory(workspace);
+                RequireMissingRepositoryFolders(planned);
+                if (!review.UsesExistingWorkspace) CreateNewWorkspaceDirectory(workspace);
                 using var workspaceDirectory = OpenCloneDirectory(workspace, out _);
-                await using var workspaceLease = await AcquireGitSetupOperationLeaseAsync(workspace, token).ConfigureAwait(false);
+                // Existing mode already holds the exact workspace's setup lease and directory identity above.
+                await using var workspaceLease = review.UsesExistingWorkspace
+                    ? null : await AcquireGitSetupOperationLeaseAsync(workspace, token).ConfigureAwait(false);
                 await RequireNonRepositoryCloneFolderAsync(workspace, token).ConfigureAwait(false);
-                if (Directory.EnumerateFileSystemEntries(workspace).Any())
+                if (!review.UsesExistingWorkspace && Directory.EnumerateFileSystemEntries(workspace).Any())
                     throw new InvalidOperationException("The new workspace contains unexpected files. Inspect it before continuing.");
+                RequireMissingRepositoryFolders(planned);
                 var results = new List<string>();
                 foreach (var repository in planned)
                 {
@@ -69,12 +92,14 @@ public static partial class GitRepositoryService
                     // Pin each newly created child until its complete clone and feature setup finish.
                     using var repositoryDirectory = OpenCloneDirectory(repository.Folder, out var directoryIdentity);
                     var cloneReview = new GitCloneReview(repository.Folder, GitHostingProvider.AzureDevOps,
-                        repository.Repository.CloneUrl, directoryIdentity, repository.StartingBranch, repository.FeatureBranch);
+                        repository.Repository.CloneUrl, directoryIdentity, repository.StartingBranch, repository.FeatureBranch,
+                        repository.Selection.UseAzureDevOpsToken);
                     var result = await CloneAsync(cloneReview, token).ConfigureAwait(false);
                     results.Add(Sanitize(currentRepository) + ": " + result);
                 }
-                progress?.Report("Workspace cloned.");
-                return "Workspace cloned.\n" + workspace + "\n" + string.Join("\n", results);
+                var completion = review.UsesExistingWorkspace ? "Repositories added to workspace." : "Workspace cloned.";
+                progress?.Report(completion);
+                return completion + "\n" + workspace + "\n" + string.Join("\n", results);
             }
             catch (GitCommandExitUnconfirmedException) { throw; }
             catch (OperationCanceledException exception)
@@ -122,6 +147,7 @@ public static partial class GitRepositoryService
                 throw new InvalidOperationException("The Azure DevOps project name is invalid. Load the project again.");
             var folderName = string.IsNullOrEmpty(selection.LocalFolderName) ? repository.Name : selection.LocalFolderName;
             var folder = RequireWorkspaceChildPath(workspace, folderName, "repository");
+            RequireMissingRepositoryFolder(folder);
             if (!folderNames.Add(folderName) || !identities.Add(repository.Id))
                 throw new InvalidOperationException("Each repository needs a unique local folder and selection in this workspace.");
             var cleanUrl = GitConnectionService.ValidateUrl(GitHostingProvider.AzureDevOps, repository.CloneUrl);
@@ -138,6 +164,24 @@ public static partial class GitRepositoryService
             planned.Add(new GitWorkspaceCloneRepositoryReview(captured, folder));
         }
         return planned.AsReadOnly();
+    }
+
+    private static void RequireMissingRepositoryFolders(IReadOnlyList<GitWorkspaceCloneRepositoryReview> repositories)
+    {
+        foreach (var repository in repositories) RequireMissingRepositoryFolder(repository.Folder);
+    }
+
+    private static void RequireMissingRepositoryFolder(string folder)
+    {
+        try
+        {
+            _ = File.GetAttributes(folder);
+        }
+        catch (Exception exception) when (exception is FileNotFoundException or DirectoryNotFoundException) { return; }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+        { throw new InvalidOperationException("The repository destination cannot be verified. Check its workspace permissions."); }
+        throw new InvalidOperationException("Repository folder '" + Sanitize(Path.GetFileName(folder))
+            + "' already exists. Choose another local folder name; existing folders are never overwritten.");
     }
 
     private static async Task ValidateWorkspaceBranchesAsync(string folder, string startingBranch, string featureBranch,
@@ -226,7 +270,7 @@ public static partial class GitRepositoryService
         if (CreateWorkspaceDirectory(folder, IntPtr.Zero)) return;
         var error = Marshal.GetLastWin32Error();
         if (error is 80 or 183)
-            throw new InvalidOperationException("A workspace or repository folder already exists. Choose a new workspace name; no files were overwritten.");
+            throw new InvalidOperationException("A workspace or repository folder already exists. Choose a new destination name; no files were overwritten.");
         throw new IOException("The new workspace or repository folder could not be created (Windows error " + error + ").");
     }
 

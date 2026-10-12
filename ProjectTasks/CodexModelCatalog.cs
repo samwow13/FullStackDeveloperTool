@@ -52,8 +52,10 @@ public sealed class CodexModelCatalog
         string? cursor = null;
         for (var page = 0; page < MaximumPages; page++)
         {
+            // Older v2 catalogs declare only cursor/limit. Current catalogs hide
+            // picker-hidden models by default; retain that default on both versions.
             var result = await connection.RequestAsync("model/list",
-                new { limit = 100, includeHidden = false, cursor }, token).ConfigureAwait(false);
+                new { limit = 100, cursor }, token).ConfigureAwait(false);
             if (!result.TryGetProperty("data", out var entries) || entries.ValueKind != JsonValueKind.Array)
                 throw new InvalidOperationException(IncompatibleMessage);
             foreach (var entry in entries.EnumerateArray())

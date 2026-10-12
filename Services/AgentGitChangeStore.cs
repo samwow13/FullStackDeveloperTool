@@ -32,6 +32,64 @@ public static class AgentGitChangeStore
     public static Task<AgentGitConnectionSelection?> ReadSelectionAsync(string root, CancellationToken token = default) =>
         AccessAsync(root, false, document => (document.Selection, false), token);
 
+    /// <summary>
+    /// Read an already inspected checkout's ledger without launching Git. The nearest metadata
+    /// marker and named branch are checked again; writes continue to use the normal Git checks.
+    /// Atomic replacement supplies a complete document and malformed documents remain failures.
+    /// </summary>
+    public static Task<AgentGitLedgerSnapshot> ReadCachedAsync(GitRepositorySnapshot snapshot,
+        CancellationToken token = default) => Task.Run(async () =>
+    {
+        if (!snapshot.IsRepository || snapshot.RepositoryRoot is null)
+            return new AgentGitLedgerSnapshot(null, []);
+        var root = GitConnectionService.NormalizeRoot(snapshot.RepositoryRoot);
+        var metadata = await GitBranchReader.ReadAsync(root, token).ConfigureAwait(false);
+        if (!metadata.HasRepository || metadata.RepositoryPath is null
+            || !string.Equals(root, GitConnectionService.NormalizeRoot(metadata.RepositoryPath), StringComparison.OrdinalIgnoreCase)
+            || !snapshot.IsDetached && (metadata.State != GitBranchState.Branch || metadata.DisplayText != snapshot.Branch)
+            || snapshot.IsDetached && metadata.State != GitBranchState.Detached)
+            throw new InvalidOperationException("The checkout or branch changed. Refresh Git before reading its agent summaries.");
+        var marker = Path.Combine(root, ".git");
+        var directory = marker;
+        if (!File.GetAttributes(marker).HasFlag(FileAttributes.Directory))
+        {
+            await using var markerStream = new FileStream(marker, FileMode.Open, FileAccess.Read,
+                FileShare.ReadWrite | FileShare.Delete, 1024, FileOptions.Asynchronous | FileOptions.SequentialScan);
+            if (!markerStream.CanSeek || markerStream.Length > 16 * 1024)
+                throw new InvalidOperationException("The checkout's Git directory metadata exceeds its read limit.");
+            var buffer = new byte[16 * 1024 + 1];
+            var count = 0;
+            while (count < buffer.Length)
+            {
+                var read = await markerStream.ReadAsync(buffer.AsMemory(count), token).ConfigureAwait(false);
+                if (read == 0) break;
+                count += read;
+            }
+            if (count > 16 * 1024)
+                throw new InvalidOperationException("The checkout's Git directory metadata exceeds its read limit.");
+            var text = new UTF8Encoding(false, true).GetString(buffer, 0, count).TrimEnd('\r', '\n');
+            const string prefix = "gitdir: ";
+            if (text.Length > 16 * 1024 || !text.StartsWith(prefix, StringComparison.Ordinal)
+                || text.Length == prefix.Length || text.Any(char.IsControl))
+                throw new InvalidOperationException("The checkout's Git directory metadata is invalid.");
+            directory = Path.GetFullPath(text[prefix.Length..], root);
+        }
+        if (!Directory.Exists(directory))
+            throw new InvalidOperationException("The checkout's Git metadata is unavailable. Agent summaries were not changed.");
+        var document = await ReadAsync(Path.Combine(directory, FileName), token).ConfigureAwait(false);
+        var summaries = document.Entries.Where(entry => entry.Branch == snapshot.Branch
+                && entry.Summary.ConsumedCommitId is null)
+            .GroupBy(entry => (entry.RemoteName, entry.ConnectionId))
+            .Select(group => new AgentGitSummaryBatch
+            {
+                RepositoryRoot = root, Branch = snapshot.Branch,
+                RemoteName = group.Key.RemoteName, ConnectionId = group.Key.ConnectionId,
+                Entries = group.Select(entry => entry.Summary).ToArray()
+            }).ToArray();
+        token.ThrowIfCancellationRequested();
+        return new AgentGitLedgerSnapshot(document.Selection, summaries);
+    }, token);
+
     public static Task SelectConnectionAsync(string root, string remoteName, string connectionId, CancellationToken token = default)
     {
         ValidateConnection(remoteName, connectionId);

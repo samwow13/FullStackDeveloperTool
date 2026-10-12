@@ -4,26 +4,28 @@ Full Stack Launcher owns configured project services. Its agent bridge lets a lo
 
 ## Build and connect
 
-For an installed build, use **Functions > First Time Setup**. Copy the generated integration section into the project's existing `AGENTS.md` without replacing current instructions, then copy the setup prompt into your agent chat. Its command, arguments, and working directory come from the running application; `--settings` always names the dashboard's exact resolved settings file. Keep the executable in a stable location and regenerate the connection details after moving it.
+For an installed build, use **Functions > First Time Setup**. Connect MCP first, then copy the **agent setup prompt** into the connected chat. The agent calls `launcher_agent_setup` to fetch this PC's integration section and merge it into its local instructions file, preserving existing instructions. If MCP is already connected, start with that prompt; manually copying `AGENTS.md` content is no longer a prerequisite. Manual instructions and a disconnected setup prompt remain available in the dialog.
+
+The generated command, arguments, and working directory come from the running dashboard; `--settings` always names its exact resolved settings file. Keep the executable in a stable location and obtain fresh setup content after moving it.
 
 **Connect Codex** is an explicit opt-in to run the installed native Codex CLI's supported `mcp add` command. It reads the server list and inspects an existing `fullStackLauncher` entry first, reuses an exact enabled match, and refuses conflicting or restricted entries. It verifies registration through `mcp get`; it does not restart Codex, enable computer use, or prove that an existing chat has discovered the tools. Other MCP entries are not intentionally edited. Avoid editing MCP configuration in another client during registration: the CLI provides no conditional create operation against concurrent external changes.
 
-Reconnect MCP or restart the agent client and open a new chat when necessary. Then call `launcher_projects` through that client. A successful response, including an empty project list, proves that the client can reach the running dashboard. Check configured services only with read-only list/status tools; setup does not start or stop them. If the native CLI is unavailable, use the displayed manual stdio fields or let the prompted agent configure them with its authorized local tools or computer use. Opening the dialog and copying its content do not change `AGENTS.md`, client configuration, or launcher settings.
+Reconnect MCP or restart the agent client and open a new chat when necessary. Ask the connected agent to call `launcher_agent_setup`, merge the returned instructions, then call `launcher_projects`. A successful dashboard response, including an empty project list, proves that the client can reach the running dashboard. Check configured services only with read-only list/status tools; setup does not start or stop them. If the native CLI is unavailable, use the displayed manual stdio fields or let the prompted agent configure them with its authorized local tools or computer use. Opening the dialog and copying its content do not change `AGENTS.md`, client configuration, or launcher settings.
 
-Use the follow-up notes build at `publish\agent-follow-up-notes-20261006\FullStackLauncher.exe`. Close the old dashboard through its normal close flow, resolve any draft/service prompts, and open the updated EXE. Use this same build for the MCP adapter, then reconnect MCP to discover `launcher_project_notes` and `launcher_save_follow_up_note`. Running processes keep their old code until restarted. A published build or saved MCP registration does not establish live WPF interaction or a successful note save; the save tool's successful response confirms persistence.
+Use the same current build for the dashboard and MCP adapter, then reconnect MCP to discover `launcher_agent_setup`, `launcher_project_notes`, and `launcher_save_follow_up_note`. Start the updated EXE normally so the dashboard handoff preserves running services; resolve any draft or active-operation protection without force-closing processes. Running adapters keep their old code until reconnected to the updated EXE. A published build or saved MCP registration does not establish live WPF interaction or a successful note save; the save tool's successful response confirms persistence.
 
 1. Package the launcher application without running test projects:
 
    ```powershell
-   & 'C:\Users\samwo\OneDrive\Desktop\MyTools\FullStackDeveloperTool\publish.ps1' -OutputDirectory 'publish\agent-follow-up-notes-20261006'
+   .\publish.ps1 -OutputDirectory 'publish\single-file'
    ```
 
-2. Close any older launcher dashboard through its normal close dialog, then open the updated `publish\agent-follow-up-notes-20261006\FullStackLauncher.exe` under the same Windows user and desktop session as Codex. The dashboard must already be running when a bridge tool is called. Keep using your existing `%LOCALAPPDATA%\FullStackLauncher\launcher.settings.json`; a new public checkout starts with an empty project library. Closing an older dashboard can prompt about unsaved drafts and running services, so resolve those prompts before opening the new copy. Reopening creates a new bridge instance; active agents must register and acquire new leases before continuing disruptive work.
+2. Open the updated `publish\single-file\FullStackLauncher.exe` normally under the same Windows user and desktop session as Codex. Preserve any explicit `--settings` argument. Use a fresh publish folder if a running EXE locks the existing output. The dashboard must already be running when a bridge tool is called. Keep using your existing `%LOCALAPPDATA%\FullStackLauncher\launcher.settings.json`; a new public checkout starts with an empty project library. Allow the built-in handoff to close an older dashboard while preserving its services; resolve protection prompts or report a blocked handoff without forcing it. Replacement creates a new bridge instance; active agents must register and acquire new leases before continuing disruptive work.
 
 3. Register the local stdio MCP adapter with Codex:
 
    ```powershell
-   $launcherExe = 'C:\Users\samwo\OneDrive\Desktop\MyTools\FullStackDeveloperTool\publish\agent-follow-up-notes-20261006\FullStackLauncher.exe'
+   $launcherExe = (Resolve-Path '.\publish\single-file\FullStackLauncher.exe').Path
    codex mcp add fullStackLauncher -- $launcherExe --agent-mcp
    codex mcp list
    ```
@@ -31,6 +33,16 @@ Use the follow-up notes build at `publish\agent-follow-up-notes-20261006\FullSta
    If the dashboard uses an explicit `--settings` file, append `--settings 'C:\path\to\settings.json'` to the MCP command too. Both processes must use the same resolved settings path. Restart Codex desktop or its MCP connection after adding the server. [Official OpenAI Codex MCP setup](https://learn.chatgpt.com/docs/extend/mcp?surface=cli) documents local stdio commands, `codex mcp add`, `codex mcp list`, and shared desktop/CLI configuration.
 
 The bridge changes no global Codex configuration by itself. **Connect Codex** or the command above is the explicit opt-in. It uses the launcher's existing EXE in `--agent-mcp` mode. That process connects to the dashboard through a Windows current-user named pipe. It does not load or edit project settings and cannot run a service without the dashboard.
+
+## Agent instructions over an existing connection
+
+MCP initialization exposes server instructions directing the client to `launcher_agent_setup`. The read-only tool takes no arguments and requires no registered project session or reservation. It retrieves the complete integration section and machine-specific connection details from the running dashboard. The same section is available through the MCP resource `fullstacklauncher://setup/agents.md`.
+
+This makes setup guidance discoverable before the agent has Launcher instructions in `AGENTS.md`. Whether a client acts on initialization guidance automatically depends on that client. Connecting alone does not guarantee that an agent calls the tool or writes an instructions file; the copied prompt provides an explicit request when needed.
+
+The agent must inspect the existing local instructions before writing. For setup across projects, use the client's recognized user instructions file. For Codex, honor `CODEX_HOME` and any applicable `AGENTS.override.md` precedence rather than assuming the default `.codex` folder. If the developer requests project-only scope, use the repository's applicable `AGENTS.md`. Append the returned **Full Stack Dev Tool MCP integration** section once, or replace only that existing section. Preserve all other text and report the actual file edited. If local file tools are unavailable, provide the returned section and exact manual steps without claiming that it was saved.
+
+The MCP adapter and dashboard never write `AGENTS.md`, other instruction files, or client configuration as part of this read. They also do not save Launcher settings or start, stop, or restart services. The agent performs any authorized local merge through its own file tools. Reconnecting to the current adapter and keeping the current dashboard open are both required; a registered older adapter does not discover new tool code until it is replaced and reconnected.
 
 ## Agent workflow
 
@@ -59,6 +71,7 @@ CRM instructions require restarting the verified Local API and every configured 
 
 | Tool | Purpose |
 | --- | --- |
+| `launcher_agent_setup` | Read this PC's complete integration section and connection details from the live dashboard. No arguments, project session, or file writes. |
 | `launcher_projects` | Configured projects, root paths, archive state, reservation status. |
 | `launcher_git_connections` | All discovered project repositories, each repository's actual branch, active connection, credential-free URLs and stable identities. Local metadata only; authentication is not checked. |
 | `launcher_record_git_changes` | Save one repository-specific summary for the specified checkout's active connection and actual branch. Call separately for each changed repo; requires a project session, no service lease. Never stages, commits or pushes. |

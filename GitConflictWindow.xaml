@@ -5,10 +5,19 @@
         Background="{StaticResource BackgroundBrush}" Foreground="{StaticResource TextBrush}"
         WindowStartupLocation="CenterOwner" Icon="/Assets/launcher.ico">
     <Grid Margin="22">
-        <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="*"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
+        <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="*"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
         <TextBlock x:Name="Heading" Text="Resolve conflicts before pushing" FontSize="23" FontWeight="SemiBold" TextWrapping="Wrap" Margin="0,0,0,16" Foreground="#FFBC8B"/>
         <TextBox x:Name="Details" Grid.Row="1" IsReadOnly="True" TextWrapping="Wrap" VerticalScrollBarVisibility="Auto" FontFamily="Cascadia Code, Consolas" AutomationProperties.Name="Sync recovery details and conflicted file paths"/>
-        <WrapPanel Grid.Row="2" HorizontalAlignment="Right" Margin="0,18,0,0">
+        <StackPanel x:Name="ResolutionPromptPanel" Grid.Row="2" Margin="0,12,0,0" Visibility="Collapsed">
+            <DockPanel LastChildFill="True">
+                <Button x:Name="CopyPromptButton" Content="Copy prompt" Click="CopyPrompt_Click" DockPanel.Dock="Right" Margin="12,0,0,0" AutomationProperties.Name="Copy conflict resolution prompt for Codex or Claude"/>
+                <TextBlock Text="Codex / Claude" VerticalAlignment="Center" FontWeight="SemiBold"/>
+            </DockPanel>
+            <Expander Header="View prompt" Margin="0,6,0,0" Foreground="{StaticResource TextBrush}">
+                <TextBox x:Name="ResolutionPrompt" IsReadOnly="True" TextWrapping="Wrap" Height="170" VerticalScrollBarVisibility="Auto" AutomationProperties.Name="Conflict resolution prompt for Codex or Claude"/>
+            </Expander>
+        </StackPanel>
+        <WrapPanel Grid.Row="3" HorizontalAlignment="Right" Margin="0,18,0,0">
             <Button Content="Open repository folder" Click="OpenFolder_Click" Margin="0,0,8,6"/>
             <Button Content="Copy details" Click="Copy_Click" Margin="0,0,8,6"/>
             <Button Content="Close" IsCancel="True" Margin="0,0,0,6"/>

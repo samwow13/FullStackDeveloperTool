@@ -17,12 +17,19 @@ public sealed record CodexMonitorSnapshot(
 public sealed class LocalCodexReader
 {
     private const int MaximumRolloutTail = 4 * 1024 * 1024;
+    private const int MaximumRolloutBytesPerSnapshot = 32 * 1024 * 1024;
+    private const int MaximumRolloutReadsPerSnapshot = 64;
+    private int _remainingRolloutBytes;
+    private int _rolloutReads;
+    private int _nextRolloutOffset;
     private readonly string _codexHome;
+    private readonly CodexLocalMetadata _metadata;
     private readonly Dictionary<string, RolloutCache> _rolloutCache = new(StringComparer.OrdinalIgnoreCase);
 
     public LocalCodexReader(string codexHome)
     {
         _codexHome = NormalizePath(codexHome);
+        _metadata = new CodexLocalMetadata(_codexHome);
     }
 
     public IReadOnlyList<string> GetProjectPaths()
@@ -53,18 +60,22 @@ public sealed class LocalCodexReader
     /// available to callers that previously saw those agents working.
     /// </summary>
     public IReadOnlyList<AgentSnapshot> ReadAllSnapshot(IReadOnlyCollection<string>? retainedAgentIds = null,
-        bool includeGuardians = true) =>
+        bool includeGuardians = true, CancellationToken token = default) =>
         ReadStatusCore([], readAll: true, retainedAgentIds: retainedAgentIds,
-            includeGuardians: includeGuardians).Projects[string.Empty];
+            includeGuardians: includeGuardians, token: token).Projects[string.Empty];
 
-    public CodexMonitorSnapshot ReadStatus(IReadOnlyList<string> projectPaths) =>
-        ReadStatusCore(projectPaths, readAll: false, null);
+    public CodexMonitorSnapshot ReadStatus(IReadOnlyList<string> projectPaths, CancellationToken token = default) =>
+        ReadStatusCore(projectPaths, readAll: false, null, token: token);
 
     private CodexMonitorSnapshot ReadStatusCore(IReadOnlyList<string> projectPaths,
-        bool readAll, IReadOnlyCollection<string>? retainedAgentIds, bool includeGuardians = true)
+        bool readAll, IReadOnlyCollection<string>? retainedAgentIds, bool includeGuardians = true,
+        CancellationToken token = default)
     {
         try
         {
+            token.ThrowIfCancellationRequested();
+            _remainingRolloutBytes = MaximumRolloutBytesPerSnapshot;
+            _rolloutReads = 0;
             var projects = projectPaths.Distinct(StringComparer.OrdinalIgnoreCase)
                 .Select((path, index) => new WatchedProject(path, NormalizePath(path), index,
                     new HashSet<string>(StringComparer.OrdinalIgnoreCase)))
@@ -80,7 +91,7 @@ public sealed class LocalCodexReader
             if (!IsCodexRunning())
                 throw new InvalidOperationException("Codex is not running. Completion is unconfirmed; open Codex to resume monitoring.");
 
-            var threads = ReadThreads();
+            var threads = ReadThreads(token);
             var repositoryCache = new Dictionary<string, string?>(StringComparer.OrdinalIgnoreCase);
             string? RepositoryFor(string path)
             {
@@ -181,43 +192,61 @@ public sealed class LocalCodexReader
                 if (parent is not null) parentWorkspaces[project.Key] = parent;
             }
 
-            using var history = new NativeSqlite(Path.Combine(_codexHome, "thread_history_1.sqlite"));
-            // Keep latest turns, questions, and their exact replies in one WAL
-            // read snapshot. Disposing this read-only connection ends it on failure.
-            history.Query("BEGIN");
-            var latest = history.Query("""
-                SELECT t.thread_id, t.status, t.turn_id, t.completed_at, t.started_at
-                FROM thread_turns t
-                INNER JOIN (
-                    SELECT thread_id, MAX(rollout_ordinal) AS ordinal
-                    FROM thread_turns GROUP BY thread_id
-                ) latest ON latest.thread_id = t.thread_id AND latest.ordinal = t.rollout_ordinal
-                """);
             var states = new Dictionary<string, TurnMetadata>(StringComparer.Ordinal);
-            foreach (var row in latest)
+            HashSet<(string ThreadId, string TurnId)> pendingAsyncQuestions = [];
+            if (CodexLocalMetadata.FindDatabase(_codexHome, "thread_history") is { } historyPath)
             {
-                var id = Required(row[0]);
-                var state = row[1] switch
+                using var history = new NativeSqlite(historyPath);
+                CodexLocalMetadata.RequireColumns(CodexLocalMetadata.Columns(history, "thread_turns"),
+                    "thread_id", "status", "turn_id", "completed_at", "started_at", "rollout_ordinal");
+                // Keep latest turns, questions, and their exact replies in one WAL
+                // read snapshot. Disposing this read-only connection ends it on failure.
+                history.Query("BEGIN");
+                var latest = history.Query("""
+                    SELECT t.thread_id, t.status, t.turn_id, t.completed_at, t.started_at
+                    FROM thread_turns t
+                    INNER JOIN (
+                        SELECT thread_id, MAX(rollout_ordinal) AS ordinal
+                        FROM thread_turns GROUP BY thread_id
+                    ) latest ON latest.thread_id = t.thread_id AND latest.ordinal = t.rollout_ordinal
+                    """);
+                foreach (var row in latest)
                 {
-                    "inProgress" => AgentRunState.Running,
-                    "completed" => AgentRunState.Completed,
-                    "failed" or "interrupted" => AgentRunState.Failed,
-                    _ => AgentRunState.Unknown
-                };
+                    var id = Required(row[0]);
+                    var state = row[1] switch
+                    {
+                        "inProgress" => AgentRunState.Running,
+                        "completed" => AgentRunState.Completed,
+                        "failed" or "interrupted" => AgentRunState.Failed,
+                        _ => AgentRunState.Unknown
+                    };
 
-                // Duplicate latest ordinals are unexpected; never infer completion
-                // from only one of conflicting records.
-                var turn = new TurnMetadata(state, Required(row[2]), ReadTimestamp(row[3]), ReadTimestamp(row[4]));
-                if (states.TryGetValue(id, out var prior) && prior != turn)
-                    turn = new TurnMetadata(AgentRunState.Unknown, null, null, null);
-                states[id] = turn;
+                    // Duplicate latest ordinals are unexpected; never infer completion
+                    // from only one of conflicting records.
+                    var turn = new TurnMetadata(state, Required(row[2]), ReadTimestamp(row[3]), ReadTimestamp(row[4]));
+                    if (states.TryGetValue(id, out var prior) && prior != turn)
+                        turn = new TurnMetadata(AgentRunState.Unknown, null, null, null);
+                    states[id] = turn;
+                }
+                CodexLocalMetadata.RequireColumns(CodexLocalMetadata.Columns(history, "thread_items"),
+                    "thread_id", "turn_id", "item_id", "rollout_ordinal", "item_type", "item_json");
+                pendingAsyncQuestions = ReadPendingAsyncQuestions(history);
+                history.Query("COMMIT");
             }
-            var pendingAsyncQuestions = ReadPendingAsyncQuestions(history);
-            history.Query("COMMIT");
 
-            using var queue = new NativeSqlite(Path.Combine(_codexHome, "queue_1.sqlite"));
-            var queued = queue.Query("SELECT DISTINCT thread_id FROM queued_items")
-                .Select(row => Required(row[0])).ToHashSet(StringComparer.Ordinal);
+            var queued = new HashSet<string>(StringComparer.Ordinal);
+            var queuePath = CodexLocalMetadata.FindDatabase(_codexHome, "queue");
+            // A projected history store requires queue evidence as before. Only
+            // the pre-projection CLI format is known to omit both stores.
+            if (CodexLocalMetadata.FindDatabase(_codexHome, "thread_history") is not null && queuePath is null)
+                throw Unavailable();
+            if (queuePath is not null)
+            {
+                using var queue = new NativeSqlite(queuePath);
+                CodexLocalMetadata.RequireColumns(CodexLocalMetadata.Columns(queue, "queued_items"), "thread_id");
+                queued = queue.Query("SELECT DISTINCT thread_id FROM queued_items")
+                    .Select(row => Required(row[0])).ToHashSet(StringComparer.Ordinal);
+            }
 
             if (readAll && (queued.Any(id => !threadsById.ContainsKey(id)) ||
                 pendingAsyncQuestions.Any(question => !threadsById.ContainsKey(question.ThreadId)) ||
@@ -225,6 +254,33 @@ public sealed class LocalCodexReader
                     (pair.Value.State is AgentRunState.Running or AgentRunState.Waiting or AgentRunState.NeedsInput or AgentRunState.Unknown))))
                 throw Unavailable();
             var retained = retainedAgentIds?.ToHashSet(StringComparer.Ordinal);
+            var lifecycleObservations = new Dictionary<string, RolloutObservation>(StringComparer.Ordinal);
+            RolloutObservation LifecycleFor(ThreadMetadata thread)
+            {
+                token.ThrowIfCancellationRequested();
+                if (!lifecycleObservations.TryGetValue(thread.Id, out var observation))
+                    lifecycleObservations[thread.Id] = observation = ReadRolloutLifecycle(thread.RolloutPath, thread.HasUserEvent);
+                return observation;
+            }
+            // Bound the first read of a large legacy archive. Rotate the starting
+            // point so changing long chats cannot starve all other observations.
+            var unprojected = threads.Where(thread => !states.ContainsKey(thread.Id))
+                .OrderByDescending(thread => retained?.Contains(thread.Id) == true)
+                .ThenBy(thread => thread.Archived).ToArray();
+            foreach (var thread in unprojected.Where(thread => retained?.Contains(thread.Id) == true))
+                LifecycleFor(thread);
+            var remaining = unprojected.Where(thread => retained?.Contains(thread.Id) != true).ToArray();
+            // Metadata is ordered by recent updates. Keep new work responsive
+            // while rotating the rest of a large legacy archive fairly.
+            foreach (var thread in remaining.Take(16)) LifecycleFor(thread);
+            var rotating = remaining.Skip(16).ToArray();
+            if (rotating.Length > 0)
+            {
+                var start = _nextRolloutOffset % rotating.Length;
+                for (var index = 0; index < rotating.Length; index++)
+                    LifecycleFor(rotating[(start + index) % rotating.Length]);
+                _nextRolloutOffset = (start + Math.Max(1, _rolloutReads)) % rotating.Length;
+            }
             var activeAncestors = new HashSet<string>(StringComparer.Ordinal);
             if (readAll)
             {
@@ -234,7 +290,8 @@ public sealed class LocalCodexReader
                 foreach (var thread in threads)
                 {
                     if (!includeGuardians && thread.Guardian) continue;
-                    var observedState = states.TryGetValue(thread.Id, out var observedTurn) ? observedTurn.State : AgentRunState.Unknown;
+                    var observedState = states.TryGetValue(thread.Id, out var observedTurn) ? observedTurn.State :
+                        LifecycleFor(thread).State;
                     var hasQuestion = observedTurn?.TurnId is { } questionTurn &&
                         pendingAsyncQuestions.Contains((thread.Id, questionTurn));
                     if (observedState is AgentRunState.Completed or AgentRunState.Failed or AgentRunState.Idle &&
@@ -251,6 +308,7 @@ public sealed class LocalCodexReader
 
             foreach (var thread in threads)
             {
+                token.ThrowIfCancellationRequested();
                 if (readAll && !includeGuardians && thread.Guardian)
                     continue;
                 if (!readAll && (thread.Archived || thread.Guardian || !owners.ContainsKey(thread.Id)))
@@ -258,7 +316,7 @@ public sealed class LocalCodexReader
                 RolloutObservation? lifecycle = null;
                 var state = states.TryGetValue(thread.Id, out var projected)
                     ? projected.State
-                    : (lifecycle = ReadRolloutLifecycle(thread.RolloutPath, thread.HasUserEvent)).State;
+                    : (lifecycle = LifecycleFor(thread)).State;
                 if (queued.Contains(thread.Id) && state != AgentRunState.Running)
                     state = AgentRunState.Waiting;
                 // Async questions permit continued work. Raise the hand only once
@@ -268,10 +326,11 @@ public sealed class LocalCodexReader
                     state = AgentRunState.NeedsInput;
                 if (state == AgentRunState.Running)
                 {
-                    lifecycle ??= ReadRolloutLifecycle(thread.RolloutPath, thread.HasUserEvent);
+                    lifecycle ??= LifecycleFor(thread);
                     var questionTurnId = projected?.TurnId ?? (lifecycle.ActivityIdentity is { } identity &&
                         identity.StartsWith("turn:", StringComparison.Ordinal) ? identity[5..] : null);
-                    if (questionTurnId is not null && lifecycle.PendingQuestionTurns.Contains(questionTurnId))
+                    if (questionTurnId is not null && lifecycle.PendingQuestionTurns.Contains(questionTurnId) ||
+                        projected is null && lifecycle.HasPendingQuestion)
                         state = AgentRunState.NeedsInput;
                 }
 
@@ -297,20 +356,21 @@ public sealed class LocalCodexReader
                     (state is AgentRunState.Running or AgentRunState.Waiting or AgentRunState.NeedsInput ||
                      retained?.Contains(thread.Id) == true || activeAncestors.Contains(thread.Id)))
                 {
-                    try { lifecycle ??= ReadRolloutLifecycle(thread.RolloutPath, thread.HasUserEvent); }
+                    try { lifecycle ??= LifecycleFor(thread); }
                     catch (Exception exception) when (IsReadFailure(exception))
                     { /* Display metadata must not invalidate an otherwise readable status. */ }
                 }
                 var matchingSelection = lifecycle is not null &&
                     (latestTurnId is null || lifecycle.SelectionTurnId == latestTurnId);
                 snapshots[key].Add(new AgentSnapshot(thread.Id, thread.Title, thread.ProjectPath, state,
-                    thread.ParentId, latestTurnId, projected?.CompletedAt)
+                    thread.ParentId, latestTurnId, projected?.CompletedAt ?? lifecycle?.CompletedAt)
                 {
                     ActivityIdentity = latestTurnId is { Length: > 0 } turnId
                         ? "turn:" + turnId : lifecycle?.ActivityIdentity,
                     ActivityStartedAt = projected?.StartedAt ?? lifecycle?.StartedAt,
                     Model = thread.Model ?? (matchingSelection ? lifecycle?.Model : null),
-                    ReasoningEffort = thread.ReasoningEffort ?? (matchingSelection ? lifecycle?.ReasoningEffort : null)
+                    ReasoningEffort = thread.ReasoningEffort ?? (matchingSelection ? lifecycle?.ReasoningEffort : null),
+                    RolloutPath = thread.RolloutPath
                 });
             }
 
@@ -431,22 +491,13 @@ public sealed class LocalCodexReader
         return rootId;
     }
 
-    private IReadOnlyList<ThreadMetadata> ReadThreads()
+    private IReadOnlyList<ThreadMetadata> ReadThreads(CancellationToken token = default)
     {
-        EnsureDatabaseVersion("state", 5);
-        EnsureDatabaseVersion("thread_history", 1);
-        EnsureDatabaseVersion("queue", 1);
-        using var database = new NativeSqlite(Path.Combine(_codexHome, "state_5.sqlite"));
-        var columns = database.Query("PRAGMA table_info(threads)")
-            .Select(row => row[1]).ToHashSet(StringComparer.OrdinalIgnoreCase);
-        var modelColumn = columns.Contains("model") ? "model" : "NULL";
-        var effortColumn = columns.Contains("reasoning_effort") ? "reasoning_effort" : "NULL";
-        // Deliberately omit first_user_message, preview, and all content tables.
-        var rows = database.Query($"SELECT id, cwd, source, rollout_path, archived, substr(COALESCE(NULLIF(name, ''), title), 1, 160), has_user_event, {modelColumn}, {effortColumn} FROM threads");
+        var rows = _metadata.ReadThreads(token);
         var result = new List<ThreadMetadata>(rows.Count);
         foreach (var row in rows)
         {
-            var source = Required(row[2]);
+            var source = row.Source;
             string? parentId = null;
             var guardian = source is "guardian" or "guardian_review";
             if (source.StartsWith('{'))
@@ -456,9 +507,9 @@ public sealed class LocalCodexReader
                 parentId = FindParent(document.RootElement);
             }
 
-            result.Add(new ThreadMetadata(Required(row[0]), NormalizePath(Required(row[1])),
-                row[5] ?? "Codex task", parentId, Required(row[3]), row[4] != "0", guardian, row[6] != "0",
-                ReadSelectionValue(row[7]), ReadSelectionValue(row[8])));
+            result.Add(new ThreadMetadata(row.Id, NormalizePath(row.ProjectPath),
+                row.Title, parentId, row.RolloutPath, row.Archived, guardian, row.HasUserEvent,
+                ReadSelectionValue(row.Model), ReadSelectionValue(row.ReasoningEffort)));
         }
 
         return result;
@@ -474,15 +525,25 @@ public sealed class LocalCodexReader
             return new(AgentRunState.Unknown, null, null);
 
         var file = new FileInfo(path);
-        if (_rolloutCache.TryGetValue(path, out var cached) && cached.Observation.State != AgentRunState.Unknown &&
-            cached.Length == file.Length && cached.Modified == file.LastWriteTimeUtc &&
-            !(cached.Observation.State == AgentRunState.Idle && hasUserEvent))
+        var lengthBefore = file.Length;
+        var modifiedBefore = file.LastWriteTimeUtc;
+        var createdBefore = file.CreationTimeUtc;
+        if (_rolloutCache.TryGetValue(path, out var cached) && cached.Length == lengthBefore &&
+            cached.Modified == modifiedBefore && cached.Created == createdBefore &&
+            !(cached.Observation.State == AgentRunState.Idle && hasUserEvent) &&
+            !(cached.Observation.CanBecomeIdle && DateTime.UtcNow - modifiedBefore >= TimeSpan.FromMinutes(1)))
             return cached.Observation;
 
+        var offset = Math.Max(0, lengthBefore - MaximumRolloutTail);
+        var capacity = (int)(lengthBefore - offset);
+        if (_rolloutReads >= MaximumRolloutReadsPerSnapshot || capacity > _remainingRolloutBytes)
+            return new(AgentRunState.Unknown, null, null);
         using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
-        var offset = Math.Max(0, stream.Length - MaximumRolloutTail);
+        if (stream.Length != lengthBefore) return new(AgentRunState.Unknown, null, null);
+        _remainingRolloutBytes -= capacity;
+        _rolloutReads++;
         stream.Seek(offset, SeekOrigin.Begin);
-        var bytes = new byte[(int)(stream.Length - offset)];
+        var bytes = new byte[capacity];
         var count = 0;
         while (count < bytes.Length)
         {
@@ -495,6 +556,7 @@ public sealed class LocalCodexReader
         var state = AgentRunState.Unknown;
         string? activityIdentity = null;
         DateTimeOffset? startedAt = null;
+        DateTimeOffset? completedAt = null;
         string? model = null;
         string? reasoningEffort = null;
         string? selectionTurnId = null;
@@ -526,6 +588,16 @@ public sealed class LocalCodexReader
 
             idleCandidate &= record.RecordType is "session_meta" or "realtime_item";
             var lifecycleType = record.RecordType == "event_msg" ? record.PayloadType : null;
+            // A new user submission may precede its start marker. Never replay
+            // the previous turn's completion while the new lifecycle is unknown.
+            if (record.IsUserMessage && state is AgentRunState.Completed or AgentRunState.Failed or AgentRunState.Idle)
+            {
+                state = AgentRunState.Unknown;
+                activityIdentity = null;
+                startedAt = null;
+                completedAt = null;
+                pendingQuestions.Clear();
+            }
             if (record.RecordType == "turn_context")
             {
                 if (!sawSelection || selectionTurnId != record.TurnId)
@@ -543,8 +615,7 @@ public sealed class LocalCodexReader
             if (record.RecordType == "response_item" && record.PayloadType == "function_call" &&
                 record.ToolName is "request_user_input" or "functions.request_user_input" &&
                 record.CallId is { Length: > 0 } callId &&
-                (record.ToolTurnId ?? (activityIdentity is { } currentIdentity && currentIdentity.StartsWith("turn:", StringComparison.Ordinal)
-                    ? currentIdentity[5..] : null)) is { Length: > 0 } toolTurnId)
+                (record.ToolTurnId ?? activityIdentity) is { Length: > 0 } toolTurnId)
                 pendingQuestions[callId] = toolTurnId;
             else if (record.RecordType == "response_item" && record.PayloadType == "function_call_output" &&
                      record.CallId is { } completedCall)
@@ -555,6 +626,7 @@ public sealed class LocalCodexReader
                     ? "turn:" + record.TurnId
                     : "start:" + (offset + lineStart).ToString(System.Globalization.CultureInfo.InvariantCulture);
                 startedAt = record.Timestamp;
+                completedAt = null;
             }
             else if (lifecycleType is "task_complete" or "turn_aborted" &&
                      !string.IsNullOrWhiteSpace(record.TurnId))
@@ -563,11 +635,12 @@ public sealed class LocalCodexReader
                 if (activityIdentity != terminalIdentity) startedAt = null;
                 activityIdentity = terminalIdentity;
             }
+            if (lifecycleType == "task_complete") completedAt = record.Timestamp;
             state = lifecycleType switch
             {
                 "task_started" => AgentRunState.Running,
-                "task_complete" => AgentRunState.Completed,
-                "turn_aborted" => AgentRunState.Failed,
+                "task_complete" => activityIdentity is null ? AgentRunState.Unknown : AgentRunState.Completed,
+                "turn_aborted" => activityIdentity is null ? AgentRunState.Unknown : AgentRunState.Failed,
                 _ => state
             };
             lineStart = index + 1;
@@ -579,14 +652,13 @@ public sealed class LocalCodexReader
             state = AgentRunState.Unknown;
             activityIdentity = null;
             startedAt = null;
+            completedAt = null;
         }
         else if (idleCandidate && DateTime.UtcNow - file.LastWriteTimeUtc >= TimeSpan.FromMinutes(1))
             state = AgentRunState.Idle;
 
-        var lengthBefore = file.Length;
-        var modifiedBefore = file.LastWriteTimeUtc;
         file.Refresh();
-        if (file.Length != lengthBefore || file.LastWriteTimeUtc != modifiedBefore)
+        if (file.Length != lengthBefore || file.LastWriteTimeUtc != modifiedBefore || file.CreationTimeUtc != createdBefore)
             return new(AgentRunState.Unknown, null, null)
             {
                 Model = cached?.Observation.Model,
@@ -600,6 +672,7 @@ public sealed class LocalCodexReader
         {
             activityIdentity = null;
             startedAt = null;
+            completedAt = null;
         }
         else if (activityIdentity is not null && cached is not null && cached.Observation.ActivityIdentity == activityIdentity)
             startedAt ??= cached.Observation.StartedAt;
@@ -619,16 +692,21 @@ public sealed class LocalCodexReader
         {
             Model = model,
             ReasoningEffort = reasoningEffort,
-            SelectionTurnId = selectionTurnId
+            SelectionTurnId = selectionTurnId,
+            CompletedAt = completedAt,
+            CanBecomeIdle = idleCandidate && state == AgentRunState.Unknown && !malformed && lineStart == count
         };
         if (!malformed && lineStart == count && count == bytes.Length)
-            observation = observation with { PendingQuestionTurns = pendingQuestions.Values.ToHashSet(StringComparer.Ordinal) };
+            observation = observation with
+            {
+                PendingQuestionTurns = pendingQuestions.Values.Select(value =>
+                    value.StartsWith("turn:", StringComparison.Ordinal) ? value[5..] : value).ToHashSet(StringComparer.Ordinal),
+                HasPendingQuestion = pendingQuestions.Count > 0
+            };
 
         // Revisit Unknown even without a file change: a brand-new empty voice
         // session must pass the quiet period before it can be classified as idle.
-        if (state != AgentRunState.Unknown || observation.PendingQuestionTurns.Count > 0 ||
-            observation.Model is not null || observation.ReasoningEffort is not null)
-            _rolloutCache[path] = new RolloutCache(file.Length, file.LastWriteTimeUtc, observation);
+        _rolloutCache[path] = new RolloutCache(lengthBefore, modifiedBefore, createdBefore, observation);
         return observation;
     }
 
@@ -643,6 +721,7 @@ public sealed class LocalCodexReader
         string? toolTurnId = null;
         string? model = null;
         string? reasoningEffort = null;
+        string? role = null;
         DateTimeOffset? timestamp = null;
         while (reader.Read())
         {
@@ -668,6 +747,7 @@ public sealed class LocalCodexReader
                     if (reader.TokenType != JsonTokenType.PropertyName)
                         continue;
                     var isPayloadType = reader.ValueTextEquals("type"u8);
+                    var isRole = reader.ValueTextEquals("role"u8);
                     var isTurnId = reader.ValueTextEquals("turn_id"u8);
                     var isName = reader.ValueTextEquals("name"u8);
                     var isCallId = reader.ValueTextEquals("call_id"u8);
@@ -678,6 +758,8 @@ public sealed class LocalCodexReader
                         throw new JsonException();
                     if (isPayloadType && reader.TokenType == JsonTokenType.String)
                         payloadType = reader.GetString();
+                    else if (isRole && reader.TokenType == JsonTokenType.String && recordType == "response_item")
+                        role = reader.GetString();
                     else if (isName && reader.TokenType == JsonTokenType.String && recordType == "response_item")
                         toolName = reader.GetString();
                     else if (isCallId && reader.TokenType == JsonTokenType.String && recordType == "response_item")
@@ -715,7 +797,9 @@ public sealed class LocalCodexReader
             payloadType is "task_started" or "task_complete" or "turn_aborted";
         return new LifecycleRecord(recordType, payloadType,
             isLifecycle || recordType == "turn_context" ? turnId : null,
-            isLifecycle ? timestamp : null, toolName, callId, toolTurnId, model, reasoningEffort);
+            isLifecycle ? timestamp : null, toolName, callId, toolTurnId, model, reasoningEffort,
+            recordType == "event_msg" && payloadType == "user_message" ||
+            recordType == "response_item" && payloadType == "message" && role == "user");
     }
 
     private static string? FindParent(JsonElement element)
@@ -747,18 +831,6 @@ public sealed class LocalCodexReader
         var processes = Process.GetProcessesByName("Codex");
         try { return processes.Any(process => !process.HasExited); }
         finally { foreach (var process in processes) process.Dispose(); }
-    }
-
-    private void EnsureDatabaseVersion(string prefix, int supportedVersion)
-    {
-        if (!Directory.Exists(_codexHome))
-            throw Unavailable();
-        foreach (var path in Directory.EnumerateFiles(_codexHome, prefix + "_*.sqlite", SearchOption.TopDirectoryOnly))
-        {
-            var suffix = Path.GetFileNameWithoutExtension(path)[(prefix.Length + 1)..];
-            if (int.TryParse(suffix, out var version) && version > supportedVersion)
-                throw new InvalidOperationException("Codex local status storage has changed. Update the launcher monitor before relying on completion reminders.");
-        }
     }
 
     private static string? FindRepository(string path)
@@ -835,17 +907,20 @@ public sealed class LocalCodexReader
     private sealed record ProjectMatch(WatchedProject Project, int Kind, int Specificity);
     private sealed record TurnMetadata(AgentRunState State, string? TurnId, DateTimeOffset? CompletedAt, DateTimeOffset? StartedAt);
     private sealed record LifecycleRecord(string RecordType, string? PayloadType, string? TurnId, DateTimeOffset? Timestamp,
-        string? ToolName, string? CallId, string? ToolTurnId, string? Model, string? ReasoningEffort);
+        string? ToolName, string? CallId, string? ToolTurnId, string? Model, string? ReasoningEffort, bool IsUserMessage);
     private sealed record RolloutObservation(AgentRunState State, string? ActivityIdentity, DateTimeOffset? StartedAt)
     {
         public IReadOnlySet<string> PendingQuestionTurns { get; init; } = new HashSet<string>(StringComparer.Ordinal);
         public string? Model { get; init; }
         public string? ReasoningEffort { get; init; }
         public string? SelectionTurnId { get; init; }
+        public DateTimeOffset? CompletedAt { get; init; }
+        public bool HasPendingQuestion { get; init; }
+        public bool CanBecomeIdle { get; init; }
     }
     private sealed record PendingQuestion(long Ordinal, int Count)
     {
         public HashSet<int> AnsweredIndexes { get; } = [];
     }
-    private sealed record RolloutCache(long Length, DateTime Modified, RolloutObservation Observation);
+    private sealed record RolloutCache(long Length, DateTime Modified, DateTime Created, RolloutObservation Observation);
 }

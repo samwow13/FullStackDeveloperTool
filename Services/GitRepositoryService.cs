@@ -166,6 +166,21 @@ public static partial class GitRepositoryService
             }
             var args = replace ? new[] { "remote", "set-url", name, cleanUrl } : new[] { "remote", "add", name, cleanUrl };
             var saved = Result(await GitAsync(root, args, token).ConfigureAwait(false), "Remote saved. The repository has not been pushed.");
+            try
+            {
+                var currentUrl = await RequireSingleRemoteAsync(root, name, false, token).ConfigureAwait(false);
+                if (!string.Equals(currentUrl, cleanUrl, StringComparison.Ordinal))
+                    throw new InvalidOperationException("The remote URL changed before its previous token connection could be cleared. Refresh Config before saving again.");
+                await AzureDevOpsTokenGitAuthentication.ClearChangedBindingAsync(root, name, cleanUrl, token).ConfigureAwait(false);
+            }
+            catch (GitCommandExitUnconfirmedException exception)
+            {
+                throw exception.WithContext(saved + " The previous token connection cleanup is unconfirmed. Inspect Git state after the command exits, then save the remote again.");
+            }
+            catch (Exception exception) when (exception is InvalidOperationException or IOException or UnauthorizedAccessException or OperationCanceledException)
+            {
+                return saved + "\nThe previous token connection cleanup was not confirmed. Refresh Config and save this remote again to finish reconnecting.\n" + Sanitize(exception.Message);
+            }
             if (provider is { } hostingProvider)
             {
                 try
@@ -449,6 +464,10 @@ public static partial class GitRepositoryService
             if (providerResult.ExitCode is not (0 or 1)) ThrowCommandFailure(providerResult);
             var providerTarget = await GitAsync(root, ["config", "--local", "--get-all", $"remote.{name}.launcherProviderTarget"], token).ConfigureAwait(false);
             if (providerTarget.ExitCode is not (0 or 1)) ThrowCommandFailure(providerTarget);
+            var authenticationMode = await GitAsync(root, ["config", "--local", "--get-all", $"remote.{name}.launcherAuthentication"], token).ConfigureAwait(false);
+            if (authenticationMode.ExitCode is not (0 or 1)) ThrowCommandFailure(authenticationMode);
+            var authenticationTarget = await GitAsync(root, ["config", "--local", "--get-all", $"remote.{name}.launcherAuthenticationTarget"], token).ConfigureAwait(false);
+            if (authenticationTarget.ExitCode is not (0 or 1)) ThrowCommandFailure(authenticationTarget);
             GitHostingProvider? provider = providerResult.Output.TrimEnd('\r', '\n') switch
             {
                 "GitHub" => GitHostingProvider.GitHub,
@@ -461,7 +480,8 @@ public static partial class GitRepositoryService
             var postPush = canCopy ? ReadPostPushUrl(postPushResult.Output, pushUrls[0]) : (Url: (string?)"", Error: (string?)null);
             if (!canCopy || providerTarget.Output.TrimEnd('\r', '\n') != RemoteTargetFingerprint(ValidateRemoteUrl(fetchUrls[0]))) provider = null;
             remoteIdentity.Append(name).Append('\0').Append(fetchResult.Output).Append('\0').Append(pushResult.Output).Append('\0')
-                .Append(providerResult.Output).Append('\0').Append(providerTarget.Output).Append('\0').Append(postPushResult.Output).Append('\0');
+                .Append(providerResult.Output).Append('\0').Append(providerTarget.Output).Append('\0').Append(postPushResult.Output).Append('\0')
+                .Append(authenticationMode.Output).Append('\0').Append(authenticationTarget.Output).Append('\0');
             remotes.Add(new GitRemoteInfo
             {
                 Name = name,
@@ -766,9 +786,12 @@ public static partial class GitRepositoryService
         { throw new InvalidOperationException("A selected path is outside the repository or is not a supported working-tree path."); }
     }
 
-    internal static Task<CommandResult> GitAsync(string folder, IReadOnlyList<string> arguments, CancellationToken token, bool network = false,
-        bool interactive = false, string? standardInput = null, bool strictSsh = false)
+    internal static async Task<CommandResult> GitAsync(string folder, IReadOnlyList<string> arguments, CancellationToken token, bool network = false,
+        bool interactive = false, string? standardInput = null, bool strictSsh = false, string? azureDevOpsTokenUrl = null)
     {
+        var tokenCredential = network
+            ? await AzureDevOpsTokenGitAuthentication.PrepareAsync(folder, arguments, azureDevOpsTokenUrl, token).ConfigureAwait(false)
+            : null;
         var args = new List<string>
         {
             "--no-pager", "-c", "color.ui=false", "-c", "credential.interactive=" + (interactive ? "true" : "false"), "-c", "protocol.allow=never",
@@ -776,14 +799,25 @@ public static partial class GitRepositoryService
             "-c", "credential.https://dev.azure.com.useHttpPath=true",
             "-c", "credential.trace=false", "-c", "credential.traceSecrets=false", "-c", "credential.traceMsAuth=false"
         };
+        if (tokenCredential is not null)
+        {
+            interactive = false;
+            args.AddRange(["-c", "credential.interactive=false", "-c", "credential.helper=",
+                "-c", "credential." + tokenCredential.CloneUrl + ".helper=",
+                "-c", "http.followRedirects=false", "-c", "http." + tokenCredential.CloneUrl + ".followRedirects=false",
+                "-c", "http." + tokenCredential.CloneUrl + ".sslVerify=true",
+                "-c", "http.extraHeader=", "-c", "http." + tokenCredential.CloneUrl + ".extraHeader=",
+                "--config-env=http." + tokenCredential.CloneUrl + ".extraHeader=FULLSTACK_AZURE_DEVOPS_AUTH_HEADER"]);
+        }
         if (!interactive) args.AddRange(["-c", "core.askPass="]);
         args.AddRange(arguments);
-        return RunAsync("git.exe", args, folder, token, network ? TimeSpan.FromMinutes(3) : TimeSpan.FromSeconds(45),
-            interactive: interactive, standardInput: standardInput, strictSsh: strictSsh);
+        return await RunAsync("git.exe", args, folder, token, network ? TimeSpan.FromMinutes(3) : TimeSpan.FromSeconds(45),
+            interactive: interactive, standardInput: standardInput, strictSsh: strictSsh, tokenCredential: tokenCredential).ConfigureAwait(false);
     }
 
     private static async Task<CommandResult> RunAsync(string executable, IReadOnlyList<string> arguments, string folder, CancellationToken token, TimeSpan timeout,
-        bool interactive = false, string? standardInput = null, bool strictSsh = false)
+        bool interactive = false, string? standardInput = null, bool strictSsh = false,
+        AzureDevOpsTokenGitAuthentication.Credential? tokenCredential = null)
     {
         token.ThrowIfCancellationRequested();
         using var process = new Process();
@@ -803,7 +837,7 @@ public static partial class GitRepositoryService
         foreach (var key in start.Environment.Keys.ToArray())
             if (repositoryVariables.Contains(key) || key.StartsWith("GIT_CONFIG", StringComparison.OrdinalIgnoreCase)
                 || key.StartsWith("GIT_TRACE", StringComparison.OrdinalIgnoreCase) || key.StartsWith("GCM_TRACE", StringComparison.OrdinalIgnoreCase)
-                || key is "GIT_CURL_VERBOSE" or "GIT_SSL_NO_VERIFY" or "GIT_ASKPASS" or "SSH_ASKPASS"
+                || key is "GIT_CURL_VERBOSE" or "LFS_DEBUG_HTTP" or "GIT_SSL_NO_VERIFY" or "GIT_ASKPASS" or "SSH_ASKPASS"
                     or "GCM_PROVIDER" or "GCM_AUTHORITY" or "GCM_DEBUG" or "GCM_ALLOW_UNSAFE_REMOTES")
                 start.Environment.Remove(key);
         start.Environment["GIT_TERMINAL_PROMPT"] = "0";
@@ -825,6 +859,9 @@ public static partial class GitRepositoryService
             start.Environment["GIT_SSH_VARIANT"] = "ssh";
         }
         start.Environment["LC_ALL"] = "C";
+        start.Environment.Remove("FULLSTACK_AZURE_DEVOPS_AUTH_HEADER");
+        if (tokenCredential is not null)
+            start.Environment["FULLSTACK_AZURE_DEVOPS_AUTH_HEADER"] = tokenCredential.Header;
         process.StartInfo = start;
         try
         {
@@ -848,7 +885,8 @@ public static partial class GitRepositoryService
             var stderr = await error.ConfigureAwait(false);
             if (stdout.Truncated || stderr.Truncated)
                 throw new InvalidOperationException("Git output exceeded the workspace limit. The command may have completed; refresh and inspect with the command line before retrying.");
-            var result = new CommandResult(process.ExitCode, stdout.Text, stderr.Text);
+            var result = new CommandResult(process.ExitCode,
+                tokenCredential?.Redact(stdout.Text) ?? stdout.Text, tokenCredential?.Redact(stderr.Text) ?? stderr.Text);
             return result;
         }
         catch (OperationCanceledException)

@@ -8,8 +8,11 @@ using FullStackLauncher.Services;
 
 namespace FullStackLauncher;
 
-public partial class ChangeDatabaseWindow : Window
+public partial class ChangeDatabaseWindow : Window, IDashboardReplacementWindow
 {
+    public bool IsDashboardReplacementReady => !_busy;
+    public bool IsDashboardReplacementClosePending => false;
+
     private readonly ServiceProfile _profile;
     private readonly string _directory;
     private readonly Func<ApiDatabaseConfiguration, string, string, Task<bool>> _saveAndRestart;

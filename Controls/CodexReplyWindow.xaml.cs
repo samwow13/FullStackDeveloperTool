@@ -9,8 +9,11 @@ using FullStackLauncher.Services;
 namespace FullStackLauncher.Controls;
 
 /// <summary>A fixed chat inbox, durable receipts, and an in-memory unsent draft.</summary>
-public partial class CodexReplyWindow : Window
+public partial class CodexReplyWindow : Window, IDashboardReplacementWindow
 {
+    public bool IsDashboardReplacementReady => !_sending;
+    public bool IsDashboardReplacementClosePending => false;
+
     private readonly string _threadId;
     private readonly CodexReplyInboxStore _inbox;
     private readonly DispatcherTimer _receiptTimer = new() { Interval = TimeSpan.FromSeconds(2) };

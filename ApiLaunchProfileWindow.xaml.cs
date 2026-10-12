@@ -12,8 +12,11 @@ namespace FullStackLauncher;
 
 internal sealed record ApiLaunchProfileDraft(string Command);
 
-public partial class ApiLaunchProfileWindow : Window
+public partial class ApiLaunchProfileWindow : Window, IDashboardReplacementWindow
 {
+    public bool IsDashboardReplacementReady => !_saving || _saved;
+    public bool IsDashboardReplacementClosePending => false;
+
     private readonly ServiceProfile _profile;
     private readonly string _directory;
     private readonly Func<ApiLaunchProfileDraft, Task> _save;

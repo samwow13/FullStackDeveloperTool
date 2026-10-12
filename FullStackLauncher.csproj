@@ -16,6 +16,10 @@
     <DefaultItemExcludes>$(DefaultItemExcludes);**\launcher*.json*;**\*.settings.json*;**\*.local.json*;**\*.settings.local.json;**\*.local.settings.json;**\*.json.bak;**\*.json.*.bak;**\*.json.*.tmp;**\codex-monitor.settings.json*;**\*.codex-crew-reset.json*;**\project-tasks.json*;**\*.project-tasks.json*;**\window-snip-targets.json*;**\*.window-snip-targets.json*</DefaultItemExcludes>
     <DefaultItemExcludes>$(DefaultItemExcludes);**\codex-reply-inbox.json*;**\*.codex-reply-inbox.json*;**\codex-agent-prompts.json*;**\*.codex-agent-prompts.json*;**\codex-agent-chats\**;**\*.codex-agent-chats\**</DefaultItemExcludes>
     <DefaultItemExcludes>$(DefaultItemExcludes);**\codex-project-associations.json*;**\*.codex-project-associations.json*</DefaultItemExcludes>
+    <DefaultItemExcludes>$(DefaultItemExcludes);**\codex-agent-keep-awake\**;**\*.codex-agent-keep-awake\**</DefaultItemExcludes>
+    <DefaultItemExcludes>$(DefaultItemExcludes);**\*.codex-crew-mute.json*</DefaultItemExcludes>
+    <DefaultItemExcludes>$(DefaultItemExcludes);RemoteCompanion\**</DefaultItemExcludes>
+    <DefaultItemExcludes>$(DefaultItemExcludes);**\azure-devops-tokens\**</DefaultItemExcludes>
   </PropertyGroup>
   <ItemGroup>
     <Using Remove="System.Windows.Forms" />

@@ -24,11 +24,16 @@ internal static class QueueOwnerClient
     // Version 10 adds Automatic Loop Mode and version 9 task-store snapshots.
     // Version 11 requires configured access, noninteractive approvals, and a
     // command-access preflight before queue task creation.
-    internal const int ProtocolVersion = 11;
+    // Version 12 verifies project-aware configuration capability and supports
+    // legacy response fields and read-only exact-turn history reconciliation.
+    // Version 13 binds queue lifetime to the dashboard and confirms stop/clear
+    // before closing, without discarding notes or execution receipts.
+    internal const int ProtocolVersion = 13;
     private const string OlderOwnerMessage =
         "An older queue owner is still running. When its task is inactive, exit it from the Full Stack Launcher queue tray icon, then reopen Notes & queue. Existing work was not stopped.";
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
     private static readonly SemaphoreSlim CompatibilityGate = new(1, 1);
+    private static readonly long DashboardStartedAtUtcTicks = GetCurrentProcessStartedAtUtcTicks();
 
     internal static string IdentityFor(string storePath) => Convert.ToHexString(
         SHA256.HashData(Encoding.UTF8.GetBytes(Path.GetFullPath(storePath).ToUpperInvariant()))).ToLowerInvariant();
@@ -72,7 +77,8 @@ internal static class QueueOwnerClient
         string? itemId = null, bool confirmedRetry = false)
     {
         var request = new QueueOwnerRequest(ProtocolVersion, command, projectId, paused,
-            attemptId, confirmedNoActiveTask, itemId, confirmedRetry);
+            attemptId, confirmedNoActiveTask, itemId, confirmedRetry,
+            Environment.ProcessId, DashboardStartedAtUtcTicks);
         var reply = await TrySendAsync(storePath, request, cancellationToken);
         if (reply != null && IsProtocolMismatch(reply))
         {
@@ -111,50 +117,50 @@ internal static class QueueOwnerClient
         return null;
     }
 
-    internal static async Task StartIfSavedWorkAsync()
+    /// <summary>Stop the owned queue turn, clear safe items, and await owner exit.</summary>
+    internal static async Task ShutdownForDashboardAsync(CancellationToken cancellationToken = default)
     {
-        // Reading is safe during dashboard startup. Never execute a prepared note here.
-        await Task.Run(async () =>
+        await CompatibilityGate.WaitAsync(cancellationToken);
+        try
         {
             var store = new ProjectTaskStore();
-            var data = store.Load();
-            if (!store.CanSave) return;
-            await EnsureCompatibleOwnerAsync(store.StorePath);
-            // The compatible owner may have saved a final status during this check.
-            data = store.Load();
-            if (!store.CanSave) return;
-            var pending = data.Receipts.Any(receipt =>
-                receipt.Purpose == ProjectTaskExecutionPurpose.QueueItem &&
-                receipt.QueueReviewCompletedAt is null && receipt.QueueAbandonedAt is null &&
-                ((receipt.State is ProjectTaskRunState.Prepared or ProjectTaskRunState.Starting or
-                    ProjectTaskRunState.Running or ProjectTaskRunState.Recovering or
-                    ProjectTaskRunState.NeedsAttention or ProjectTaskRunState.Failed or
-                    ProjectTaskRunState.Interrupted) ||
-                 (receipt.State == ProjectTaskRunState.Completed &&
-                    (receipt.FinishedAt is null || receipt.Outcome != ProjectTaskOutcome.Succeeded ||
-                     string.IsNullOrWhiteSpace(receipt.ThreadId) || string.IsNullOrWhiteSpace(receipt.TurnId)))));
-            var pendingNotification = data.Receipts.Any(receipt =>
-                receipt.Purpose == ProjectTaskExecutionPurpose.QueueItem &&
-                receipt.NotificationState == ProjectTaskNotificationState.Pending &&
-                !string.IsNullOrWhiteSpace(receipt.CompletionMessage));
-            if (!pending && !pendingNotification && !data.Queues.Any(queue => queue.Enabled)) return;
-            var existing = await TrySendAsync(store.StorePath,
-                new QueueOwnerRequest(ProtocolVersion, "status", null, null), CancellationToken.None);
-            if (existing is { Success: true })
-                return;
-            if (existing != null && IsProtocolMismatch(existing))
-                throw new IOException(OlderOwnerMessage);
-            await StartOwnerAsync(store.StorePath, CancellationToken.None);
-            for (var attempt = 0; attempt < 120; attempt++)
+            var reply = await TrySendAsync(store.StorePath,
+                new QueueOwnerRequest(ProtocolVersion, "shutdown", null, null,
+                    DashboardProcessId: Environment.ProcessId,
+                    DashboardProcessStartedAtUtcTicks: DashboardStartedAtUtcTicks), cancellationToken);
+            if (reply is not null)
             {
-                await Task.Delay(500);
-                if (await TrySendAsync(store.StorePath,
-                    new QueueOwnerRequest(ProtocolVersion, "status", null, null), CancellationToken.None,
-                    connectTimeoutMs: 500) is { Success: true })
-                    return;
+                if (IsProtocolMismatch(reply)) throw new IOException(OlderOwnerMessage);
+                if (!reply.Success || reply.State != "shutdown-complete")
+                    throw new IOException(reply.Message);
+                using var exitTimeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+                exitTimeout.CancelAfter(TimeSpan.FromSeconds(15));
+                try
+                {
+                    while (await Task.Run(() => IsOwnerMutexHeld(store.StorePath), exitTimeout.Token))
+                        await Task.Delay(100, exitTimeout.Token);
+                }
+                catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+                {
+                    throw new IOException("Queues were cleared, but the queue owner has not confirmed exit. Keep the launcher open and retry closing.");
+                }
+                return;
             }
-            throw new IOException("The queue owner is still recovering or could not start. No new queue item was submitted by dashboard startup.");
-        });
+            // A missing/unresponsive reply is never permission to overwrite a live
+            // owner. Keep the same thread's mutex claim throughout load/save.
+            await Task.Run(() =>
+            {
+                using var claim = TryClaimOwnerMutex(store.StorePath)
+                    ?? throw new IOException("The queue owner did not confirm shutdown. Keep the launcher open and retry closing after its task settles.");
+                var data = store.Load();
+                if (!store.CanSave) throw new IOException(store.LoadWarning);
+                cancellationToken.ThrowIfCancellationRequested();
+                if (data.Queues.Count == 0 && data.QueueItems.Count == 0) return;
+                ProjectQueueMaintenance.ClearForShutdown(data);
+                store.Save(data);
+            }, cancellationToken);
+        }
+        finally { CompatibilityGate.Release(); }
     }
 
     internal static bool IsOwnerMutexHeld(string storePath)
@@ -195,7 +201,11 @@ internal static class QueueOwnerClient
     private static async Task StartOwnerAsync(string storePath, CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();
-        var args = new List<string> { "--queue-owner" };
+        var args = new List<string>
+        {
+            "--queue-owner", "--queue-dashboard-pid", Environment.ProcessId.ToString(System.Globalization.CultureInfo.InvariantCulture),
+            "--queue-dashboard-start-ticks", DashboardStartedAtUtcTicks.ToString(System.Globalization.CultureInfo.InvariantCulture)
+        };
         if (!Path.GetFullPath(storePath).Equals(Path.GetFullPath(ProjectTaskStore.DefaultStorePath), StringComparison.OrdinalIgnoreCase))
         {
             const string suffix = ".project-tasks.json";
@@ -222,6 +232,12 @@ internal static class QueueOwnerClient
 
     private static bool IsProtocolMismatch(QueueOwnerReply reply) => !reply.Success &&
         reply.Message.StartsWith("The queue control protocol changed.", StringComparison.Ordinal);
+
+    private static long GetCurrentProcessStartedAtUtcTicks()
+    {
+        using var process = Process.GetCurrentProcess();
+        return process.StartTime.ToUniversalTime().Ticks;
+    }
 
     private static async Task<QueueOwnerReply?> TrySendAsync(
         string storePath, QueueOwnerRequest request, CancellationToken cancellationToken,
@@ -271,7 +287,8 @@ internal static class QueueOwnerClient
 
 internal sealed record QueueOwnerRequest(int Version, string Command, string? ProjectId, bool? Paused,
     string? AttemptId = null, bool ConfirmedNoActiveTask = false,
-    string? ItemId = null, bool ConfirmedRetry = false);
+    string? ItemId = null, bool ConfirmedRetry = false,
+    int? DashboardProcessId = null, long? DashboardProcessStartedAtUtcTicks = null);
 internal sealed record QueueOwnerReply(bool Success, string Message, string? State = null,
     bool HasActiveWork = false, bool CanStopCurrent = false, string? ActiveProjectId = null,
     string? ActiveAttemptId = null);

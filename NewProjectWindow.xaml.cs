@@ -10,10 +10,14 @@ using Microsoft.Win32;
 
 namespace FullStackLauncher;
 
-public partial class NewProjectWindow : Window
+public partial class NewProjectWindow : Window, IDashboardReplacementWindow
 {
+    public bool IsDashboardReplacementReady => !_busy;
+    public bool IsDashboardReplacementClosePending => false;
+
     private readonly string _settingsDirectory;
     private readonly IReadOnlyList<ProjectProfile> _savedProjects;
+    private readonly string? _existingWorkspaceFolder;
     private int _scanVersion;
     private string? _scannedRoot;
     private bool _showingServices;
@@ -39,19 +43,27 @@ public partial class NewProjectWindow : Window
     };
 
     public ProjectProfile Result { get; private set; } = new();
+    public IReadOnlyList<string> ImportedRepositories { get; private set; } = [];
 
-    public NewProjectWindow(string settingsDirectory, IReadOnlyList<ProjectProfile> savedProjects)
+    public NewProjectWindow(string settingsDirectory, IReadOnlyList<ProjectProfile> savedProjects,
+        string? existingWorkspaceFolder = null)
     {
         InitializeComponent();
         MaxHeight = Math.Max(MinHeight, SystemParameters.WorkArea.Height - 32);
         _settingsDirectory = Path.GetFullPath(settingsDirectory);
         _savedProjects = savedProjects;
+        _existingWorkspaceFolder = existingWorkspaceFolder;
+        if (existingWorkspaceFolder is not null)
+        {
+            Title = "Clone repositories";
+            LocalSourceButton.Visibility = Visibility.Collapsed;
+        }
         ApiDirectoryBox.AddHandler(TextBoxBase.TextChangedEvent, new TextChangedEventHandler(ServiceFolder_TextChanged));
         FrontendDirectoryBox.AddHandler(TextBoxBase.TextChangedEvent, new TextChangedEventHandler(ServiceFolder_TextChanged));
         ProjectNameBox.Text = "My Angular project";
         UpdateProjectTypePresentation();
         UpdateStepPresentation();
-        Loaded += (_, _) => LocalSourceButton.Focus();
+        Loaded += (_, _) => (existingWorkspaceFolder is null ? LocalSourceButton : RemoteSourceButton).Focus();
     }
 
     private async void ProjectType_Changed(object sender, RoutedEventArgs e)
@@ -90,9 +102,11 @@ public partial class NewProjectWindow : Window
         if (!_sourceChosen)
         {
             FolderPage.Visibility = ServicesPage.Visibility = BackButton.Visibility = Visibility.Collapsed;
-            StepText.Text = "NEW PROJECT · SOURCE";
-            PageTitleText.Text = "Choose your project source";
-            IntroHelpText.Text = "Use an existing local folder, or clone repositories into a workspace.";
+            StepText.Text = _existingWorkspaceFolder is null ? "NEW PROJECT · SOURCE" : "CLONE REPOSITORIES · CONNECTION";
+            PageTitleText.Text = _existingWorkspaceFolder is null ? "Choose your project source" : "Choose your repository connection";
+            IntroHelpText.Text = _existingWorkspaceFolder is null
+                ? "Use an existing local folder, or clone repositories into a workspace."
+                : $"Add repositories to this project's workspace: {_existingWorkspaceFolder}";
             NextStepText.Text = "Choose a source to continue.";
             return;
         }
@@ -136,11 +150,22 @@ public partial class NewProjectWindow : Window
         RootPathBox.Focus();
     }
 
-    private void RemoteSource_Click(object sender, RoutedEventArgs e)
+    private void RemoteSource_Click(object sender, RoutedEventArgs e) => OpenRemoteSource(useTokenAuthentication: false);
+
+    private void TokenSource_Click(object sender, RoutedEventArgs e) => OpenRemoteSource(useTokenAuthentication: true);
+
+    private void OpenRemoteSource(bool useTokenAuthentication)
     {
         if (_busy) return;
-        var import = new AzureDevOpsImportWindow(_settingsDirectory, _savedProjects) { Owner = this };
+        var import = new AzureDevOpsImportWindow(_settingsDirectory, _savedProjects,
+            useTokenAuthentication: useTokenAuthentication, existingWorkspaceFolder: _existingWorkspaceFolder) { Owner = this };
         if (import.ShowDialog() != true || import.ImportedRoot is not { } root) return;
+        ImportedRepositories = import.ImportedRepositories;
+        if (_existingWorkspaceFolder is not null)
+        {
+            DialogResult = true;
+            return;
+        }
         RootPathBox.Text = root;
         var workspaceName = string.IsNullOrWhiteSpace(import.ImportedWorkspaceName)
             ? new DirectoryInfo(root).Name : import.ImportedWorkspaceName;

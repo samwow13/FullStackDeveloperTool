@@ -85,6 +85,7 @@ public sealed class ServiceProfile
 {
     public string Id { get; set; } = Guid.NewGuid().ToString("N");
     public string Name { get; set; } = "Service";
+    public bool IncludeInBatch { get; set; } = true;
     public string Kind { get; set; } = "Custom";
     // Optional display label for a generic console command, such as Docker or Python.
     [System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]

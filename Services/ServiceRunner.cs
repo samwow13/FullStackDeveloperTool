@@ -14,7 +14,7 @@ namespace FullStackLauncher.Services;
 /// Keep-running shutdown prepares retained identities and output, then disposes without termination. Externally launched services
 /// are stopped only through explicit stop, restart, or confirmed conflict recovery.
 /// </summary>
-public sealed class ServiceRunner : IDisposable
+public sealed partial class ServiceRunner : IDisposable
 {
     // Every saved service has a runner, including unselected and archived projects. Register
     // all folders before commands start so overlapping services cannot adopt each other's processes.
@@ -428,6 +428,7 @@ public sealed class ServiceRunner : IDisposable
         var previousSession = _consoleSession;
         _consoleSession = null;
         _lastError = null;
+        ClearCommandDiagnostics();
         _consoleWasStopped = false;
         Volatile.Write(ref _detectedUrl, null);
         _intentionalStop = false;
@@ -533,7 +534,16 @@ public sealed class ServiceRunner : IDisposable
                 while ((await Task.Run(maintenanceSession.ReadProcesses)).Count > 0)
                     await Task.Delay(150, cancellation.Token);
             cancellation.Token.ThrowIfCancellationRequested();
-            if (process.ExitCode != 0) throw new InvalidOperationException($"{label} exited with code {process.ExitCode}. See the output log.");
+            if (maintenanceSession is not null) await DrainConsoleOutputAsync(maintenanceSession);
+            if (_maintenanceOutputCapture is { } capture) await DrainCapturedOutputAsync(capture);
+            cancellation.Token.ThrowIfCancellationRequested();
+            if (process.ExitCode != 0)
+            {
+                var failure = $"{label} exited with code {process.ExitCode}. See the output log.";
+                RecordCommandFailure(_commandAttempt, failure);
+                throw new InvalidOperationException(failure);
+            }
+            ClearCommandDiagnostics();
             Log($"{label} completed successfully.", kind: ServiceLogKind.Success);
             return true;
         }
@@ -587,7 +597,8 @@ public sealed class ServiceRunner : IDisposable
 
     private Process StartCommand(string command, bool detectUrl, ApiLaunchConfiguration? configuration = null)
     {
-        if (Profile.UsesProcessSession) return StartConsoleCommand(command, isStart: detectUrl);
+        var attempt = BeginCommandDiagnostics(detectUrl);
+        if (Profile.UsesProcessSession) return StartConsoleCommand(command, isStart: detectUrl, attempt);
         var outputGeneration = Interlocked.Read(ref _outputGeneration);
         var frontendRunVersion = detectUrl && FrontendServiceSupport.IsFrontend(Profile)
             ? BeginFrontendRun() : (long?)null;
@@ -624,7 +635,7 @@ public sealed class ServiceRunner : IDisposable
                         if (frontendRunVersion is not null && frontendRunVersion != _managedFrontendRunVersion) return;
                         if (flutterRunVersion is not null && flutterRunVersion != _managedFlutterRunVersion) return;
                         if (!expected && code != 0)
-                            _lastError = $"Start command exited with code {code}. See the output log.";
+                            RecordCommandFailure(attempt, $"Start command exited with code {code}. See the output log.");
                         if (frontendRunVersion is not null && (expected || code != 0))
                             _frontendRunActive = false;
                     }
@@ -638,8 +649,9 @@ public sealed class ServiceRunner : IDisposable
         {
             if (!process.Start()) throw new InvalidOperationException("Windows did not start the command.");
         }
-        catch
+        catch (Exception ex)
         {
+            ObserveCommandLaunchFailure(attempt, process.StartInfo.FileName, ex);
             if (frontendRunVersion is not null) InvalidateFrontendRun();
             process.Dispose();
             throw;
@@ -650,13 +662,13 @@ public sealed class ServiceRunner : IDisposable
         _hasManagedProcess = true;
         process.StandardInput.Close();
         var capture = new ServiceOutputCapture(process, (line, error) =>
-            ReceiveOutput(line, error, detectUrl, configuration, outputGeneration, frontendRunVersion, flutterRunVersion));
+            ReceiveOutput(line, error, detectUrl, configuration, outputGeneration, frontendRunVersion, flutterRunVersion, attempt));
         if (detectUrl) _startOutputCapture = capture;
         else _maintenanceOutputCapture = capture;
         return process;
     }
 
-    private Process StartConsoleCommand(string command, bool isStart)
+    private Process StartConsoleCommand(string command, bool isStart, CommandAttempt attempt)
     {
         var outputGeneration = Interlocked.Read(ref _outputGeneration);
         Log($"> {command}", kind: ServiceLogKind.Command);
@@ -681,7 +693,7 @@ public sealed class ServiceRunner : IDisposable
                     lock (_consoleLogSync)
                     {
                         if (!ReferenceEquals(_consoleSession, session) || outputGeneration != _outputGeneration) return;
-                        if (!expected && code != 0) _lastError = $"Command exited with code {code}. See the output log.";
+                        if (!expected && code != 0) RecordCommandFailure(attempt, $"Command exited with code {code}. See the output log.");
                     }
                     Log($"{(Profile.IsCommandApi ? "API" : "Console")} command exited with code {code}.", code != 0 && !expected,
                         code == 0 && !expected ? ServiceLogKind.Success : ServiceLogKind.Information, outputGeneration);
@@ -690,7 +702,7 @@ public sealed class ServiceRunner : IDisposable
             };
             process.EnableRaisingEvents = true;
             session.Resume((line, error) => ReceiveOutput(line, error, detectUrl: isStart && Profile.IsCommandApi, configuration: null,
-                outputGeneration: outputGeneration, flutterRunVersion: flutterRunVersion));
+                outputGeneration: outputGeneration, flutterRunVersion: flutterRunVersion, attempt: attempt));
             return process;
         }
         catch
@@ -703,7 +715,8 @@ public sealed class ServiceRunner : IDisposable
     }
 
     private void ReceiveOutput(string? line, bool error, bool detectUrl, ApiLaunchConfiguration? configuration,
-        long? outputGeneration = null, long? frontendRunVersion = null, long? flutterRunVersion = null)
+        long? outputGeneration = null, long? frontendRunVersion = null, long? flutterRunVersion = null,
+        CommandAttempt? attempt = null)
     {
         if (outputGeneration is not null && outputGeneration != Interlocked.Read(ref _outputGeneration)) return;
         if (frontendRunVersion is not null && frontendRunVersion != ManagedFrontendRunVersion) return;
@@ -732,6 +745,7 @@ public sealed class ServiceRunner : IDisposable
                 ObserveFrontendBuildOutput(line, runVersion, outputGeneration);
         }
         line = SensitiveDataProtection.Redact(configuration?.Redact(line) ?? line);
+        ObserveCommandOutput(attempt, line);
         Log(line.Length > 8192 ? line[..8192] + " … [line truncated]" : line, error, ServiceLogKind.Output, outputGeneration);
     }
 
@@ -994,14 +1008,18 @@ public sealed class ServiceRunner : IDisposable
             && inspection.Owned.Count == 0
             && (_maintenanceSession is null || (await Task.Run(_maintenanceSession.ReadProcesses)).Count == 0))
         {
+            if (_maintenanceSession is { } completed) await DrainConsoleOutputAsync(completed);
+            if (_maintenanceOutputCapture is { } capture) await DrainCapturedOutputAsync(capture);
             if (!_intentionalStop)
             {
                 var exitCode = maintenance.ExitCode;
-                if (exitCode != 0) _lastError = $"{_maintenanceLabel ?? "Maintenance"} exited with code {exitCode}. See the output log.";
-                Log(exitCode == 0 ? $"{_maintenanceLabel ?? "Maintenance"} completed successfully." : _lastError!,
+                if (exitCode != 0) RecordCommandFailure(_commandAttempt,
+                    $"{_maintenanceLabel ?? "Maintenance"} exited with code {exitCode}. See the output log.");
+                else ClearCommandDiagnostics();
+                Log(exitCode == 0 ? $"{_maintenanceLabel ?? "Maintenance"} completed successfully."
+                    : _lastError ?? $"{_maintenanceLabel ?? "Maintenance"} exited with code {exitCode}. See the output log.",
                     error: exitCode != 0, kind: exitCode == 0 ? ServiceLogKind.Success : ServiceLogKind.Error);
             }
-            if (_maintenanceSession is { } completed) await DrainConsoleOutputAsync(completed);
             _maintenanceSession?.Dispose();
             _maintenanceSession = null;
             _maintenanceOutputCapture?.Dispose();
@@ -1013,6 +1031,9 @@ public sealed class ServiceRunner : IDisposable
         if (Profile.UsesProcessSession && ids.Length == 0 &&
             _consoleSession is { OutputDrainAttempted: false } completedSession && completedSession.Process.HasExited)
             await DrainConsoleOutputAsync(completedSession);
+        if (ids.Length == 0 && _startProcess is { HasExited: true } &&
+            _startOutputCapture is { OutputDrainAttempted: false } completedCapture)
+            await DrainCapturedOutputAsync(completedCapture);
         if (Profile.IsConsole)
         {
             if (FlutterRuntimeStatus.IsNative(Profile)) RefreshFlutter(inspection, ids);
@@ -1048,13 +1069,16 @@ public sealed class ServiceRunner : IDisposable
         if (ids.Length == 0)
         {
             Volatile.Write(ref _detectedUrl, null);
-            Publish(_lastError is null ? ServiceState.Stopped : ServiceState.Error,
-                _lastError ?? "No matching service processes", ids);
+            var failure = _lastError ?? PendingStartupDependencyFailure();
+            Publish(failure is null ? ServiceState.Stopped : ServiceState.Error,
+                failure ?? "No matching service processes", ids);
             return;
         }
         if (listeners.Length == 0)
         {
-            Publish(ServiceState.Starting, $"Process detected; waiting for HTTP on port {endpoint.Port}", ids, uiUrl);
+            var dependencyFailure = PendingStartupDependencyFailure();
+            Publish(dependencyFailure is null ? ServiceState.Starting : ServiceState.Error,
+                dependencyFailure ?? $"Process detected; waiting for HTTP on port {endpoint.Port}", ids, uiUrl);
             return;
         }
         var verifyFlutterAssets = false;
@@ -1110,6 +1134,7 @@ public sealed class ServiceRunner : IDisposable
                     return;
                 }
             }
+            if (status < 500) CompleteStartupDiagnostics();
             Publish(ServiceState.Running, status >= 500 ? $"{origin}; HTTP {status} (server reports an error)" : $"{origin}; HTTP {status}", ids, uiUrl,
                 status >= 500 ? ServiceLogKind.Warning : ServiceLogKind.Success);
             RefreshSwaggerUiStatus(inspection, uiUrl);
@@ -1117,7 +1142,9 @@ public sealed class ServiceRunner : IDisposable
         }
         catch (Exception ex) when (ex is HttpRequestException or TaskCanceledException)
         {
-            Publish(ServiceState.Starting, "Port is listening; waiting for an HTTP response", ids, uiUrl);
+            var dependencyFailure = PendingStartupDependencyFailure();
+            Publish(dependencyFailure is null ? ServiceState.Starting : ServiceState.Error,
+                dependencyFailure ?? "Port is listening; waiting for an HTTP response", ids, uiUrl);
         }
     }
 
@@ -1245,6 +1272,11 @@ public sealed class ServiceRunner : IDisposable
             exitCode = session.Process.ExitCode;
         if (ids.Length > 0)
         {
+            if (PendingStartupDependencyFailure() is { } dependencyFailure)
+            {
+                Publish(ServiceState.Error, dependencyFailure, ids);
+                return;
+            }
             var origin = ProcessOrigin(inspection);
             var detail = exitCode is { } code
                 ? $"{origin}; command exited with code {code}; child processes still running"
@@ -1260,6 +1292,7 @@ public sealed class ServiceRunner : IDisposable
         }
         if (exitCode == 0)
         {
+            ClearCommandDiagnostics();
             Publish(ServiceState.Completed, "Command completed successfully (exit code 0)", ids);
             return;
         }
@@ -1289,6 +1322,7 @@ public sealed class ServiceRunner : IDisposable
         }
         if (appReady)
         {
+            CompleteStartupDiagnostics();
             Publish(ServiceState.Running, exitCode is { } code
                 ? $"{ProcessOrigin(inspection)}; Flutter app running; Flutter command exited with code {code}"
                 : $"{ProcessOrigin(inspection)}; Flutter app window detected", ids);
@@ -1296,6 +1330,11 @@ public sealed class ServiceRunner : IDisposable
         }
         if (ids.Length > 0)
         {
+            if (PendingStartupDependencyFailure() is { } dependencyFailure)
+            {
+                Publish(ServiceState.Error, dependencyFailure, ids);
+                return;
+            }
             var detail = inspection.FlutterApps.Apps.Count > 0 ? "Flutter app process detected; waiting for the app window"
                 : appWasReady ? "Flutter app exited; waiting for Flutter tools to finish" : startupDetail;
             Publish(ServiceState.Starting, detail, ids);
@@ -1303,6 +1342,7 @@ public sealed class ServiceRunner : IDisposable
         }
         if (exitCode == 0)
         {
+            ClearCommandDiagnostics();
             Publish(ServiceState.Completed, appWasReady ? "Flutter app exited; command completed (exit code 0)"
                 : "Flutter command completed (exit code 0); no local app process remains; app readiness was not verified", ids);
             return;
@@ -1342,6 +1382,7 @@ public sealed class ServiceRunner : IDisposable
     private async Task<bool> StopCoreAsync(bool includeExternal, ConflictApproval? conflictApproval = null)
     {
         _intentionalStop = true;
+        CompleteStartupDiagnostics();
         InvalidateFrontendRun();
         lock (_consoleLogSync) _flutterRunActive = false;
         Volatile.Write(ref _flutterAppProcessIdentities, []);
@@ -1511,6 +1552,7 @@ public sealed class ServiceRunner : IDisposable
     private void Publish(ServiceState state, string detail, IReadOnlyList<int> ids, string? url = null,
         ServiceLogKind? runningLogKind = null)
     {
+        if (state == ServiceState.Error) detail = CommandFailureDetail(detail);
         var previous = Snapshot;
         Volatile.Write(ref _snapshot, new(state, detail, ids.ToArray(), url, _hasManagedProcess));
         var swaggerChanged = ResetSwaggerUiStatus(state);

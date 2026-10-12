@@ -10,17 +10,24 @@ using FullStackLauncher.Services;
 
 namespace FullStackLauncher;
 
-public enum GitReleaseBranchMode { Choose, VerifyLocalMerge, VerifyConflictTest, ChooseMissing }
+public enum GitReleaseBranchMode { Choose, VerifyLocalMerge, ChooseMissing }
 
-public partial class GitReleaseBranchWindow : Window
+public partial class GitReleaseBranchWindow : Window, IDashboardReplacementWindow
 {
+    public bool IsDashboardReplacementReady => !_loading && UnconfirmedCommand is null;
+    public bool IsDashboardReplacementClosePending => _closing && _loading;
+
     private readonly Func<CancellationToken, Task<IReadOnlyList<GitRemoteBranchChoice>>> _loadBranches;
     private IReadOnlyList<GitRemoteBranchChoice> _branches = [];
     private readonly string _remote;
     private readonly string _currentBranch;
     private readonly bool _suggestReleaseBranch;
     private readonly string? _cachedDefaultBranch;
-    private string? _detectedSelection;
+    private readonly bool _verifyLocalMerge;
+    private readonly string _root;
+    private readonly Func<string, CancellationToken, IProgress<string>, Task<GitLocalMergeReview>>? _compare;
+    private readonly Func<GitLocalMergeReview, CancellationToken, IProgress<string>, Task<GitLocalMergeOutcome>>? _merge;
+    private bool _showingCachedSource;
     private bool _userSelectedBranch;
     private bool _applyingBranchList;
     private string? _selectionToRestore;
@@ -32,10 +39,12 @@ public partial class GitReleaseBranchWindow : Window
     private bool _closing;
     private bool _motionPreferenceAttached;
 
-    public GitReleaseBranchWindow(string root, string remote, string fetchUrl,
+    public GitReleaseBranchWindow(string root, string remote,
         Func<CancellationToken, Task<IReadOnlyList<GitRemoteBranchChoice>>> loadBranches,
         string? selected, string currentBranch, GitReleaseBranchMode mode = GitReleaseBranchMode.Choose,
-        bool suggestReleaseBranch = false, string? cachedDefaultBranch = null)
+        bool suggestReleaseBranch = false, string? cachedDefaultBranch = null,
+        Func<string, CancellationToken, IProgress<string>, Task<GitLocalMergeReview>>? compare = null,
+        Func<GitLocalMergeReview, CancellationToken, IProgress<string>, Task<GitLocalMergeOutcome>>? merge = null)
     {
         _loadBranches = loadBranches;
         _remote = remote;
@@ -43,29 +52,42 @@ public partial class GitReleaseBranchWindow : Window
         _suggestReleaseBranch = suggestReleaseBranch;
         _cachedDefaultBranch = cachedDefaultBranch;
         _selectionToRestore = selected;
+        _verifyLocalMerge = mode == GitReleaseBranchMode.VerifyLocalMerge;
+        _root = root;
+        _compare = compare;
+        _merge = merge;
+        _showingCachedSource = _verifyLocalMerge && !string.IsNullOrWhiteSpace(selected);
         InitializeComponent();
         Height = Math.Min(Height, SystemParameters.WorkArea.Height);
         Width = Math.Min(Width, SystemParameters.WorkArea.Width);
         MinHeight = Math.Min(MinHeight, SystemParameters.WorkArea.Height);
         MinWidth = Math.Min(MinWidth, SystemParameters.WorkArea.Width);
-        Context.Text = $"Current local branch: {currentBranch}\nLoading branches from {remote}…";
-        RepositoryContext.Text = SensitiveDataProtection.Redact($"Repository: {root}\nSource remote: {remote}\n{fetchUrl}");
+        Context.Text = currentBranch;
         if (mode == GitReleaseBranchMode.ChooseMissing)
         {
             Headline.Text = "No release branch detected";
             Description.Text = "Choose the release source for this remote, or cancel and choose it later in Config. Saving this choice does not merge or push.";
         }
-        else if (mode != GitReleaseBranchMode.Choose)
+        else if (_verifyLocalMerge)
         {
-            Title = "Verify remote source branch";
-            Headline.Text = mode == GitReleaseBranchMode.VerifyLocalMerge
-                ? "Verify remote source before merging" : "Verify remote source before testing";
-            Submit.Content = "Confirm branch & compare";
-            Description.Text = mode == GitReleaseBranchMode.VerifyLocalMerge
-                ? "Confirm this remote source to check for incoming commits and merge conflicts now. If your current branch already includes the source, return to Git to commit your work. Otherwise review the comparison, then approve the local merge. Selecting a different source saves it for this remote."
-                : "Confirm this remote source to compare committed branches now and show the conflict result here. Selecting a different source saves it for this remote. Uncommitted edits are excluded. The test does not merge, stage, commit, push, or change local files.";
+            Title = "Merge locally";
+            if (_compare != null) Height = Math.Min(760, SystemParameters.WorkArea.Height);
+            Headline.Text = "Is this the correct source branch?";
+            Submit.Content = "Refresh & compare";
+            Description.Text = _compare == null
+                ? "Refresh the source, then automatically preview incoming commits and conflicts. Review the result before approving a local merge." : "";
         }
-        UpdateSelection();
+        if (_showingCachedSource)
+        {
+            // Existing local evidence renders immediately. No Git command runs until refresh is requested.
+            _branches = [new GitRemoteBranchChoice(selected!, "")];
+            _loaded = true;
+            LoadingStatus.Text = _compare == null ? "Source shown from local configuration or cached refs. Refresh before comparing." : "";
+            Height = Math.Min(_compare == null ? 330 : 760, SystemParameters.WorkArea.Height);
+            MinHeight = Math.Min(300, SystemParameters.WorkArea.Height);
+            ApplySearch();
+        }
+        UpdateAvailability();
     }
 
     public GitCommandExitUnconfirmedException? UnconfirmedCommand { get; private set; }
@@ -77,12 +99,17 @@ public partial class GitReleaseBranchWindow : Window
         _initialLoadStarted = true;
         SystemParameters.StaticPropertyChanged += MotionPreference_Changed;
         _motionPreferenceAttached = true;
-        await LoadBranchesAsync();
+        if (_showingCachedSource) UpdateAvailability();
+        else await LoadBranchesAsync();
     }
 
-    private async Task LoadBranchesAsync()
+    private async Task LoadBranchesAsync(bool compareAfterRefresh = false)
     {
         if (_loading || _closing || UnconfirmedCommand != null) return;
+        var sourceToCompare = compareAfterRefresh ? SelectedBranch : null;
+        _selectionToRestore = SelectedBranch ?? _selectionToRestore;
+        _showingCachedSource = false;
+        Height = Math.Min(_compare == null ? 490 : 760, SystemParameters.WorkArea.Height);
         using var cancellation = new CancellationTokenSource();
         _loadCancellation = cancellation;
         _loading = true;
@@ -94,7 +121,6 @@ public partial class GitReleaseBranchWindow : Window
         ErrorDetails.Visibility = Visibility.Collapsed;
         EmptyNotice.Visibility = Visibility.Collapsed;
         LoadingStatus.Text = $"Loading branches from {_remote}…";
-        Context.Text = $"Current local branch: {_currentBranch}\nReading the remote branch list now.";
         UpdateAvailability();
         try
         {
@@ -107,18 +133,23 @@ public partial class GitReleaseBranchWindow : Window
             if (_closing) return;
             _branches = branches;
             _loaded = true;
-            if (_suggestReleaseBranch && !_userSelectedBranch)
+            if (compareAfterRefresh)
+            {
+                // Never substitute a different source after the user requested this exact branch.
+                _selectionToRestore = sourceToCompare;
+            }
+            else if (_suggestReleaseBranch && !_userSelectedBranch)
             {
                 // Reevaluate the entire live list so new or removed release names
                 // cannot preserve an ambiguous cached suggestion.
                 _selectionToRestore = GitReleaseBranchDetection.Detect(branches.Select(branch => branch.Name), _cachedDefaultBranch).Branch;
-                _detectedSelection = _selectionToRestore;
             }
-            Context.Text = $"Current local branch: {_currentBranch}\nBranches read from {_remote} just now.";
             LoadingStatus.Text = branches.Count == 0
                 ? "The remote has no branches yet."
                 : $"Loaded {branches.Count:N0} remote branch(es). Confirm the source to continue.";
             ApplySearch();
+            if (compareAfterRefresh && SelectedBranch != sourceToCompare)
+                LoadingStatus.Text = "The source is no longer on this remote. Choose a current branch, then compare.";
         }
         catch (Exception exception)
         {
@@ -130,7 +161,6 @@ public partial class GitReleaseBranchWindow : Window
             _branches = [];
             Branches.ItemsSource = null;
             _loadFailed = true;
-            Context.Text = $"Current local branch: {_currentBranch}\nThe remote branch list could not be verified.";
             LoadingStatus.Text = UnconfirmedCommand != null
                 ? "Git process exit is not confirmed. Cancel, then use Retry in Git to check its exit before continuing."
                 : exception is OperationCanceledException
@@ -154,9 +184,19 @@ public partial class GitReleaseBranchWindow : Window
                 if (_loaded && _branches.Count > 0) Search.Focus();
             }
         }
+        if (compareAfterRefresh && !_closing && _loaded && !_loadFailed
+            && UnconfirmedCommand == null && sourceToCompare != null && SelectedBranch == sourceToCompare)
+        {
+            if (_compare != null) await RunComparisonAsync(sourceToCompare);
+            else DialogResult = true;
+        }
     }
 
-    private async void Retry_Click(object sender, RoutedEventArgs e) => await LoadBranchesAsync();
+    private async void Retry_Click(object sender, RoutedEventArgs e)
+    {
+        if (TryNavigateMergeFlowBack()) return;
+        await LoadBranchesAsync();
+    }
 
     private void Search_Changed(object sender, TextChangedEventArgs e)
     {
@@ -190,7 +230,6 @@ public partial class GitReleaseBranchWindow : Window
             if (!_applyingBranchList && !_loading)
             {
                 _userSelectedBranch = true;
-                _detectedSelection = null;
             }
         }
         UpdateSelection();
@@ -199,11 +238,17 @@ public partial class GitReleaseBranchWindow : Window
     private void UpdateAvailability()
     {
         BranchPicker.IsEnabled = _loaded && !_loading && !_closing && UnconfirmedCommand == null;
+        BranchPicker.Visibility = _showingCachedSource ? Visibility.Collapsed : Visibility.Visible;
         Retry.Visibility = !_loading && !_closing && UnconfirmedCommand == null
-            && (_loadFailed || (_loaded && _branches.Count == 0)) ? Visibility.Visible : Visibility.Collapsed;
-        Retry.Content = _loaded ? "Reload branches" : "Retry";
-        LoadingIndicator.Visibility = _loading || !_initialLoadStarted ? Visibility.Visible : Visibility.Collapsed;
+            && (_showingCachedSource || _loadFailed || (_loaded && _branches.Count == 0)) ? Visibility.Visible : Visibility.Collapsed;
+        Retry.Content = _showingCachedSource ? "Change source…" : _loaded ? "Reload branches" : "Retry";
+        Submit.Content = _showingCachedSource ? "Refresh & compare" : _verifyLocalMerge ? "Confirm branch & compare" : "Use this release branch";
+        LoadingIndicator.Visibility = _loading || (!_initialLoadStarted && !_showingCachedSource) ? Visibility.Visible : Visibility.Collapsed;
+        OperationProgress.Visibility = _loading ? Visibility.Visible : Visibility.Collapsed;
+        StatusRow.Visibility = _loading || !string.IsNullOrWhiteSpace(LoadingStatus.Text) ? Visibility.Visible : Visibility.Collapsed;
+        Description.Visibility = string.IsNullOrWhiteSpace(Description.Text) ? Visibility.Collapsed : Visibility.Visible;
         UpdateSelection();
+        UpdateMergeFlowAvailability();
         UpdateLoadingAnimation();
     }
 
@@ -211,18 +256,26 @@ public partial class GitReleaseBranchWindow : Window
     {
         if (Submit != null) Submit.IsEnabled = _loaded && !_loading && !_closing
             && UnconfirmedCommand == null && SelectedBranch != null;
-        if (SourceSummary != null) SourceSummary.Text = !_initialLoadStarted || _loading
-            ? "Loading remote branches before selecting the source…"
-            : !_loaded ? "A verified remote branch list is required to continue."
-            : SelectedBranch is { } source ? source == _detectedSelection
-                ? $"Suggested release source: {_remote}/{source} · confirm or choose another."
-                : $"Release source: {_remote}/{source}"
-            : "Select a release branch to continue.";
+        UpdateBranchContext();
+        UpdateMergeFlowAvailability();
     }
 
-    private void Submit_Click(object sender, RoutedEventArgs e)
+    private void UpdateBranchContext()
     {
-        if (Submit.IsEnabled && SelectedBranch != null) DialogResult = true;
+        if (Context == null || Branches == null) return;
+        var comparison = _mergeReview?.Comparison;
+        var source = comparison?.SourceBranch ?? SelectedBranch ?? _selectionToRestore;
+        var local = comparison?.CurrentBranch ?? _currentBranch;
+        Context.Text = source == null ? local : $"{local}  ←  {comparison?.Remote ?? _remote}/{source}";
+    }
+
+    private async void Submit_Click(object sender, RoutedEventArgs e)
+    {
+        if (await TryAdvanceMergeFlowAsync()) return;
+        if (!Submit.IsEnabled || SelectedBranch == null) return;
+        if (_showingCachedSource) await LoadBranchesAsync(compareAfterRefresh: true);
+        else if (_compare != null) await RunComparisonAsync(SelectedBranch);
+        else DialogResult = true;
     }
 
     private void Cancel_Click(object sender, RoutedEventArgs e) => Close();
@@ -236,10 +289,20 @@ public partial class GitReleaseBranchWindow : Window
 
     private void Window_Closing(object? sender, CancelEventArgs e)
     {
+        if (_loading && _mergeFlowStage == MergeFlowStage.Merging)
+        {
+            // Cancellation can follow a local checkpoint or merge side effect. Keep its outcome visible.
+            e.Cancel = true;
+            LoadingStatus.Text = "Canceling Git work. Waiting to inspect the local merge result…";
+            CancelButton.Content = "Canceling…";
+            CancelButton.IsEnabled = false;
+            _loadCancellation?.Cancel();
+            return;
+        }
         _closing = true;
         if (!_loading) return;
         e.Cancel = true;
-        LoadingStatus.Text = "Canceling branch loading. Waiting for Git to finish before closing…";
+        LoadingStatus.Text = "Canceling Git work. Waiting for Git to finish before closing…";
         CancelButton.Content = "Canceling…";
         CancelButton.IsEnabled = false;
         UpdateAvailability();
@@ -249,7 +312,7 @@ public partial class GitReleaseBranchWindow : Window
     private void UpdateLoadingAnimation()
     {
         StopLoadingAnimation();
-        if ((!_loading && _initialLoadStarted) || !IsVisible || !SystemParameters.ClientAreaAnimation) return;
+        if (_showingCachedSource || (!_loading && _initialLoadStarted) || !IsVisible || !SystemParameters.ClientAreaAnimation) return;
         LoadingRotate.BeginAnimation(RotateTransform.AngleProperty,
             new DoubleAnimation(0, 360, TimeSpan.FromMilliseconds(900)) { RepeatBehavior = RepeatBehavior.Forever });
     }

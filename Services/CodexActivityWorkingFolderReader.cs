@@ -30,24 +30,22 @@ internal sealed class CodexActivityWorkingFolderReader(string codexHome)
         if (requested.Length == 0) return result;
         var current = agents.ToDictionary(agent => agent.Id, StringComparer.Ordinal);
         foreach (var id in requested)
-            if (current.TryGetValue(id, out var agent) && !string.IsNullOrWhiteSpace(agent.LatestTurnId) &&
-                _cache.TryGetValue(id, out var cached) && cached.TurnId == agent.LatestTurnId)
+            if (current.TryGetValue(id, out var agent) && ReadActivityKey(agent) is { } activityKey &&
+                _cache.TryGetValue(id, out var cached) && cached.TurnId == activityKey)
                 result[id] = cached.Folders;
 
         try
         {
             token.ThrowIfCancellationRequested();
-            using var database = new NativeSqlite(Path.Combine(_codexHome, "state_5.sqlite"));
-            var paths = database.Query("SELECT id, rollout_path FROM threads")
-                .Where(row => row[0] is not null && requestedSet.Contains(row[0]!))
-                .ToDictionary(row => row[0]!, row => row[1], StringComparer.Ordinal);
+            var paths = current.Values.Where(agent => requestedSet.Contains(agent.Id))
+                .ToDictionary(agent => agent.Id, agent => agent.RolloutPath, StringComparer.Ordinal);
             var readCount = Math.Min(MaximumReadsPerPoll, requested.Length);
             var start = _nextOffset % requested.Length;
             for (var index = 0; index < readCount; index++)
             {
                 token.ThrowIfCancellationRequested();
                 var id = requested[(start + index) % requested.Length];
-                if (!current.TryGetValue(id, out var agent) || string.IsNullOrWhiteSpace(agent.LatestTurnId)) continue;
+                if (!current.TryGetValue(id, out var agent) || ReadActivityKey(agent) is not { } activityKey) continue;
                 try
                 {
                     if (!paths.TryGetValue(id, out var storedPath) || string.IsNullOrWhiteSpace(storedPath))
@@ -67,22 +65,22 @@ internal sealed class CodexActivityWorkingFolderReader(string codexHome)
                     var length = file.Length;
                     var modified = file.LastWriteTimeUtc;
                     if (_cache.TryGetValue(id, out var cached) && cached.Path == path &&
-                        cached.Length == length && cached.Modified == modified && cached.TurnId == agent.LatestTurnId)
+                        cached.Length == length && cached.Modified == modified && cached.TurnId == activityKey)
                     {
                         result[id] = cached.Folders;
                         continue;
                     }
-                    var observation = ReadTail(path, agent.LatestTurnId!, token);
+                    var observation = ReadTail(path, activityKey, token);
                     file.Refresh();
                     if (file.Length != length || file.LastWriteTimeUtc != modified) continue;
                     var folders = observation.Folders;
                     // A growing bounded tail may lose the earlier same-turn call.
                     // A new turn or rewritten file must never inherit that evidence.
                     if (folders.Count == 0 && !observation.ConflictingTurn && cached is not null &&
-                        cached.Path == path && cached.TurnId == agent.LatestTurnId && length > cached.Length)
+                        cached.Path == path && cached.TurnId == activityKey && length > cached.Length)
                         folders = cached.Folders;
                     result[id] = folders;
-                    _cache[id] = new(path, length, modified, agent.LatestTurnId!, folders);
+                    _cache[id] = new(path, length, modified, activityKey, folders);
                 }
                 catch (OperationCanceledException) { throw; }
                 catch (Exception ex) when (IsReadFailure(ex))
@@ -144,6 +142,8 @@ internal sealed class CodexActivityWorkingFolderReader(string codexHome)
                     payloadType is "task_started" or "task_complete" or "turn_aborted")
                 {
                     var turnId = String(payload, "turn_id");
+                    if (turnId is null && type == "event_msg" && payloadType == "task_started")
+                        turnId = "start:" + (offset + lineStart).ToString(System.Globalization.CultureInfo.InvariantCulture);
                     if (turnId is not null && turnId != currentTurnId)
                     {
                         currentTurnId = turnId;
@@ -188,7 +188,8 @@ internal sealed class CodexActivityWorkingFolderReader(string codexHome)
     private static string? ReadWorkingFolder(string? toolName, string? arguments, CancellationToken token)
     {
         if (arguments is not { Length: > 0 and <= MaximumScriptCharacters }) return null;
-        if (toolName is "exec_command" or "functions.exec_command")
+        if (toolName is "exec_command" or "functions.exec_command" or "shell" or "functions.shell" or
+            "shell_command" or "functions.shell_command")
         {
             using var document = JsonDocument.Parse(arguments);
             var root = document.RootElement;
@@ -235,6 +236,12 @@ internal sealed class CodexActivityWorkingFolderReader(string codexHome)
         }
         return latestFolder;
     }
+
+    private static string? ReadActivityKey(AgentSnapshot agent) =>
+        !string.IsNullOrWhiteSpace(agent.LatestTurnId) ? agent.LatestTurnId :
+        agent.ActivityIdentity is { } identity && identity.StartsWith("start:", StringComparison.Ordinal) &&
+        long.TryParse(identity.AsSpan(6), System.Globalization.NumberStyles.None,
+            System.Globalization.CultureInfo.InvariantCulture, out var position) && position >= 0 ? identity : null;
 
     private static bool ReadLiteralCommandFolder(List<ScriptToken> tokens, int start, out string? folder, out int end)
     {

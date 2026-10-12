@@ -55,7 +55,7 @@ public partial class AzureDevOpsImportWindow
         if (field == AzureDevOpsRepositoryEditField.Repository)
         {
             var version = _selectionVersion;
-            await RunLookupAsync(token => AzureDevOpsImportService.ListRepositoriesAsync(row.Selection.ProjectUrl, interactive: false, token),
+            await RunLookupAsync(token => ReadRepositoriesAsync(row.Selection.ProjectUrl, interactive: false, token),
                 repositories =>
                 {
                     if (!ReferenceEquals(_inlineRow, row)) return;
@@ -101,7 +101,7 @@ public partial class AzureDevOpsImportWindow
         }
         finally { _updatingInline = false; }
         var version = _selectionVersion;
-        await RunLookupAsync(token => AzureDevOpsImportService.ListBranchesAsync(row.Selection.ProjectUrl, repository.Id, interactive: false, token),
+        await RunLookupAsync(token => ReadBranchesAsync(row.Selection.ProjectUrl, repository.Id, token),
             branches =>
             {
                 if (!ReferenceEquals(_inlineRow, row) || row.SelectedRepository?.Id != repository.Id) return;

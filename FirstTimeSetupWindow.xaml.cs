@@ -6,8 +6,11 @@ using FullStackLauncher.Services;
 
 namespace FullStackLauncher;
 
-public partial class FirstTimeSetupWindow : Window
+public partial class FirstTimeSetupWindow : Window, IDashboardReplacementWindow
 {
+    public bool IsDashboardReplacementReady => !_connecting;
+    public bool IsDashboardReplacementClosePending => false;
+
     private readonly FirstTimeSetupContent _content;
     private bool _connecting;
 
@@ -20,17 +23,21 @@ public partial class FirstTimeSetupWindow : Window
         MinHeight = Math.Min(MinHeight, SystemParameters.WorkArea.Height);
         MinWidth = Math.Min(MinWidth, SystemParameters.WorkArea.Width);
         AgentsBox.Text = content.AgentsInstructions;
+        ConnectedPromptBox.Text = content.ConnectedSetupPrompt;
         PromptBox.Text = content.SetupPrompt;
         ManualBox.Text = content.ManualInstructions;
         CommandBox.Text = content.CodexCommand;
-        Loaded += (_, _) => CopyAgentsButton.Focus();
+        Loaded += (_, _) => CopyConnectedPromptButton.Focus();
     }
 
     private void CopyAgents_Click(object sender, RoutedEventArgs e) => Copy(_content.AgentsInstructions,
-        "Instructions copied. Add them to your existing AGENTS.md without replacing its current content.");
+        "Instructions copied. Merge this section into your applicable AGENTS.md without replacing other instructions.");
+
+    private void CopyConnectedPrompt_Click(object sender, RoutedEventArgs e) => Copy(_content.ConnectedSetupPrompt,
+        "Agent setup prompt copied. Paste it into your MCP-connected chat to fetch and merge this PC's Launcher instructions.");
 
     private void CopyPrompt_Click(object sender, RoutedEventArgs e) => Copy(_content.SetupPrompt,
-        "Setup prompt copied. Paste it into your agent chat after adding the AGENTS.md instructions.");
+        "Setup prompt copied. Paste it into your agent chat for connection and instruction setup.");
 
     private void CopyManual_Click(object sender, RoutedEventArgs e) => Copy(_content.ManualInstructions,
         "Connection details copied. Add a local STDIO server in your agent client's MCP settings.");

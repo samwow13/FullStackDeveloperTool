@@ -82,6 +82,7 @@ public partial class GitWorkspaceWindow
 
     private Task<bool> FetchRemoteAsync(string root, GitRemoteInfo remote) => ExecuteAsync(
         $"Fetch {remote.Name}", token => GitRepositoryService.FetchAsync(root, remote.Name, token),
+        completed: _ => _gitService.MarkFetched(root, remote.Name),
         successMessage: $"Fetch complete. Branches for {remote.Name} refreshed.",
         cancellationContext: " Remote refs may be partly refreshed. Fetch again to confirm the remote branch list.");
 }

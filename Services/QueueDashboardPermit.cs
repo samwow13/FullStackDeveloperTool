@@ -2,6 +2,7 @@ using System.IO;
 using System.Security.Cryptography;
 using System.Text;
 using System.Windows.Threading;
+using FullStackLauncher.ProjectTasks;
 
 namespace FullStackLauncher.Services;
 
@@ -9,6 +10,8 @@ namespace FullStackLauncher.Services;
 /// A dashboard-owned, process-lifetime permit for queue starts. The saved power
 /// preference alone cannot authorize work after the dashboard closes or crashes.
 /// Separate leases allow multiple dashboards without one disabling another.
+/// Protocol-scoped leases prevent an older immutable owner from borrowing a
+/// replacement dashboard's permission before its execution safeguards are upgraded.
 /// </summary>
 internal sealed class QueueDashboardPermit(string settingsPath, Dispatcher dispatcher) : IDisposable
 {
@@ -86,7 +89,9 @@ internal sealed class QueueDashboardPermit(string settingsPath, Dispatcher dispa
         Encoding.UTF8.GetBytes(Path.GetFullPath(path).ToUpperInvariant())));
     private static string LeaseFolder(string scope) => Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-        "FullStackLauncher", "queue-dashboard-permits", scope);
+        "FullStackLauncher", "queue-dashboard-permits", scope,
+        "protocol-" + QueueOwnerClient.ProtocolVersion);
     private static string MutexName(string scope, string id) =>
-        @"Local\FullStackLauncher.QueueDashboard." + scope + "." + id;
+        @"Local\FullStackLauncher.QueueDashboard." + scope + "."
+        + QueueOwnerClient.ProtocolVersion + "." + id;
 }

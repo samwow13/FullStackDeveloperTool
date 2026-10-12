@@ -27,6 +27,7 @@ internal sealed class QueueOwnerHost : IDisposable
     private readonly CancellationTokenSource _lifetime = new();
     private readonly DispatcherTimer _statusTimer = new() { Interval = TimeSpan.FromSeconds(3) };
     private readonly SemaphoreSlim _commandGate = new(1, 1);
+    private readonly object _dashboardSync = new();
     private readonly ProjectQueueCoordinator _coordinator;
     private Mutex? _instance;
     private Forms.NotifyIcon? _tray;
@@ -35,6 +36,12 @@ internal sealed class QueueOwnerHost : IDisposable
     private Forms.ToolStripMenuItem? _stopCurrentMenu;
     private Task? _coordinatorTask;
     private Task? _pipeTask;
+    private Task? _dashboardWatchTask;
+    private Process? _dashboard;
+    private int? _dashboardProcessId;
+    private long? _dashboardStartedAtUtcTicks;
+    private bool _dashboardExitConfirmed;
+    private bool _dashboardStopFailed;
     private bool _awake;
     private bool _awakeFailed;
     private bool _polling;
@@ -42,10 +49,19 @@ internal sealed class QueueOwnerHost : IDisposable
     private string? _activeProjectId;
     private string? _activeAttemptId;
 
-    internal QueueOwnerHost()
+    internal QueueOwnerHost(string[] args)
     {
-        _coordinator = new ProjectQueueCoordinator(_store, _settings, () => new CodexQueueTaskRunner());
+        _coordinator = new ProjectQueueCoordinator(_store, _settings, () => new CodexQueueTaskRunner(),
+            DashboardIsAlive);
         _statusTimer.Tick += async (_, _) => await RefreshStatusAsync();
+        var dashboardPid = ReadArgument(args, "--queue-dashboard-pid");
+        var dashboardStarted = ReadArgument(args, "--queue-dashboard-start-ticks");
+        if (dashboardPid is not null || dashboardStarted is not null)
+        {
+            if (!int.TryParse(dashboardPid, out var processId) || !long.TryParse(dashboardStarted, out var startedAt))
+                throw new ArgumentException("The queue dashboard identity is invalid.");
+            BindDashboard(processId, startedAt);
+        }
     }
 
     internal static async void Open(string[] args)
@@ -67,8 +83,11 @@ internal sealed class QueueOwnerHost : IDisposable
             Application.Current.Shutdown(1);
             return;
         }
-        using var host = new QueueOwnerHost();
-        try { await host.RunAsync(); }
+        try
+        {
+            using var host = new QueueOwnerHost(args);
+            await host.RunAsync();
+        }
         catch (Exception ex)
         {
             // This hidden process has no dashboard to report through. Avoid leaking
@@ -100,12 +119,13 @@ internal sealed class QueueOwnerHost : IDisposable
         await _coordinator.Ready;
         CreateTray();
         _pipeTask = Task.Run(() => ServePipeAsync(_lifetime.Token));
+        _dashboardWatchTask = Task.Run(() => WatchDashboardAsync(_lifetime.Token));
         _statusTimer.Start();
         await RefreshStatusAsync();
-        await Task.WhenAny(_coordinatorTask, _pipeTask);
+        await Task.WhenAny(_coordinatorTask, _pipeTask, _dashboardWatchTask);
         _lifetime.Cancel();
         _statusTimer.Stop();
-        try { await Task.WhenAll(_coordinatorTask, _pipeTask); }
+        try { await Task.WhenAll(_coordinatorTask, _pipeTask, _dashboardWatchTask); }
         catch (OperationCanceledException) when (_lifetime.IsCancellationRequested) { }
     }
 
@@ -129,23 +149,8 @@ internal sealed class QueueOwnerHost : IDisposable
         _tray.ContextMenuStrip.Items.Add(_resumeAllMenu);
         _tray.ContextMenuStrip.Items.Add(_stopCurrentMenu);
         _tray.ContextMenuStrip.Items.Add(new Forms.ToolStripSeparator());
-        _tray.ContextMenuStrip.Items.Add("Exit queue owner", null, async (_, _) =>
-        {
-            try
-            {
-                var status = await _coordinator.GetStatusAsync(null);
-                if (status.HasActiveWork)
-                {
-                    ShowBalloon("Queue owner", "Pause all queues or stop the current task before exiting the queue owner.", Forms.ToolTipIcon.Warning);
-                    return;
-                }
-                _lifetime.Cancel();
-            }
-            catch (Exception ex) when (ex is IOException or InvalidOperationException or OperationCanceledException)
-            {
-                ShowBalloon("Queue owner", "Queue status is unavailable. Exit was not applied.", Forms.ToolTipIcon.Warning);
-            }
-        });
+        _tray.ContextMenuStrip.Items.Add("Exit queue owner", null,
+            async (_, _) => await ApplyTrayCommandAsync("shutdown"));
     }
 
     private async Task ApplyTrayCommandAsync(string command, string? projectId = null,
@@ -156,6 +161,7 @@ internal sealed class QueueOwnerHost : IDisposable
             var reply = await ApplyCommandAsync(new QueueOwnerRequest(QueueOwnerClient.ProtocolVersion,
                 command, projectId, paused, attemptId), _lifetime.Token);
             ShowBalloon("Queue owner", reply.Message, reply.Success ? Forms.ToolTipIcon.Info : Forms.ToolTipIcon.Warning);
+            if (reply is { Success: true, State: "shutdown-complete" }) _lifetime.Cancel();
         }
         catch (OperationCanceledException) when (_lifetime.IsCancellationRequested) { }
     }
@@ -186,6 +192,9 @@ internal sealed class QueueOwnerHost : IDisposable
                     reply = new(false, "The queue command was invalid.");
                 }
                 await writer.WriteLineAsync(JsonSerializer.Serialize(reply, JsonOptions));
+                // Finish the response before cancelling the pipe. The dashboard
+                // still verifies release of the exact per-store owner mutex.
+                if (reply is { Success: true, State: "shutdown-complete" }) _lifetime.Cancel();
             }
             catch (Exception ex) when (ex is IOException or OperationCanceledException or ArgumentException)
             {
@@ -202,8 +211,13 @@ internal sealed class QueueOwnerHost : IDisposable
         await _commandGate.WaitAsync(cancellationToken);
         try
         {
+            BindDashboard(request.DashboardProcessId, request.DashboardProcessStartedAtUtcTicks);
             switch (request.Command)
             {
+                case "shutdown":
+                    var stopped = await _coordinator.ShutdownAsync(cancellationToken);
+                    return new(true, stopped.Message, "shutdown-complete", stopped.HasActiveWork,
+                        stopped.CanStopCurrent, stopped.ActiveProjectId, stopped.ActiveAttemptId);
                 case "enable" when !string.IsNullOrWhiteSpace(request.ProjectId):
                     await _coordinator.EnableQueueAsync(request.ProjectId, cancellationToken);
                     break;
@@ -254,6 +268,109 @@ internal sealed class QueueOwnerHost : IDisposable
             return new(false, ex.Message);
         }
         finally { _commandGate.Release(); }
+    }
+
+    private void BindDashboard(int? processId, long? startedAtUtcTicks)
+    {
+        if (processId is null && startedAtUtcTicks is null) return;
+        if (processId is null or <= 4 || processId == Environment.ProcessId || startedAtUtcTicks is null or <= 0)
+            throw new ArgumentException("The queue dashboard identity is invalid.");
+        lock (_dashboardSync)
+        {
+            if (_dashboardProcessId == processId && _dashboardStartedAtUtcTicks == startedAtUtcTicks) return;
+            Process? dashboard = null;
+            var exited = false;
+            try
+            {
+                dashboard = Process.GetProcessById(processId.Value);
+                _ = dashboard.Handle; // Pin this identity; never adopt a reused PID.
+                using var current = Process.GetCurrentProcess();
+                if (dashboard.SessionId != current.SessionId)
+                    throw new ArgumentException("The queue dashboard belongs to another desktop session.");
+                exited = dashboard.StartTime.ToUniversalTime().Ticks != startedAtUtcTicks || dashboard.HasExited;
+            }
+            catch (ArgumentException) when (dashboard is null) { exited = true; }
+            catch (Exception ex) when (ex is System.ComponentModel.Win32Exception or System.Security.SecurityException)
+            {
+                dashboard?.Dispose();
+                throw new InvalidOperationException("The queue dashboard identity could not be verified. Existing queue ownership was preserved.", ex);
+            }
+            catch
+            {
+                dashboard?.Dispose();
+                throw;
+            }
+            _dashboard?.Dispose();
+            _dashboard = dashboard;
+            _dashboardProcessId = processId;
+            _dashboardStartedAtUtcTicks = startedAtUtcTicks;
+            _dashboardExitConfirmed = exited;
+            _dashboardStopFailed = false;
+        }
+    }
+
+    private bool DashboardHasExited()
+    {
+        lock (_dashboardSync)
+        {
+            if (_dashboardProcessId is null) return false;
+            if (_dashboardExitConfirmed) return true;
+            try { return _dashboard is not null && _dashboard.HasExited; }
+            catch (Exception ex) when (ex is InvalidOperationException or System.ComponentModel.Win32Exception)
+            {
+                return false; // Failed inspection never confirms dashboard exit.
+            }
+        }
+    }
+
+    private bool DashboardIsAlive()
+    {
+        lock (_dashboardSync)
+        {
+            if (_dashboardProcessId is null || _dashboardExitConfirmed || _dashboard is null) return false;
+            try { return !_dashboard.HasExited; }
+            catch (Exception ex) when (ex is InvalidOperationException or System.ComponentModel.Win32Exception)
+            {
+                return false; // Failed inspection never permits a queue start.
+            }
+        }
+    }
+
+    private async Task WatchDashboardAsync(CancellationToken cancellationToken)
+    {
+        while (!cancellationToken.IsCancellationRequested)
+        {
+            await Task.Delay(TimeSpan.FromSeconds(_dashboardStopFailed ? 30 : 3), cancellationToken);
+            if (!DashboardHasExited()) continue;
+            await _commandGate.WaitAsync(cancellationToken);
+            try
+            {
+                if (!DashboardHasExited()) continue; // A replacement may have adopted this owner.
+                await _coordinator.ShutdownAsync(cancellationToken);
+                _lifetime.Cancel();
+                return;
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or
+                InvalidOperationException or ArgumentException)
+            {
+                if (!_dashboardStopFailed)
+                {
+                    _dashboardStopFailed = true;
+                    await Application.Current.Dispatcher.InvokeAsync(() => ShowBalloon("Queue shutdown incomplete",
+                        "The dashboard closed, but queue task inactivity or cleanup could not be confirmed. Queues remain paused. Review the queue tray before exiting.",
+                        Forms.ToolTipIcon.Warning));
+                }
+            }
+            finally { _commandGate.Release(); }
+        }
+    }
+
+    private static string? ReadArgument(string[] args, string name)
+    {
+        var index = Array.FindIndex(args, argument => argument.Equals(name, StringComparison.OrdinalIgnoreCase));
+        if (index < 0) return null;
+        if (index + 1 >= args.Length) throw new ArgumentException("The queue dashboard identity is incomplete.");
+        return args[index + 1];
     }
 
     private async Task RefreshStatusAsync()
@@ -340,6 +457,7 @@ internal sealed class QueueOwnerHost : IDisposable
         _statusTimer.Stop();
         if (_awake) SetThreadExecutionState(Continuous);
         _tray?.Dispose();
+        lock (_dashboardSync) _dashboard?.Dispose();
         _commandGate.Dispose();
         _lifetime.Dispose();
         if (_instance != null)

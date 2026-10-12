@@ -10,8 +10,8 @@ using FullStackLauncher.Models;
 namespace FullStackLauncher.Services;
 
 /// <summary>
-/// Explicit connection setup. Credentials stay with Git's configured helper; any credential
-/// protocol response used to verify the account is private, transient, and never returned to the UI.
+/// Explicit connection setup. Credentials stay with Git's configured helper or the selected
+/// protected token store. Credential values never reach the UI.
 /// </summary>
 public static class GitConnectionService
 {
@@ -110,6 +110,25 @@ public static class GitConnectionService
                     Message = accessible
                         ? "SSH authentication and repository read access verified. Push permissions are checked when pushing."
                         : "SSH access could not be verified. Add your key to this provider and verify the host's fingerprint using its SSH instructions, then check again. This flow never accepts new SSH host keys or changes existing keys."
+                };
+            }
+
+            if (target.Provider == GitHostingProvider.AzureDevOps
+                && await AzureDevOpsTokenGitAuthentication.UsesTokenAsync(root, target.CloneUrl, token).ConfigureAwait(false))
+            {
+                Credential? savedToken = new("pat", AzureDevOpsTokenStore.Read(target.CloneUrl));
+                bool tokenAuthenticated;
+                try { tokenAuthenticated = await VerifyIdentityAsync(target, savedToken, token, personalAccessToken: true).ConfigureAwait(false); }
+                finally { savedToken = null; }
+                if (!tokenAuthenticated)
+                    return new GitConnectionCheckResult { Message = "The saved Azure DevOps token could not be verified. Check network access, token expiry, organization, and Code permissions, then reconnect with a token." };
+                var accessible = await ProbeRepositoryAsync(root, target, token, []).ConfigureAwait(false);
+                return new GitConnectionCheckResult
+                {
+                    Authenticated = true, RepositoryAccessible = accessible,
+                    Message = accessible
+                        ? "Saved Azure DevOps token and repository read access verified. Push permissions are checked when pushing."
+                        : "The saved Azure DevOps token is authenticated, but repository read access could not be verified. Check Code Read scope and repository permissions."
                 };
             }
 
@@ -235,6 +254,7 @@ public static class GitConnectionService
 
     internal static async Task<IReadOnlyList<string>?> ReadAutomaticHelperOptionsAsync(string root, string cloneUrl, CancellationToken token)
     {
+        if (await AzureDevOpsTokenGitAuthentication.UsesTokenAsync(root, cloneUrl, token).ConfigureAwait(false)) return [];
         static bool Known(string value) => value is "" or "manager" or "manager-core" or "wincred" or "cache" or "store";
         // Helper values are shell commands. A custom command may ignore Git/GCM's no-prompt flags.
         // Conservatively skip a configuration containing one, including URL-specific helpers.
@@ -307,7 +327,8 @@ public static class GitConnectionService
         return new Credential(username, password);
     }
 
-    private static async Task<bool> VerifyIdentityAsync(GitConnectionTarget target, Credential credential, CancellationToken token)
+    private static async Task<bool> VerifyIdentityAsync(GitConnectionTarget target, Credential credential, CancellationToken token,
+        bool personalAccessToken = false)
     {
         var clone = new Uri(target.CloneUrl);
         var endpoint = target.Provider == GitHostingProvider.GitHub
@@ -326,7 +347,7 @@ public static class GitConnectionService
         request.Headers.UserAgent.ParseAdd("FullStackLauncher-Git-Setup/1.0");
         request.Headers.Accept.ParseAdd("application/json");
         // Azure's Entra credentials are JWTs; PATs and GitHub credentials use the helper's Basic pair.
-        request.Headers.Authorization = target.Provider == GitHostingProvider.AzureDevOps && credential.Password.StartsWith("eyJ", StringComparison.Ordinal)
+        request.Headers.Authorization = !personalAccessToken && target.Provider == GitHostingProvider.AzureDevOps && credential.Password.StartsWith("eyJ", StringComparison.Ordinal)
             ? new AuthenticationHeaderValue("Bearer", credential.Password)
             : new AuthenticationHeaderValue("Basic", Convert.ToBase64String(Encoding.UTF8.GetBytes(credential.Username + ":" + credential.Password)));
         try
@@ -355,7 +376,7 @@ public static class GitConnectionService
         finally { request.Headers.Authorization = null; }
     }
 
-    private static bool IsAuthenticatedAzureIdentity(JsonElement identity) =>
+    internal static bool IsAuthenticatedAzureIdentity(JsonElement identity) =>
         identity.ValueKind == JsonValueKind.Object
         && identity.TryGetProperty("id", out var id) && id.ValueKind == JsonValueKind.String && Guid.TryParse(id.GetString(), out var guid) && guid != Guid.Empty
         && identity.TryGetProperty("isActive", out var active) && active.ValueKind == JsonValueKind.True

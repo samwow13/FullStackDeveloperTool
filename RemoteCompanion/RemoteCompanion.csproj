@@ -1,0 +1,23 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <UseWPF>true</UseWPF>
+    <UseWindowsForms>true</UseWindowsForms>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <AssemblyName>FullStackRemoteCompanion</AssemblyName>
+    <RootNamespace>FullStackRemoteCompanion</RootNamespace>
+    <StartupObject>FullStackRemoteCompanion.Program</StartupObject>
+    <ApplicationIcon>..\Assets\launcher.ico</ApplicationIcon>
+    <DefaultItemExcludes>$(DefaultItemExcludes);publish\**;**\bin\**;**\obj\**</DefaultItemExcludes>
+    <DefaultItemExcludes>$(DefaultItemExcludes);**\*.dat*;**\*.pfx;**\*.p12;**\*.key;**\*.pem;**\.env*;**\secrets.json*;**\*.settings.json*;**\*.local.json*;**\identity\**</DefaultItemExcludes>
+  </PropertyGroup>
+  <ItemGroup>
+    <Using Remove="System.Windows.Forms" />
+    <Using Remove="System.Drawing" />
+    <Compile Include="..\CompanionProtocol\RemoteProtocol.cs" Link="Protocol\RemoteProtocol.cs" />
+    <Compile Include="..\Services\WindowsUserSecretProtection.cs" Link="Security\WindowsUserSecretProtection.cs" />
+    <PackageReference Include="System.ServiceProcess.ServiceController" Version="10.0.0" />
+  </ItemGroup>
+</Project>

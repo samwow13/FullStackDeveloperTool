@@ -32,39 +32,23 @@
             <RowDefinition Height="Auto"/><RowDefinition Height="*"/>
             <RowDefinition Height="Auto"/><RowDefinition Height="Auto"/>
         </Grid.RowDefinitions>
-        <TextBlock Text="Connect your agent to Full Stack Dev Tool. Add the instructions, then paste the setup prompt into your agent chat."
+        <TextBlock Text="Connect MCP, then let your agent add this PC's Launcher instructions."
                    Style="{StaticResource SetupCaption}" Margin="0,0,0,16"/>
         <ScrollViewer Grid.Row="1" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
             <StackPanel>
-                <TextBlock Text="1. Add instructions to AGENTS.md" Style="{StaticResource SetupHeading}"/>
-                <TextBlock Text="Copy this section into your existing AGENTS.md file. Keep your current instructions. If no file exists, create one in your project folder."
+                <TextBlock Text="1. Connect MCP" Style="{StaticResource SetupHeading}"/>
+                <TextBlock Text="Already connected? Continue to step 2. Otherwise connect Codex or use the manual details for your agent client."
                            Style="{StaticResource SetupCaption}"/>
-                <Button x:Name="CopyAgentsButton" Content="Copy _AGENTS.md content" Click="CopyAgents_Click"
-                        HorizontalAlignment="Left" Padding="12,7" AutomationProperties.Name="Copy AGENTS.md content"/>
-                <Expander Header="Preview instructions" Foreground="{StaticResource TextBrush}" Margin="0,8,0,18">
-                    <TextBox x:Name="AgentsBox" Style="{StaticResource SetupPreview}" AutomationProperties.Name="AGENTS.md instructions"/>
-                </Expander>
-
-                <TextBlock Text="2. Run first time setup" Style="{StaticResource SetupHeading}"/>
-                <TextBlock Text="Paste the prompt into your agent chat after adding the instructions. The agent can connect using local tools or enabled computer use; otherwise it gives you the exact setup steps."
-                           Style="{StaticResource SetupCaption}"/>
-                <Button Content="Copy setup _prompt" Click="CopyPrompt_Click" HorizontalAlignment="Left" Padding="12,7"
-                        Style="{StaticResource PrimaryButton}" AutomationProperties.Name="Copy first time setup prompt"/>
-                <Expander Header="Preview setup prompt" Foreground="{StaticResource TextBrush}" Margin="0,8,0,18">
-                    <TextBox x:Name="PromptBox" Style="{StaticResource SetupPreview}" AutomationProperties.Name="First time setup prompt"/>
-                </Expander>
-
                 <Border Background="{StaticResource CardBrush}" BorderBrush="{StaticResource BorderBrush}"
                         BorderThickness="1" CornerRadius="7" Padding="12">
                     <StackPanel>
-                        <TextBlock Text="Using Codex? Connect directly" Style="{StaticResource SetupHeading}"/>
                         <TextBlock Text="Adds fullStackLauncher after checking existing Codex MCP entries. Conflicts need manual review. Avoid editing MCP settings elsewhere while connecting. Reconnect your agent chat afterward."
                                    Style="{StaticResource SetupCaption}"/>
                         <Button x:Name="ConnectButton" Content="_Connect Codex" Click="Connect_Click" HorizontalAlignment="Left"
                                 Padding="12,7" AutomationProperties.Name="Connect Codex MCP"/>
                     </StackPanel>
                 </Border>
-                <Expander Header="Manual connection details" Foreground="{StaticResource TextBrush}" Margin="0,12,0,0">
+                <Expander Header="Manual connection details" Foreground="{StaticResource TextBrush}" Margin="0,12,0,18">
                     <StackPanel>
                         <TextBox x:Name="ManualBox" Style="{StaticResource SetupPreview}" AutomationProperties.Name="Manual MCP connection details"/>
                         <Button Content="Copy _connection details" Click="CopyManual_Click" HorizontalAlignment="Left" Padding="12,7" Margin="0,8,0,0"/>
@@ -73,9 +57,35 @@
                         <Button Content="Copy PowerShell co_mmand" Click="CopyCommand_Click" HorizontalAlignment="Left" Padding="12,7" Margin="0,8,0,0"/>
                     </StackPanel>
                 </Expander>
+
+                <TextBlock Text="2. Add agent instructions" Style="{StaticResource SetupHeading}"/>
+                <TextBlock Text="Paste this prompt into your MCP-connected chat. Your agent calls launcher_agent_setup and merges the returned integration section into its local instructions file, preserving existing text."
+                           Style="{StaticResource SetupCaption}"/>
+                <Button x:Name="CopyConnectedPromptButton" Content="Copy agent setup _prompt" Click="CopyConnectedPrompt_Click"
+                        HorizontalAlignment="Left" Padding="12,7" Style="{StaticResource PrimaryButton}"
+                        AutomationProperties.Name="Copy setup prompt for connected agent"/>
+                <Expander Header="Preview agent setup prompt" Foreground="{StaticResource TextBrush}" Margin="0,8,0,18">
+                    <TextBox x:Name="ConnectedPromptBox" Style="{StaticResource SetupPreview}"
+                             AutomationProperties.Name="Setup prompt for connected agent"/>
+                </Expander>
+
+                <Expander Header="Manual instructions and disconnected setup" Foreground="{StaticResource TextBrush}">
+                    <StackPanel>
+                        <TextBlock Text="Merge this section into your agent's local instructions file, or the project's AGENTS.md for project-only setup. Preserve other text."
+                                   Style="{StaticResource SetupCaption}" Margin="0,8,0,10"/>
+                        <Button x:Name="CopyAgentsButton" Content="Copy _AGENTS.md content" Click="CopyAgents_Click"
+                                HorizontalAlignment="Left" Padding="12,7" AutomationProperties.Name="Copy AGENTS.md content"/>
+                        <TextBox x:Name="AgentsBox" Style="{StaticResource SetupPreview}" AutomationProperties.Name="AGENTS.md instructions"/>
+                        <TextBlock Text="If MCP still needs configuration, this prompt guides your agent through connection and instruction setup."
+                                   Style="{StaticResource SetupCaption}" Margin="0,14,0,10"/>
+                        <Button Content="Copy disconnected setup p_rompt" Click="CopyPrompt_Click" HorizontalAlignment="Left"
+                                Padding="12,7" AutomationProperties.Name="Copy first time setup prompt"/>
+                        <TextBox x:Name="PromptBox" Style="{StaticResource SetupPreview}" AutomationProperties.Name="First time setup prompt"/>
+                    </StackPanel>
+                </Expander>
             </StackPanel>
         </ScrollViewer>
-        <TextBlock x:Name="StatusText" Grid.Row="2" Text="Keep this dashboard open. Verify the connection with launcher_projects in your agent chat."
+        <TextBlock x:Name="StatusText" Grid.Row="2" Text="Keep this dashboard open. Ask your connected agent to call launcher_agent_setup, then launcher_projects."
                    Foreground="{StaticResource MutedBrush}" TextWrapping="Wrap" Margin="0,14,0,12"
                    AutomationProperties.LiveSetting="Polite"/>
         <Button x:Name="CloseButton" Grid.Row="3" Content="_Close" Click="Close_Click" IsCancel="True"

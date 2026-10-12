@@ -24,7 +24,7 @@ public partial class GitWorkspaceWindow
         ? Visibility.Visible : Visibility.Collapsed;
     public string RepositoryDiscoveryWarning => _repositoryDiscoveryWarning ?? "";
 
-    private async Task<bool> EnsureRepositorySelectedAsync()
+    private async Task<bool> EnsureRepositorySelectedAsync(bool forceRefresh = false)
     {
         if (_repositoryDiscoveryComplete) return !_selectingRepository;
         BeginGitLoad();
@@ -35,9 +35,13 @@ public partial class GitWorkspaceWindow
         Changed();
         try
         {
-            var discovery = await GitRepositoryDiscovery.DiscoverAsync(_configuredFolders.Select((folder, index) =>
-                new GitRepositoryDiscoveryFolder(folder.Label, folder.Directory, _scanProjectRootChildren && index == 0)).ToArray(),
-                _operation.Token);
+            var folders = _configuredFolders.Select((folder, index) =>
+                new GitRepositoryDiscoveryFolder(folder.Label, folder.Directory, _scanProjectRootChildren && index == 0)).ToArray();
+            var project = forceRefresh
+                ? await _gitService.RefreshProjectAsync(_projectId, folders, fetchRemote: false, token: _operation.Token)
+                : await _gitService.GetProjectAsync(_projectId, folders, _operation.Token);
+            if (project.Error != null) throw new InvalidOperationException(project.Error);
+            var discovery = project.Discovery;
             _repositoryDiscoveryWarning = discovery.Warning;
             var repositoryNames = GitRepositoryDisplayNames.Create(_configuredFolders.FirstOrDefault()?.Directory ?? "",
                 discovery.Repositories.Select(repository => repository.Directory));
@@ -45,17 +49,18 @@ public partial class GitWorkspaceWindow
                 repositoryNames.TryGetValue(folder.Directory, out var name) ? name : folder.Label, folder.Directory)).ToArray();
             RepositoryChoices = discovery.Repositories.Select(repository => repository with
                 { Label = repositoryNames[repository.Directory] }).ToArray();
-            _selectingRepository = RepositoryChoices.Count > 1;
+            var preferred = RepositoryChoices.FirstOrDefault(repository =>
+                string.Equals(repository.Directory, _preferredRepositoryRoot, StringComparison.OrdinalIgnoreCase));
+            _selectingRepository = RepositoryChoices.Count > 1 && preferred == null;
             _applyingRepositorySelection = true;
             try
             {
                 Changed();
                 FolderPicker.SelectedItem = _selectingRepository ? null
-                    : RepositoryChoices.FirstOrDefault() is { } repository
+                    : (preferred ?? RepositoryChoices.FirstOrDefault()) is { } repository
                         ? Folders.FirstOrDefault(folder => string.Equals(folder.Directory, repository.Directory, StringComparison.OrdinalIgnoreCase))
                         : Folders.FirstOrDefault();
-                RepositoryPicker.SelectedItem = RepositoryChoices.FirstOrDefault(repository =>
-                    string.Equals(repository.Directory, _preferredRepositoryRoot, StringComparison.OrdinalIgnoreCase));
+                RepositoryPicker.SelectedItem = preferred;
                 _displayedFolder = SelectedFolder?.Directory;
             }
             finally { _applyingRepositorySelection = false; }

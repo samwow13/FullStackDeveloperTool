@@ -11,8 +11,12 @@ public sealed record GitWorkspaceFolder(string Label, string Directory)
     public string Display => $"{Label} · {Directory}";
 }
 
-public partial class GitWorkspaceWindow : Window, INotifyPropertyChanged
+public partial class GitWorkspaceWindow : Window, INotifyPropertyChanged, IDashboardReplacementWindow
 {
+    private bool _replacementClosePending;
+    public bool IsDashboardReplacementReady => IsIdle;
+    public bool IsDashboardReplacementClosePending => _replacementClosePending;
+
     private GitRepositorySnapshot? _snapshot;
     private CancellationTokenSource? _operation;
     private bool _ready;
@@ -27,14 +31,23 @@ public partial class GitWorkspaceWindow : Window, INotifyPropertyChanged
     private string _commitDraft = "";
     private GitRemoteComparison? _comparison;
     private string? _comparisonError;
+    private readonly ProjectGitService _gitService;
+    private readonly string _projectId;
+    private bool _cacheRefreshFailed;
+    private bool _sharedRefreshing;
+    private bool _closed;
+    private bool _sharedUpdatePending;
 
     public GitWorkspaceWindow(string projectName, IReadOnlyList<GitWorkspaceFolder> folders,
-        bool scanChildRepositories = true, string? preferredRepositoryRoot = null)
+        bool scanChildRepositories = true, string? preferredRepositoryRoot = null,
+        string? projectId = null, ProjectGitService? gitService = null)
     {
         ProjectTitle = $"Git · {projectName}";
         _configuredFolders = folders.ToArray();
         _scanProjectRootChildren = scanChildRepositories;
         _preferredRepositoryRoot = preferredRepositoryRoot;
+        _gitService = gitService ?? ProjectGitService.Shared;
+        _projectId = projectId ?? string.Join("|", folders.Select(folder => folder.Directory));
         Folders = _configuredFolders;
         InitializeComponent();
         // Keep the footer reachable on smaller displays; the workspace pages scroll.
@@ -44,6 +57,7 @@ public partial class GitWorkspaceWindow : Window, INotifyPropertyChanged
         MinWidth = Math.Min(MinWidth, SystemParameters.WorkArea.Width);
         DataContext = this;
         Activated += (_, _) => ScheduleMissingReleaseBranchPrompt();
+        Closed += (_, _) => { _closed = true; _gitService.Changed -= SharedGit_Changed; };
     }
 
     public string ProjectTitle { get; }
@@ -56,11 +70,11 @@ public partial class GitWorkspaceWindow : Window, INotifyPropertyChanged
     public bool IsBusy => _busy;
     public bool IsIdle => !_busy && _unconfirmedGitCommand == null;
     public bool IsRepository => _snapshot?.IsRepository == true;
-    public bool CanInitialize => _snapshot is { IsRepository: false };
-    public bool HasRemote => IsRepository && SelectedRemote != null;
+    public bool CanInitialize => !_cacheRefreshFailed && !_sharedRefreshing && _snapshot is { IsRepository: false };
+    public bool HasRemote => !_cacheRefreshFailed && !_sharedRefreshing && IsRepository && SelectedRemote != null;
     public bool CanSync => HasRemote && _powerReadError == null && !HasSyncRecovery && _snapshot is { IsDetached: false, IsUnborn: false, OperationState: null };
-    public bool CanChangeBranch => _powerReadError == null && !HasSyncRecovery && _snapshot is { IsRepository: true, IsUnborn: false, OperationState: null } && Changes.Count == 0;
-    public bool CanSwitchBranch => _powerReadError == null && !HasSyncRecovery && _snapshot is { IsRepository: true, OperationState: null } && Changes.Count == 0;
+    public bool CanChangeBranch => !_cacheRefreshFailed && !_sharedRefreshing && _powerReadError == null && !HasSyncRecovery && _snapshot is { IsRepository: true, IsUnborn: false, OperationState: null } && Changes.Count == 0;
+    public bool CanSwitchBranch => !_cacheRefreshFailed && !_sharedRefreshing && _powerReadError == null && !HasSyncRecovery && _snapshot is { IsRepository: true, OperationState: null } && Changes.Count == 0;
     public bool CanCommitAllPush => CanFinishSync || (IsIdle && HasRemote && _powerDetails != null && !HasSyncRecovery
         && _snapshot is { IsRepository: true, IsDetached: false, OperationState: null }
         && (!_snapshot.IsUnborn || Changes.Count > 0) && !Changes.Any(change => change.IsConflict));
@@ -86,6 +100,8 @@ public partial class GitWorkspaceWindow : Window, INotifyPropertyChanged
         ? remote.FetchUrl == remote.PushUrl ? remote.FetchUrl : $"Fetch: {remote.FetchUrl}\nPush: {remote.PushUrl}"
         : "Choose Config to connect a repository.";
     public string CommitAvailabilityText => !IsRepository ? "Initialize or select a repository to begin."
+        : _sharedRefreshing ? "Background Git refresh is running. Wait for it to finish before committing."
+        : _cacheRefreshFailed ? "Force refresh to confirm current Git state before committing."
         : _powerReadError != null ? _powerReadError
         : _powerDetails?.ReadyToFinish == true ? "Local merge is ready. Review the destination branch, commit all changes and push."
         : HasSyncRecovery ? "Review the local merge below. Resolve and stage any conflicts, then refresh before committing and pushing."
@@ -104,6 +120,8 @@ public partial class GitWorkspaceWindow : Window, INotifyPropertyChanged
     public bool CanSwitchNamedBranch => IsIdle && IsEditingPublishBranch && CanSwitchBranch
         && (ProposedLocalBranch is { IsCurrent: false } || (ProposedLocalBranch == null && ProposedOnlineBranch != null));
     public string BranchActionText => !IsRepository ? "Select a repository first."
+        : _sharedRefreshing ? "Background Git refresh is running. Wait for it to finish before changing branches."
+        : _cacheRefreshFailed ? "Force refresh to confirm current Git state before changing branches."
         : _powerReadError != null ? "Refresh to read the Git workflow state before changing branches."
         : HasSyncRecovery ? "Commit or review the pending local merge before changing branches."
         : _snapshot!.OperationState != null ? "Finish the active Git operation first."
@@ -124,6 +142,7 @@ public partial class GitWorkspaceWindow : Window, INotifyPropertyChanged
     private async void Window_Loaded(object sender, RoutedEventArgs e)
     {
         _ready = true;
+        _gitService.Changed += SharedGit_Changed;
         await LoadGitWorkspaceAsync(verifyConnection: false);
     }
 
@@ -136,6 +155,8 @@ public partial class GitWorkspaceWindow : Window, INotifyPropertyChanged
         if (_displayedFolder != null) _drafts[_displayedFolder] = CaptureDraft();
         _displayedFolder = SelectedFolder?.Directory;
         _snapshot = null;
+        _cacheRefreshFailed = false;
+        _sharedRefreshing = false;
         _preferredRemote = null;
         ResetBranchInspection();
         _comparison = null;
@@ -172,7 +193,68 @@ public partial class GitWorkspaceWindow : Window, INotifyPropertyChanged
         Changed();
     }
 
-    private async Task RefreshAsync(bool fetchRemote = false, bool showLoading = true, CancellationToken cancellationToken = default)
+    private void ApplyRepositoryState(GitRepositoryState state)
+    {
+        if (state.Snapshot is not { } snapshot)
+            throw state.Failure ?? new InvalidOperationException(state.Error ?? "Git status is unavailable. Force refresh to retry.");
+        if (state.Failure is GitCommandExitUnconfirmedException unconfirmed) throw unconfirmed;
+        _cacheRefreshFailed = state.Error != null || state.ComparisonError != null || state.PowerError != null;
+        _sharedRefreshing = state.IsRefreshing;
+        _gitLoadFailed = false;
+        _preferredRemote ??= SelectedRemote?.Name ?? state.ActiveRemote?.Name ?? "";
+        ApplySnapshot(snapshot);
+        _comparison = state.Comparison;
+        _comparisonError = state.ComparisonError;
+        _powerDetails = state.PowerDetails;
+        _powerReadError = state.PowerError;
+        _trustRoot = (state.Failure as GitRepositoryTrustException)?.RepositoryRoot;
+        _localSetupError = state.Error;
+        foreach (var error in new[] { state.Error, state.SelectionError, state.ComparisonError, state.PowerError, state.FetchError, state.LedgerError })
+            if (!string.IsNullOrWhiteSpace(error) && !_latestErrorDetails.Contains(error, StringComparison.Ordinal)) ReportError(error);
+        if (_cacheRefreshFailed)
+            SetStatus("Git refresh failed. Previous status remains visible. Force refresh before another repository action.");
+        Changed();
+    }
+
+    private void SharedGit_Changed(object? sender, ProjectGitChangedEventArgs e)
+    {
+        if (_closed) return;
+        _ = Dispatcher.BeginInvoke(new Action(async () =>
+        {
+            if (_closed || !_ready || _selectingRepository || SelectedFolder is not { } folder) return;
+            if (e.RepositoryRoot != null && !string.Equals(e.RepositoryRoot, Root ?? folder.Directory, StringComparison.OrdinalIgnoreCase)) return;
+            if (e.ProjectId != null && e.ProjectId != _projectId) return;
+            if (!IsIdle || _gitLoadDepth > 0) { _sharedUpdatePending = true; return; }
+            try
+            {
+                var state = await _gitService.GetRepositoryAsync(folder.Directory, SelectedRemote?.Name ?? "");
+                if (_closed || !IsIdle || !string.Equals(folder.Directory, SelectedFolder?.Directory, StringComparison.OrdinalIgnoreCase))
+                { _sharedUpdatePending = true; return; }
+                ApplyRepositoryState(state);
+                ScheduleMissingReleaseBranchPrompt();
+            }
+            catch (Exception exception)
+            {
+                if (exception is GitCommandExitUnconfirmedException command) HoldUnconfirmedBranchCommand(command);
+                else { _cacheRefreshFailed = true; ReportError(SafeError(exception)); Changed(); }
+            }
+        }));
+    }
+
+    private async Task ConsumeSharedUpdateAsync()
+    {
+        if (!_sharedUpdatePending || _closed || !IsIdle || SelectedFolder is not { } folder) return;
+        _sharedUpdatePending = false;
+        try { ApplyRepositoryState(await _gitService.GetRepositoryAsync(folder.Directory, SelectedRemote?.Name ?? "")); }
+        catch (Exception exception)
+        {
+            if (exception is GitCommandExitUnconfirmedException command) HoldUnconfirmedBranchCommand(command);
+            else { _cacheRefreshFailed = true; ReportError(SafeError(exception)); Changed(); }
+        }
+    }
+
+    private async Task RefreshAsync(bool fetchRemote = false, bool showLoading = true, CancellationToken cancellationToken = default,
+        bool forceRefresh = true)
     {
         if (!IsIdle) return;
         if (SelectedFolder is not { } folder)
@@ -180,7 +262,8 @@ public partial class GitWorkspaceWindow : Window, INotifyPropertyChanged
             FailGitLoad("No project folder is configured. Close this window and choose a project folder first.");
             return;
         }
-        if (showLoading) BeginGitLoad();
+        var loading = showLoading && _snapshot == null;
+        if (loading) BeginGitLoad();
         else _gitLoadFailed = false;
         EndPublishBranchEdit();
         _busy = true;
@@ -188,59 +271,47 @@ public partial class GitWorkspaceWindow : Window, INotifyPropertyChanged
         if (!await DrainBranchInspectionAsync())
         {
             _busy = false;
-            if (showLoading) EndGitLoad();
+            if (loading) EndGitLoad();
             Changed();
             return;
         }
         ClearErrorDetails();
         _operation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-        _comparison = null;
         Changed();
-        SetStatus("Reading local repository status…");
+        SetStatus(forceRefresh ? "Refreshing Git status…" : "Reading shared Git status…");
         try
         {
-            var snapshot = await Task.Run(() => GitRepositoryService.ReadAsync(folder.Directory, _operation.Token));
-            _trustRoot = null;
-            _localSetupError = null;
-            if (_preferredRemote == null)
-                await RestoreAgentConnectionSelectionAsync(snapshot, _operation.Token);
-            ApplySnapshot(snapshot);
-            if (fetchRemote && snapshot.IsRepository && SelectedRemote is { } remote)
-            {
-                await FetchForGitLoadAsync(snapshot, remote, _operation.Token);
-                // Fetch can update/prune refs, including before an ordinary failure. Read them
-                // again before displaying branches or comparing against remote history.
-                snapshot = await GitRepositoryService.ReadAsync(folder.Directory, _operation.Token);
-                await RestoreAgentConnectionSelectionAsync(snapshot, _operation.Token);
-                ApplySnapshot(snapshot);
-            }
+            var remoteName = _preferredRemote ?? (_snapshot != null ? SelectedRemote?.Name ?? "" : null);
+            var state = forceRefresh
+                ? await _gitService.RefreshRepositoryAsync(folder.Directory, remoteName, fetchRemote, _operation.Token)
+                : await _gitService.GetRepositoryAsync(folder.Directory, remoteName, _operation.Token);
+            ApplyRepositoryState(state);
+            var snapshot = state.Snapshot!;
             if (!snapshot.IsRepository && !_remoteDraftDirty && _setupStep != SetupStep.Local) OpenSetup(SetupStep.Choice);
-            await RefreshComparisonAsync(_operation.Token);
-            await RefreshPowerDetailsAsync(_operation.Token);
             CheckGitReadFailures();
             if (snapshot.IsRepository && SelectedRemote == null && !_setupOpen && !HasSyncRecovery)
                 OpenSetup(Remotes.Count > 0 ? SetupStep.Connections : SetupStep.Choice);
-            SetStatus($"Refreshed {DateTime.Now:T} · " + (_comparison is { IsLocalComparison: true }
+            if (!_cacheRefreshFailed) SetStatus($"Git status {state.ReadAt.LocalDateTime:T} · " + (_comparison is { IsLocalComparison: true }
                 ? "line totals use the last local commit." : "remote comparison uses last fetched history."));
         }
         catch (Exception ex)
         {
             if (ex is GitCommandExitUnconfirmedException unconfirmed) _unconfirmedGitCommand = unconfirmed;
-            _snapshot = null;
-            _powerDetails = null;
+            _cacheRefreshFailed = true;
             _trustRoot = (ex as GitRepositoryTrustException)?.RepositoryRoot;
             _localSetupError = ex is GitRepositoryTrustException
                 ? "Git blocked this repository because another Windows account owns it. Review the folder below before trusting it."
                 : "Git could not read this folder. Check that the folder exists and Git for Windows is installed, then retry. Details are below.";
-            FailGitLoad(_unconfirmedGitCommand != null ? "Git may still be running. Wait, then Retry to check again."
-                : ex is OperationCanceledException ? "Git loading was canceled or timed out. Try again."
-                : _trustRoot != null ? "This repository needs your trust before Git can load it." : "Git could not load this folder. Check the folder and Git installation, then try again.");
+            if (_snapshot == null || _unconfirmedGitCommand != null)
+                FailGitLoad(_unconfirmedGitCommand != null ? "Git may still be running. Wait, then Retry to check again."
+                    : ex is OperationCanceledException ? "Git loading was canceled or timed out. Try again."
+                    : _trustRoot != null ? "This repository needs your trust before Git can load it." : "Git could not load this folder. Check the folder and Git installation, then try again.");
             var detail = SafeError(ex);
             if (fetchRemote && ex is OperationCanceledException)
                 detail += " Remote refs may be partly refreshed. Retry loading or use Fetch to confirm them.";
             ReportError(detail);
             SetStatus(ex is OperationCanceledException
-                ? "Refresh canceled or timed out. Status is unavailable until the next refresh."
+                ? "Refresh canceled or timed out. Force refresh before another repository action."
                     + (fetchRemote ? " Remote refs may be partly refreshed. Retry loading or use Fetch to confirm them." : "")
                 : detail);
         }
@@ -249,8 +320,9 @@ public partial class GitWorkspaceWindow : Window, INotifyPropertyChanged
             _operation.Dispose();
             _operation = null;
             _busy = false;
-            if (showLoading) EndGitLoad();
+            if (loading) EndGitLoad();
             Changed();
+            await ConsumeSharedUpdateAsync();
         }
     }
 
@@ -258,10 +330,12 @@ public partial class GitWorkspaceWindow : Window, INotifyPropertyChanged
     // selection and closing are disabled until the outcome and fresh status are known.
     private async Task<bool> ExecuteAsync(string title, Func<CancellationToken, Task<string>> action,
         bool refresh = true, Action<string>? completed = null, string? successMessage = null, bool useResultAsStatus = false,
-        GitRemoteInfo? pushedRemote = null, string? cancellationContext = null)
+        GitRemoteInfo? pushedRemote = null, string? cancellationContext = null, GitRepositorySnapshot? reviewedSnapshot = null,
+        CancellationToken cancellationToken = default)
     {
         if (!IsIdle || SelectedFolder is not { } folder) return false;
-        var expected = _snapshot;
+        // A background update during a review must never replace the state the user approved.
+        var expected = reviewedSnapshot ?? _snapshot;
         EndPublishBranchEdit();
         _busy = true;
         Changed();
@@ -272,7 +346,7 @@ public partial class GitWorkspaceWindow : Window, INotifyPropertyChanged
             return false;
         }
         ClearErrorDetails();
-        _operation = new();
+        _operation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         Changed();
         SetStatus($"{title}…");
         var success = false;
@@ -308,36 +382,33 @@ public partial class GitWorkspaceWindow : Window, INotifyPropertyChanged
         {
             if (refresh && _unconfirmedGitCommand == null)
             {
-                BeginGitLoad();
                 SetStatus($"{outcome} Refreshing local status…");
                 _operation.Dispose();
                 _operation = new();
                 try
                 {
-                    var refreshed = await Task.Run(() => GitRepositoryService.ReadAsync(folder.Directory, _operation.Token));
-                    if (_preferredRemote == null)
-                        await RestoreAgentConnectionSelectionAsync(refreshed, _operation.Token);
-                    ApplySnapshot(refreshed);
-                    _trustRoot = null;
-                    _localSetupError = null;
-                    await RefreshComparisonAsync(_operation.Token);
-                    await RefreshPowerDetailsAsync(_operation.Token);
+                    // A command updates only its checkout. Every Git surface then consumes
+                    // this shared result instead of loading and routing its own workspace.
+                    _gitService.InvalidateRepository(Root ?? folder.Directory);
+                    var refreshed = await _gitService.RefreshRepositoryAsync(folder.Directory,
+                        _preferredRemote ?? SelectedRemote?.Name, fetchRemote: false, _operation.Token);
+                    ApplyRepositoryState(refreshed);
                     CheckGitReadFailures();
+                    if (_cacheRefreshFailed)
+                        outcome += " Local refresh failed; force refresh before another repository action.";
                 }
                 catch (Exception ex)
                 {
                     if (ex is GitCommandExitUnconfirmedException unconfirmed) _unconfirmedGitCommand = unconfirmed;
-                    _snapshot = null;
-                    _powerDetails = null;
+                    _cacheRefreshFailed = true;
                     _trustRoot = (ex as GitRepositoryTrustException)?.RepositoryRoot;
                     _localSetupError = "The operation ended, but local status could not be read. Retry before continuing.";
-                    FailGitLoad(_unconfirmedGitCommand != null ? "Git may still be running. Wait, then Retry to check again."
-                        : "The operation ended, but Git status could not reload. Retry loading before continuing.");
-                    _comparison = null;
+                    if (_snapshot == null || _unconfirmedGitCommand != null)
+                        FailGitLoad(_unconfirmedGitCommand != null ? "Git may still be running. Wait, then Retry to check again."
+                            : "The operation ended, but Git status could not reload. Retry loading before continuing.");
                     outcome += " Local refresh failed; refresh before another repository action.";
                     ReportError(SafeError(ex));
                 }
-                finally { EndGitLoad(); }
                 if (_gitLoadFailed && !string.IsNullOrWhiteSpace(outcome))
                 {
                     ReportError(outcome);
@@ -350,6 +421,7 @@ public partial class GitWorkspaceWindow : Window, INotifyPropertyChanged
             _busy = false;
             SetStatus(outcome);
             Changed();
+            await ConsumeSharedUpdateAsync();
         }
         return success;
     }
@@ -408,32 +480,9 @@ public partial class GitWorkspaceWindow : Window, INotifyPropertyChanged
         ExecuteAsync("Select active Git connection", async token =>
         {
             await AgentGitChangeStore.SelectConnectionAsync(root, remote.Name, AgentGitChangeStore.ConnectionId(remote), token);
+            await _gitService.RefreshLedgerAsync(root, token);
             return $"{remote.Name} is now the active connection for agent change summaries in this checkout.";
         }, refresh: false, useResultAsStatus: true);
-
-    private async Task RestoreAgentConnectionSelectionAsync(GitRepositorySnapshot snapshot, CancellationToken token)
-    {
-        if (snapshot.RepositoryRoot is not { } root) return;
-        _preferredRemote = "";
-        try
-        {
-            var selection = await AgentGitChangeStore.ReadSelectionAsync(root, token);
-            var eligible = snapshot.Remotes.Where(remote => remote.UrlCanCopy).ToArray();
-            var selected = selection != null
-                ? eligible.SingleOrDefault(remote => remote.Name == selection.RemoteName && AgentGitChangeStore.ConnectionId(remote) == selection.ConnectionId)
-                : eligible.SingleOrDefault(remote => snapshot.Upstream?.StartsWith(remote.Name + "/", StringComparison.Ordinal) == true)
-                    ?? (snapshot.Upstream == null && snapshot.Remotes.Count == 1 && eligible.Length == 1 ? eligible[0] : null);
-            _preferredRemote = selected?.Name ?? "";
-            if (selected == null && snapshot.Remotes.Count > 0)
-                ReportError(selection != null
-                    ? "The saved connection changed or was removed. Choose Config, select a connection, then choose Use selected connection."
-                    : "The current branch does not identify one active connection. Choose Config, select a connection, then choose Use selected connection.");
-        }
-        catch (Exception exception) when (exception is not OperationCanceledException)
-        {
-            ReportError(SafeError(exception));
-        }
-    }
 
     private void UpdateRemoteSelection()
     {
@@ -496,7 +545,7 @@ public partial class GitWorkspaceWindow : Window, INotifyPropertyChanged
         string InitialBranch, GitHostingProvider? Provider, SetupStep Step, bool SetupOpen, SetupRoute Route, string PublishBranch,
         string SyncMessage, CommitDraftScope? CommitScope, PublishBranchScope? PublishScope);
 
-    private async void Refresh_Click(object sender, RoutedEventArgs e) => await LoadGitWorkspaceAsync(verifyConnection: false);
+    private async void Refresh_Click(object sender, RoutedEventArgs e) => await LoadGitWorkspaceAsync(verifyConnection: false, forceRefresh: true);
     private async void Fetch_Click(object sender, RoutedEventArgs e)
     {
         if (Root is not { } root || SelectedRemote is not { } remote) return;
@@ -514,12 +563,13 @@ public partial class GitWorkspaceWindow : Window, INotifyPropertyChanged
     private async void Push_Click(object sender, RoutedEventArgs e)
     {
         if (!CanSync || Root is not { } root || SelectedRemote is not { } remote) return;
-        var branch = _snapshot!.Branch;
+        var snapshot = _snapshot!;
+        var branch = snapshot.Branch;
         if (!Confirm("Push commits", $"Repository: {root}\nBranch: {branch}\nDestination: {remote.Name}/{branch}\n{remote.PushUrl}\n\nPush all existing commits on this branch?")) return;
         BeginPublishFeedback(branch, remote.Name);
         SetPublishPhase("Pushing commits");
         var pushed = await ExecuteAsync($"Push {remote.Name}/{branch}", token => GitRepositoryService.PushAsync(root, remote.Name, branch, token),
-            useResultAsStatus: true, pushedRemote: remote);
+            useResultAsStatus: true, pushedRemote: remote, reviewedSnapshot: snapshot);
         CompletePublishFeedback(pushed, StatusText);
     }
 
@@ -556,12 +606,31 @@ public partial class GitWorkspaceWindow : Window, INotifyPropertyChanged
         if (IsIdle && _branchInspectionTasks.Count > 0)
         {
             e.Cancel = true;
+            _replacementClosePending = true;
             _busy = true;
+            var closePosted = false;
             Changed();
-            var stopped = await DrainBranchInspectionAsync();
-            _busy = false;
-            Changed();
-            if (stopped) Close();
+            try
+            {
+                var stopped = await DrainBranchInspectionAsync();
+                if (stopped)
+                {
+                    // A completed inspection can drain synchronously inside Closing.
+                    // Post the next close so WPF finishes the canceled close first.
+                    _ = Dispatcher.BeginInvoke(new Action(() =>
+                    {
+                        try { if (!_closed) Close(); }
+                        finally { _replacementClosePending = false; }
+                    }));
+                    closePosted = true;
+                }
+            }
+            finally
+            {
+                _busy = false;
+                if (!closePosted) _replacementClosePending = false;
+                Changed();
+            }
             return;
         }
         if (IsIdle)

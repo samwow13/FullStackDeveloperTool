@@ -12,6 +12,7 @@ public partial class MainWindow
         LocationChanged += (_, _) => SectionsMenuToggle.IsChecked = false;
         SizeChanged += (_, _) => RepositionSectionsMenu();
         Closed += (_, _) => SectionsMenuToggle.IsChecked = false;
+        Closed += (_, _) => CloseLanComputersWorkspace();
     }
 
     private void SectionsMenu_Opened(object sender, EventArgs e) => ProjectsToggle.Focus();

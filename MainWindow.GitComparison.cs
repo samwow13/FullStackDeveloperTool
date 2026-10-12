@@ -174,11 +174,9 @@ public partial class MainWindow
         _dashboardGitSelectedWatch = selected;
         if (selected is not null)
         {
-            // Even a previously visited branch needs fresh evidence after switching.
-            // Reject any read started before this selection, including A -> B -> A.
+            // Reuse this scope's comparison while the shared service supplies newer state.
             selected.ComparisonGeneration++;
-            selected.Comparison = null;
-            selected.ComparisonPending = true;
+            selected.ComparisonPending = selected.Comparison is null;
             selected.NextLocalRead = DateTimeOffset.MinValue;
         }
         NotifyDashboardGitChanged();
@@ -345,13 +343,21 @@ public partial class MainWindow
         }
     }
 
-    private async Task ReadDashboardGitComparisonAsync(DashboardGitWatch watch, CancellationToken token)
+    private async Task ReadDashboardGitComparisonAsync(DashboardGitWatch watch, CancellationToken token,
+        bool forceRefresh = false)
     {
         watch.NextLocalRead = DateTimeOffset.UtcNow + DashboardGitLocalRefreshInterval;
         var generation = watch.ComparisonGeneration;
         var resultBeforeRead = watch.Result;
         DashboardGitComparison read;
-        try { read = await DashboardGitComparisonService.ReadAsync(watch.Scope, token); }
+        try
+        {
+            var state = forceRefresh
+                ? await _projectGitService.RefreshRepositoryAsync(watch.Scope.RepositoryRoot, watch.Scope.RemoteName,
+                    fetchRemote: false, token)
+                : await _projectGitService.GetRepositoryAsync(watch.Scope.RepositoryRoot, watch.Scope.RemoteName, token);
+            read = DashboardGitComparisonService.FromCachedState(watch.Scope, state);
+        }
         catch (GitCommandExitUnconfirmedException) { throw; }
         catch (OperationCanceledException) when (token.IsCancellationRequested)
         {
@@ -403,7 +409,8 @@ public partial class MainWindow
                 CompleteDashboardGitAttempt(watch, "Repository, branch, or active connection changed. Open Git to review setup.");
                 return;
             }
-            await ReadDashboardGitComparisonAsync(watch, operation.Token);
+            // Prepare an explicit conflict test from fresh local evidence; passive reads stay cached.
+            await ReadDashboardGitComparisonAsync(watch, operation.Token, forceRefresh: true);
             if (watch.Comparison is not { CanCheckConflicts: true } prepared)
             {
                 CompleteDashboardGitAttempt(watch, watch.Comparison?.ConflictCheckUnavailableReason ?? "Git conflict test unavailable. Open Git to review setup.");

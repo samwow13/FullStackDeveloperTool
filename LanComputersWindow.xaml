@@ -1,0 +1,278 @@
+<Window x:Class="FullStackLauncher.LanComputersWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="Remote" Icon="pack://application:,,,/Assets/launcher.ico"
+        Width="1000" Height="670" MinWidth="860" MinHeight="560" WindowStartupLocation="CenterOwner"
+        ShowInTaskbar="False" UseLayoutRounding="True" Closed="Window_Closed"
+        Background="{DynamicResource BackgroundBrush}" Foreground="{DynamicResource TextBrush}"
+        FontFamily="Segoe UI" FontSize="13">
+    <Window.Resources>
+        <ResourceDictionary>
+        <ResourceDictionary.MergedDictionaries>
+            <ResourceDictionary Source="Controls/SetupStyles.xaml"/>
+        </ResourceDictionary.MergedDictionaries>
+        <Style x:Key="Caption" TargetType="TextBlock">
+            <Setter Property="Foreground" Value="{DynamicResource MutedBrush}"/>
+            <Setter Property="Margin" Value="0,0,0,5"/>
+        </Style>
+        <Style TargetType="PasswordBox">
+            <Setter Property="Foreground" Value="{DynamicResource TextBrush}"/>
+            <Setter Property="Background" Value="#111923"/>
+            <Setter Property="BorderBrush" Value="{DynamicResource BorderBrush}"/>
+            <Setter Property="Padding" Value="10,8"/>
+            <Setter Property="CaretBrush" Value="{DynamicResource AccentBrush}"/>
+        </Style>
+        <Style TargetType="Hyperlink">
+            <Setter Property="Foreground" Value="{DynamicResource AccentBrush}"/>
+            <Setter Property="TextDecorations" Value="Underline"/>
+            <Style.Triggers>
+                <Trigger Property="IsMouseOver" Value="True"><Setter Property="Foreground" Value="{DynamicResource TextBrush}"/></Trigger>
+                <Trigger Property="IsKeyboardFocused" Value="True"><Setter Property="Foreground" Value="{DynamicResource TextBrush}"/></Trigger>
+            </Style.Triggers>
+        </Style>
+        <Style x:Key="RemoteMenuItem" TargetType="MenuItem">
+            <Setter Property="Foreground" Value="{DynamicResource TextBrush}"/>
+            <Setter Property="Padding" Value="12,8"/>
+            <Setter Property="Template"><Setter.Value>
+                <ControlTemplate TargetType="MenuItem">
+                    <Border x:Name="ItemFrame" Background="Transparent" CornerRadius="4" Padding="{TemplateBinding Padding}">
+                        <ContentPresenter ContentSource="Header" RecognizesAccessKey="True" TextElement.Foreground="{TemplateBinding Foreground}"/>
+                    </Border>
+                    <ControlTemplate.Triggers>
+                        <Trigger Property="IsHighlighted" Value="True"><Setter TargetName="ItemFrame" Property="Background" Value="#293F50"/></Trigger>
+                        <Trigger Property="IsEnabled" Value="False"><Setter Property="Foreground" Value="{DynamicResource MutedBrush}"/></Trigger>
+                    </ControlTemplate.Triggers>
+                </ControlTemplate>
+            </Setter.Value></Setter>
+        </Style>
+        <Style x:Key="RemoteContextMenu" TargetType="ContextMenu">
+            <Setter Property="Background" Value="{DynamicResource SurfaceBrush}"/>
+            <Setter Property="BorderBrush" Value="{DynamicResource BorderBrush}"/>
+            <Setter Property="BorderThickness" Value="1"/>
+            <Setter Property="Padding" Value="4"/>
+            <Setter Property="Template"><Setter.Value>
+                <ControlTemplate TargetType="ContextMenu">
+                    <Border Background="{TemplateBinding Background}" BorderBrush="{TemplateBinding BorderBrush}" BorderThickness="{TemplateBinding BorderThickness}" CornerRadius="5" Padding="{TemplateBinding Padding}">
+                        <ItemsPresenter KeyboardNavigation.DirectionalNavigation="Cycle"/>
+                    </Border>
+                </ControlTemplate>
+            </Setter.Value></Setter>
+        </Style>
+        <Style TargetType="Expander">
+            <Setter Property="Foreground" Value="{DynamicResource TextBrush}"/>
+            <Setter Property="Template"><Setter.Value>
+                <ControlTemplate TargetType="Expander">
+                    <StackPanel>
+                        <ToggleButton x:Name="HeaderToggle" Foreground="{TemplateBinding Foreground}" Content="{TemplateBinding Header}" ContentTemplate="{TemplateBinding HeaderTemplate}" ContentStringFormat="{TemplateBinding HeaderStringFormat}" HorizontalContentAlignment="Left"
+                                      IsChecked="{Binding IsExpanded, RelativeSource={RelativeSource TemplatedParent}, Mode=TwoWay}">
+                            <ToggleButton.Template><ControlTemplate TargetType="ToggleButton">
+                                <Border x:Name="HeaderFrame" Background="Transparent" BorderBrush="Transparent" BorderThickness="1" CornerRadius="4" Padding="0,4">
+                                    <Grid>
+                                        <Grid.ColumnDefinitions><ColumnDefinition Width="20"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+                                        <Path x:Name="Chevron" Data="M 0 0 L 4 4 L 0 8" Stroke="{DynamicResource AccentBrush}" StrokeThickness="1.5" StrokeStartLineCap="Round" StrokeEndLineCap="Round" HorizontalAlignment="Center" VerticalAlignment="Center" RenderTransformOrigin="0.5,0.5"><Path.RenderTransform><RotateTransform Angle="0"/></Path.RenderTransform></Path>
+                                        <ContentPresenter Grid.Column="1" ContentSource="Content" VerticalAlignment="Center" TextElement.Foreground="{TemplateBinding Foreground}"/>
+                                    </Grid>
+                                </Border>
+                                <ControlTemplate.Triggers>
+                                    <Trigger Property="IsChecked" Value="True"><Setter TargetName="Chevron" Property="RenderTransform"><Setter.Value><RotateTransform Angle="90"/></Setter.Value></Setter></Trigger>
+                                    <Trigger Property="IsMouseOver" Value="True"><Setter TargetName="HeaderFrame" Property="Background" Value="{DynamicResource SurfaceBrush}"/></Trigger>
+                                    <Trigger Property="IsKeyboardFocused" Value="True"><Setter TargetName="HeaderFrame" Property="BorderBrush" Value="{DynamicResource AccentBrush}"/></Trigger>
+                                    <Trigger Property="IsEnabled" Value="False"><Setter Property="Foreground" Value="{DynamicResource MutedBrush}"/></Trigger>
+                                </ControlTemplate.Triggers>
+                            </ControlTemplate></ToggleButton.Template>
+                        </ToggleButton>
+                        <ContentPresenter x:Name="ExpandedContent" ContentSource="Content" Visibility="Collapsed"/>
+                    </StackPanel>
+                    <ControlTemplate.Triggers><Trigger Property="IsExpanded" Value="True"><Setter TargetName="ExpandedContent" Property="Visibility" Value="Visible"/></Trigger></ControlTemplate.Triggers>
+                </ControlTemplate>
+            </Setter.Value></Setter>
+        </Style>
+        </ResourceDictionary>
+    </Window.Resources>
+    <Grid Margin="16">
+        <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="*"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
+        <Grid Margin="0,0,0,14">
+            <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+            <StackPanel VerticalAlignment="Center">
+                <TextBlock Text="Remote" FontSize="18" FontWeight="SemiBold"/>
+                <TextBlock x:Name="NetworkSummaryText" Foreground="{DynamicResource MutedBrush}" FontSize="12" Margin="0,3,12,0" TextTrimming="CharacterEllipsis"/>
+            </StackPanel>
+            <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center">
+                <Button x:Name="NetworkSettingsButton" Content="Network ▾" Click="NetworkSettings_Click" Padding="11,7" Margin="0,0,8,0" AutomationProperties.Name="Network settings" ToolTip="Choose a network or change the scan range."/>
+                <Button x:Name="ScanButton" Content="Scan LAN" Click="Scan_Click" Style="{StaticResource PrimaryButton}" MinWidth="94" Padding="12,7" ToolTip="Find other devices on the selected network. Companion PCs appear automatically."/>
+                <Button x:Name="CancelButton" Content="Cancel" Click="Cancel_Click" MinWidth="94" Padding="12,7" Visibility="Collapsed" AutomationProperties.Name="Cancel current remote operation"/>
+            </StackPanel>
+        </Grid>
+        <Border x:Name="NetworkSettingsPanel" Grid.Row="1" Visibility="Collapsed" Background="{DynamicResource SurfaceBrush}" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1" CornerRadius="7" Padding="12" Margin="0,0,0,12" PreviewKeyDown="NetworkSettings_KeyDown">
+            <Grid>
+                <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="170"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+                <StackPanel Margin="0,0,10,0">
+                    <TextBlock Text="Network" Style="{StaticResource Caption}"/>
+                    <ComboBox x:Name="NetworkBox" DisplayMemberPath="DisplayName" SelectionChanged="Network_Changed" AutomationProperties.Name="LAN network adapter"/>
+                </StackPanel>
+                <StackPanel Grid.Column="1" Margin="0,0,10,0">
+                    <TextBlock Text="IPv4 range" Style="{StaticResource Caption}"/>
+                    <TextBox x:Name="RangeBox" AutomationProperties.Name="LAN scan CIDR range" ToolTip="CIDR inside this adapter's LAN. At most 1,024 addresses per scan."/>
+                </StackPanel>
+                <Button x:Name="NetworksButton" Grid.Column="2" Content="Refresh networks" Click="Networks_Click" Padding="10,8" VerticalAlignment="Bottom"/>
+            </Grid>
+        </Border>
+        <Grid Grid.Row="2">
+            <Grid.ColumnDefinitions><ColumnDefinition Width="290"/><ColumnDefinition Width="12"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+            <Border Background="{DynamicResource SurfaceBrush}" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1" CornerRadius="8" Padding="12">
+                <Grid>
+                    <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="*"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
+                    <Grid Margin="0,0,0,10">
+                        <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+                        <TextBlock x:Name="ComputerCountText" Text="Computers" FontWeight="SemiBold" VerticalAlignment="Center"/>
+                        <Button x:Name="AddComputerToggle" Grid.Column="1" Content="+ Add PC" Click="AddComputerToggle_Click" Padding="9,5" FontSize="12" AutomationProperties.Name="Add a computer by name or address"/>
+                    </Grid>
+                    <StackPanel x:Name="AddComputerPanel" Grid.Row="1" Visibility="Collapsed" Margin="0,0,0,12" PreviewKeyDown="AddComputer_KeyDown">
+                        <TextBlock Text="Hostname or IP address" Style="{StaticResource Caption}"/>
+                        <Grid>
+                            <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+                            <TextBox x:Name="HostBox" AutomationProperties.Name="Computer hostname or IPv4 address" KeyDown="Host_KeyDown"/>
+                            <Button x:Name="AddButton" Grid.Column="1" Content="Add" Click="Add_Click" Padding="10,7" Margin="6,0,0,0"/>
+                        </Grid>
+                    </StackPanel>
+                    <ListBox x:Name="ComputersList" Grid.Row="2" SelectionChanged="Computer_Changed" AutomationProperties.Name="Discovered LAN computers">
+                        <ListBox.ItemContainerStyle><Style TargetType="ListBoxItem" BasedOn="{StaticResource {x:Type ListBoxItem}}"><Setter Property="Padding" Value="9"/></Style></ListBox.ItemContainerStyle>
+                        <ListBox.ItemTemplate><DataTemplate>
+                            <Grid>
+                                <Grid.ColumnDefinitions><ColumnDefinition Width="28"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+                                <TextBlock Text="&#xE7F8;" FontFamily="Segoe MDL2 Assets" FontSize="17" Foreground="{DynamicResource MutedBrush}" Margin="0,3,0,0" ToolTip="{Binding DeviceSummary}"/>
+                                <StackPanel Grid.Column="1">
+                                    <TextBlock Text="{Binding DisplayName}" FontWeight="SemiBold" TextTrimming="CharacterEllipsis" ToolTip="{Binding DisplayName}"/>
+                                    <TextBlock Text="{Binding Address}" Foreground="{DynamicResource MutedBrush}" Margin="0,3,0,0" FontSize="12" Visibility="{Binding HasDeviceName, Converter={StaticResource BoolToVisibility}}"/>
+                                    <TextBlock Text="{Binding ConnectionSummary}" Foreground="{DynamicResource MutedBrush}" TextTrimming="CharacterEllipsis" FontSize="11" Margin="0,4,0,0" ToolTip="{Binding ConnectionSummary}"/>
+                                </StackPanel>
+                            </Grid>
+                        </DataTemplate></ListBox.ItemTemplate>
+                    </ListBox>
+                    <StackPanel x:Name="EmptyText" Grid.Row="2" VerticalAlignment="Center" HorizontalAlignment="Center" Margin="10" IsHitTestVisible="False">
+                        <TextBlock Text="No computers found" Foreground="{DynamicResource TextBrush}" TextAlignment="Center"/>
+                        <TextBlock Text="Scan LAN or add a PC by address." Foreground="{DynamicResource MutedBrush}" TextAlignment="Center" TextWrapping="Wrap" FontSize="12" Margin="0,6,0,0"/>
+                    </StackPanel>
+                    <Border Grid.Row="3" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="0,1,0,0" Padding="0,10,0,0" Margin="0,10,0,0">
+                        <Expander x:Name="CompanionSetupExpander" Header="Companion setup" Expanded="CompanionSetup_Expanded" AutomationProperties.Name="Set up companion access on another PC">
+                            <ScrollViewer MaxHeight="110" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled" Margin="0,8,0,0">
+                                <StackPanel>
+                                    <TextBlock Text="1. Run FullStackRemoteCompanion.exe on the other PC." Foreground="{DynamicResource MutedBrush}" TextWrapping="Wrap"/>
+                                    <TextBlock Text="2. Allow its Private network firewall rule, then choose Enable pairing." Foreground="{DynamicResource MutedBrush}" TextWrapping="Wrap" Margin="0,8,0,0"/>
+                                    <TextBlock Text="3. Select that PC here, enter its code, then approve the matching Launcher fingerprint there." Foreground="{DynamicResource MutedBrush}" TextWrapping="Wrap" Margin="0,8,0,0"/>
+                                    <TextBlock Text="4. Choose View &amp; control for the signed-in desktop, then enable Control for mouse and keyboard. Use the monitor selector to change screens." Foreground="{DynamicResource MutedBrush}" TextWrapping="Wrap" Margin="0,8,0,0"/>
+                                    <TextBlock Text="Paired PCs reconnect automatically while selected. Desktop control requires the updated companion running in the remote user's unlocked session." Foreground="{DynamicResource MutedBrush}" TextWrapping="Wrap" Margin="0,8,0,0"/>
+                                </StackPanel>
+                            </ScrollViewer>
+                        </Expander>
+                    </Border>
+                </Grid>
+            </Border>
+            <Border Grid.Column="2" Background="{DynamicResource CardBrush}" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1" CornerRadius="8" Padding="18">
+                <Grid>
+                    <StackPanel x:Name="SelectionEmptyPanel" VerticalAlignment="Center" HorizontalAlignment="Center" MaxWidth="320" Margin="12">
+                        <Border Width="64" Height="64" CornerRadius="16" Background="{DynamicResource SurfaceBrush}" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1" HorizontalAlignment="Center" Margin="0,0,0,16">
+                            <TextBlock Text="&#xE83E;" FontFamily="Segoe MDL2 Assets" FontSize="28" Foreground="{DynamicResource AccentBrush}" HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                        </Border>
+                        <TextBlock Text="Choose a computer" FontSize="16" FontWeight="SemiBold" TextAlignment="Center"/>
+                        <TextBlock Text="Remote Desktop, shared folders, and companion access." Foreground="{DynamicResource MutedBrush}" TextAlignment="Center" TextWrapping="Wrap" Margin="0,8,0,0"/>
+                    </StackPanel>
+                    <ScrollViewer x:Name="SelectedComputerPanel" Visibility="Collapsed" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
+                    <StackPanel Margin="0,0,6,0">
+                        <Grid>
+                            <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+                            <TextBlock x:Name="SelectedNameText" FontSize="16" FontWeight="SemiBold" VerticalAlignment="Center" TextTrimming="CharacterEllipsis" ToolTip="{Binding Text, RelativeSource={RelativeSource Self}}"/>
+                            <Button x:Name="RefreshComputerButton" Grid.Column="1" Content="Refresh" Click="RefreshComputer_Click" Padding="10,6" IsEnabled="False" Margin="8,0,0,0"/>
+                        </Grid>
+                        <TextBlock x:Name="SelectedDetailsText" Foreground="{DynamicResource MutedBrush}" TextWrapping="Wrap" Margin="0,7,0,14"/>
+                        <WrapPanel>
+                            <Button x:Name="DesktopButton" Content="Remote Desktop ↗" Click="Desktop_Click" Style="{StaticResource PrimaryButton}" IsEnabled="False" Padding="12,8" Margin="0,0,8,6" ToolTipService.ShowOnDisabled="True"/>
+                            <Button x:Name="SharesButton" Content="Shared folders ↗" Click="Shares_Click" IsEnabled="False" Padding="12,8" Margin="0,0,0,6" ToolTipService.ShowOnDisabled="True"/>
+                        </WrapPanel>
+                        <Border Background="{DynamicResource SurfaceBrush}" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1" CornerRadius="7" Padding="12" Margin="0,12,0,14">
+                        <StackPanel>
+                            <Grid>
+                                <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+                                <TextBlock Text="Companion" FontWeight="SemiBold" VerticalAlignment="Center"/>
+                                <Button x:Name="CompanionOptionsButton" Grid.Column="1" Content="•••" Padding="8,2" Click="CompanionOptions_Click" AutomationProperties.Name="Companion connection options" ToolTip="Connection options" Visibility="Collapsed">
+                                    <Button.ContextMenu>
+                                        <ContextMenu Style="{StaticResource RemoteContextMenu}">
+                                            <MenuItem x:Name="CompanionForgetButton" Header="Forget pairing" Style="{StaticResource RemoteMenuItem}" Click="CompanionForget_Click" ToolTip="Remove local pairing. Revoke this Launcher in the remote companion to remove remote permission."/>
+                                        </ContextMenu>
+                                    </Button.ContextMenu>
+                                </Button>
+                            </Grid>
+                            <TextBlock x:Name="CompanionStateText" Foreground="{DynamicResource MutedBrush}" TextWrapping="Wrap" Margin="0,7,0,0" AutomationProperties.LiveSetting="Polite"/>
+                            <Grid x:Name="CompanionPairingFields" Margin="0,12,0,0" Visibility="Collapsed">
+                                <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+                                <StackPanel>
+                                    <TextBlock Text="Pairing code" Style="{StaticResource Caption}"/>
+                                    <PasswordBox x:Name="CompanionCodeInput" MaxLength="14" AutomationProperties.Name="Companion pairing code" KeyDown="CompanionCode_KeyDown" ToolTip="Enter the XXXX-XXXX-XXXX code from the companion. Approve the matching Launcher fingerprint on that PC."/>
+                                </StackPanel>
+                                <Button x:Name="CompanionPairButton" Grid.Column="1" Content="Pair &amp; connect" Click="CompanionPair_Click" Style="{StaticResource PrimaryButton}" VerticalAlignment="Bottom" Margin="8,0,0,0" Padding="12,7"/>
+                            </Grid>
+                            <TextBlock x:Name="CompanionFingerprintText" Foreground="{DynamicResource MutedBrush}" TextWrapping="Wrap" Margin="0,8,0,0" Visibility="Collapsed"/>
+                            <WrapPanel x:Name="CompanionActionsPanel" Margin="0,12,0,0">
+                                <Button x:Name="CompanionConnectButton" Content="Connect" Click="CompanionConnect_Click" Style="{StaticResource PrimaryButton}" Padding="12,7" Margin="0,0,8,4"/>
+                                <Button x:Name="CompanionDesktopButton" Content="View &amp; control ↗" Click="CompanionDesktop_Click" Style="{StaticResource PrimaryButton}" Padding="12,7" Margin="0,0,8,4" Visibility="Collapsed" ToolTipService.ShowOnDisabled="True" ToolTip="Open the companion's signed-in desktop over the paired LAN connection. Mouse and keyboard control starts off."/>
+                                <Button x:Name="CompanionSystemInfoButton" Content="System info" Click="CompanionSystemInfo_Click" Padding="12,7" Margin="0,0,8,4"/>
+                                <Button x:Name="CompanionProcessesButton" Content="Processes" Click="CompanionProcesses_Click" Padding="12,7" Margin="0,0,8,4"/>
+                                <Button x:Name="CompanionDisconnectButton" Content="Disconnect" Click="CompanionDisconnect_Click" Padding="12,7" Margin="0,0,0,4"/>
+                            </WrapPanel>
+                        </StackPanel>
+                        </Border>
+                    <Expander x:Name="ManagementExpander" Header="Windows sign-in (advanced)" Margin="0,0,0,10" ToolTip="Manage this PC with an existing Windows Remote Management (WinRM) endpoint.">
+                    <StackPanel Margin="0,8,0,0">
+                        <Grid x:Name="LoginFields">
+                            <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="10"/><ColumnDefinition Width="190"/></Grid.ColumnDefinitions>
+                            <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
+                            <StackPanel Margin="0,0,0,10">
+                                <TextBlock Text="Connection name" Style="{StaticResource Caption}"/>
+                                <TextBox x:Name="ConnectionHostBox" AutomationProperties.Name="Management connection hostname" ToolTip="DNS name matching the target's HTTPS certificate, or its LAN IP. Must resolve to the selected computer."/>
+                            </StackPanel>
+                            <StackPanel Grid.Column="2" Margin="0,0,0,10">
+                                <TextBlock Text="Transport" Style="{StaticResource Caption}"/>
+                                <ComboBox x:Name="TransportBox" SelectedIndex="0" SelectionChanged="Transport_Changed" AutomationProperties.Name="Management transport">
+                                    <ComboBoxItem Content="HTTPS (5986)"/><ComboBoxItem Content="HTTP / Kerberos (5985)"/>
+                                </ComboBox>
+                            </StackPanel>
+                            <StackPanel Grid.Row="1">
+                                <TextBlock Text="Username" Style="{StaticResource Caption}"/>
+                                <TextBox x:Name="UserNameBox" AutomationProperties.Name="Remote Windows username" ToolTip="DOMAIN\user, COMPUTER\user, or user@domain. Use the account password, not a Windows Hello PIN."/>
+                            </StackPanel>
+                            <StackPanel Grid.Row="1" Grid.Column="2">
+                                <TextBlock Text="Password" Style="{StaticResource Caption}"/>
+                                <PasswordBox x:Name="PasswordInput" AutomationProperties.Name="Remote Windows password" KeyDown="Password_KeyDown"/>
+                            </StackPanel>
+                        </Grid>
+                        <WrapPanel Margin="0,12,0,0">
+                            <Button x:Name="ConnectButton" Content="Sign in" Click="Connect_Click" Style="{StaticResource PrimaryButton}" IsEnabled="False" Padding="12,7" Margin="0,0,8,5"/>
+                            <Button x:Name="DisconnectButton" Content="Sign out" Click="Disconnect_Click" Visibility="Collapsed" Padding="12,7" Margin="0,0,8,5"/>
+                            <Button x:Name="SystemInfoButton" Content="System info" Click="SystemInfo_Click" IsEnabled="False" Padding="12,7" Margin="0,0,8,5"/>
+                            <Button x:Name="ProcessesButton" Content="Processes" Click="Processes_Click" IsEnabled="False" Padding="12,7" Margin="0,0,0,5"/>
+                        </WrapPanel>
+                        <TextBlock x:Name="LoginStateText" Foreground="{DynamicResource MutedBrush}" TextWrapping="Wrap" Margin="0,5,0,10" AutomationProperties.LiveSetting="Polite"/>
+                        <Expander Header="Connection setup" Foreground="{DynamicResource TextBrush}" Margin="0,0,0,10">
+                            <StackPanel Margin="0,8,0,0">
+                                <TextBlock Text="Management requires PowerShell remoting and account access on the target. Workgroup PCs use HTTPS with a trusted certificate matching the connection name. HTTP uses Kerberos with a domain hostname." Foreground="{DynamicResource MutedBrush}" TextWrapping="Wrap"/>
+                                <TextBlock Foreground="{DynamicResource MutedBrush}" Margin="0,8,0,0" TextWrapping="Wrap"><Hyperlink NavigateUri="https://learn.microsoft.com/en-us/troubleshoot/windows-client/system-management-components/configure-winrm-for-https" RequestNavigate="Help_RequestNavigate">WinRM HTTPS setup</Hyperlink><Run Text="  ·  "/><Hyperlink NavigateUri="https://learn.microsoft.com/en-us/windows-server/remote/remote-desktop-services/remotepc/remote-desktop-allow-access" RequestNavigate="Help_RequestNavigate">Remote Desktop setup</Hyperlink></TextBlock>
+                            </StackPanel>
+                        </Expander>
+                    </StackPanel>
+                    </Expander>
+                    <Expander x:Name="ResultsExpander" Margin="0,0,0,4">
+                        <Expander.Header><TextBlock x:Name="ResultTitleText" Text="Device details"/></Expander.Header>
+                        <TextBox x:Name="ResultBox" Height="210" Margin="0,8,0,0" IsReadOnly="True" TextWrapping="Wrap" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled" AutomationProperties.Name="Remote computer results"/>
+                    </Expander>
+                    </StackPanel>
+                    </ScrollViewer>
+                </Grid>
+            </Border>
+        </Grid>
+        <StackPanel Grid.Row="3" Margin="2,12,2,0">
+            <ProgressBar x:Name="ScanProgress" Foreground="{DynamicResource AccentBrush}" Background="{DynamicResource SurfaceBrush}" BorderThickness="0" Height="3" Minimum="0" Maximum="1" Visibility="Collapsed" Margin="0,0,0,8"/>
+            <TextBox x:Name="StatusText" Visibility="Collapsed" IsReadOnly="True" Background="Transparent" BorderThickness="0" Padding="0" MaxHeight="64" VerticalScrollBarVisibility="Auto" TextWrapping="Wrap" AutomationProperties.LiveSetting="Polite" Margin="0,0,0,4"/>
+            <TextBox x:Name="CompanionDiscoveryText" Text="Finding companion PCs…" FontSize="12" IsReadOnly="True" Background="Transparent" Foreground="{DynamicResource MutedBrush}" BorderThickness="0" Padding="0" MaxHeight="48" VerticalScrollBarVisibility="Auto" TextWrapping="Wrap" AutomationProperties.LiveSetting="Polite"/>
+        </StackPanel>
+    </Grid>
+</Window>

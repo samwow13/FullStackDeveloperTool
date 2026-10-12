@@ -35,7 +35,7 @@ public partial class GitWorkspaceWindow
                 // Canceling the picker's local refresh can invalidate its owner's
                 // snapshot. Restore local status without retrying remote work.
                 if (!chosen && _gitLoadFailed && IsIdle && _unconfirmedGitCommand is null)
-                    await RefreshAsync(fetchRemote: false);
+                    await RefreshAsync(fetchRemote: false, forceRefresh: false);
             }
             catch (Exception exception)
             {

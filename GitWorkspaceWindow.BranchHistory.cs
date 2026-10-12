@@ -14,7 +14,7 @@ public partial class GitWorkspaceWindow
     private readonly HashSet<Task<GitBranchComparison>> _branchInspectionTasks = [];
     private string _branchInspectionStatus = "";
 
-    public bool CanShowBranchHistory => IsIdle && !_branchInspectionLoading && _selectedBranchComparison?.Available == true;
+    public bool CanShowBranchHistory => IsIdle && !_sharedRefreshing && !_branchInspectionLoading && _selectedBranchComparison?.Available == true;
     public string SelectedBranchComparisonLabel => _branchInspectionLoading ? ShowingRemoteBranches ? "Reading branch history…" : "Comparing commits…"
         : _selectedBranchComparison is { Available: true } comparison
             ? comparison.SelectedBranchOnly ? $"{comparison.TotalCommits:N0} commits · last fetched"
@@ -42,7 +42,7 @@ public partial class GitWorkspaceWindow
 
     private async void Branch_Changed(object sender, SelectionChangedEventArgs e)
     {
-        if (_applyingSnapshot || !IsIdle) return;
+        if (_applyingSnapshot || !IsIdle || _sharedRefreshing) return;
         ResetBranchInspection(clearSelection: false);
         if (BranchesGrid.SelectedItem is not GitBranchInfo selected || !VisibleBranches.Contains(selected)
             || _snapshot is not { } snapshot || Root is not { } root) return;

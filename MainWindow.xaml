@@ -276,6 +276,31 @@
                 </ControlTemplate>
             </Setter.Value></Setter>
         </Style>
+        <Style x:Key="BatchServiceCheckBox" TargetType="CheckBox">
+            <Setter Property="Width" Value="24"/>
+            <Setter Property="Height" Value="24"/>
+            <Setter Property="Cursor" Value="Hand"/>
+            <Setter Property="SnapsToDevicePixels" Value="True"/>
+            <Setter Property="Template"><Setter.Value>
+                <ControlTemplate TargetType="CheckBox">
+                    <Border x:Name="FocusFrame" Background="Transparent" BorderBrush="Transparent" BorderThickness="1" CornerRadius="4">
+                        <Border x:Name="CheckFrame" Width="18" Height="18" Background="#111923" BorderBrush="#8295AF" BorderThickness="1" CornerRadius="3">
+                            <Path x:Name="CheckMark" Data="M 3,8 L 6,11 L 13,4" Stroke="#0C2925" StrokeThickness="2" StrokeStartLineCap="Round" StrokeEndLineCap="Round" StrokeLineJoin="Round" Visibility="Collapsed"/>
+                        </Border>
+                    </Border>
+                    <ControlTemplate.Triggers>
+                        <Trigger Property="IsChecked" Value="True">
+                            <Setter TargetName="CheckFrame" Property="Background" Value="{StaticResource AccentBrush}"/>
+                            <Setter TargetName="CheckFrame" Property="BorderBrush" Value="{StaticResource AccentBrush}"/>
+                            <Setter TargetName="CheckMark" Property="Visibility" Value="Visible"/>
+                        </Trigger>
+                        <Trigger Property="IsMouseOver" Value="True"><Setter TargetName="FocusFrame" Property="Background" Value="#243444"/></Trigger>
+                        <Trigger Property="IsKeyboardFocused" Value="True"><Setter TargetName="FocusFrame" Property="BorderBrush" Value="White"/></Trigger>
+                        <Trigger Property="IsEnabled" Value="False"><Setter Property="Opacity" Value="0.55"/><Setter Property="Cursor" Value="Arrow"/></Trigger>
+                    </ControlTemplate.Triggers>
+                </ControlTemplate>
+            </Setter.Value></Setter>
+        </Style>
         <Style x:Key="HideSectionButton" TargetType="Button" BasedOn="{StaticResource {x:Type Button}}">
             <Setter Property="Content" Value="− Hide"/>
             <Setter Property="Padding" Value="7,4"/>
@@ -629,7 +654,7 @@
                 <WrapPanel x:Name="WorkspaceHeaderActions" Grid.Column="1" Orientation="Horizontal" HorizontalAlignment="Right" VerticalAlignment="Top" MaxWidth="{Binding ActualWidth, ElementName=WorkspaceHeader}">
                     <Grid>
                         <ToggleButton x:Name="SectionsMenuToggle" Content="Sections" Style="{StaticResource SectionsDropdownToggle}" Height="{Binding ActualHeight, ElementName=FunctionsMenuButton}" Margin="0,0,6,0"
-                                      PreviewKeyDown="SectionsMenuToggle_PreviewKeyDown" ToolTip="Show section switches and Long Running Task"
+                                      PreviewKeyDown="SectionsMenuToggle_PreviewKeyDown" ToolTip="Show section switches, Remote, and Long Running Task"
                                       AutomationProperties.Name="Sections dropdown" AutomationProperties.HelpText="Switches keep the dropdown open. Click outside or press Escape to close."/>
                         <Popup x:Name="SectionsMenu" PlacementTarget="{Binding ElementName=SectionsMenuToggle}" Placement="Bottom" VerticalOffset="6"
                                IsOpen="{Binding IsChecked, ElementName=SectionsMenuToggle, Mode=TwoWay}" StaysOpen="False" AllowsTransparency="True"
@@ -651,6 +676,11 @@
                                         </Style.Triggers></Style></ToggleButton.Style>
                                     </ToggleButton>
                                     <Border Height="1" Background="{StaticResource BorderBrush}" Margin="10,6,10,8"/>
+                                    <Button Content="Remote ↗" Click="LanComputers_Click" HorizontalContentAlignment="Left"
+                                            Padding="10,9" FontSize="12" Margin="0,0,0,2" Foreground="{StaticResource TextBrush}"
+                                            AutomationProperties.Name="Open Remote" ToolTip="Find computers on your LAN and open remote tools"
+                                            AutomationProperties.HelpText="Discover LAN computers, pair a companion, or open Windows remote tools."/>
+                                    <Border Height="1" Background="{StaticResource BorderBrush}" Margin="10,6,10,8"/>
                                     <CheckBox Content="Long Running Task" IsChecked="{Binding LongRunningTaskEnabled, Mode=OneWay}" Click="LongRunningTask_Click"
                                               Style="{StaticResource SectionMenuSwitch}" ToolTipService.ShowDuration="30000"
                                               AutomationProperties.Name="Long Running Task" AutomationProperties.HelpText="{Binding LongRunningTaskDescription}">
@@ -663,6 +693,9 @@
                     <Button Height="{Binding ActualHeight, ElementName=FunctionsMenuButton}" Content="Notes &amp; queue ↗" Click="ProjectTasks_Click" Padding="10,7" FontSize="11" Margin="0,0,6,0" ToolTip="Open notes and the Codex task queue for the selected project"/>
                     <Button x:Name="FunctionsMenuButton" Content="Functions ▾" Click="FunctionsMenu_Click" ToolTip="Setup and recovery tools" Padding="10,7" FontSize="11" Margin="0,0,6,0" AutomationProperties.Name="Functions">
                         <Button.ContextMenu><ContextMenu Style="{StaticResource ServiceToolContextMenu}">
+                            <MenuItem Header="Clone repositories…" Click="CloneProjectRepositories_Click" Style="{StaticResource ServiceToolMenuItem}"
+                                      IsEnabled="{Binding PlacementTarget.DataContext.CanAddService, RelativeSource={RelativeSource AncestorType=ContextMenu}}"
+                                      ToolTip="Clone more repositories into this project's workspace, then add their services."/>
                             <MenuItem Header="First Time Setup" Click="FirstTimeSetup_Click" Style="{StaticResource ServiceToolMenuItem}" ToolTip="Connect your agent and copy instructions for your existing AGENTS.md file."/>
                             <MenuItem x:Name="HardResetCodexMenuItem" Header="Hard Reset Codex" Click="HardResetCodex_Click" Style="{StaticResource ServiceToolMenuItem}" ToolTip="Force close Codex and ChatGPT processes, then reopen desktop apps. Unsaved work and active chats may be interrupted."/>
                         </ContextMenu></Button.ContextMenu>
@@ -723,8 +756,10 @@
                         <Button Content="▶  Start all" Style="{StaticResource PrimaryButton}" Click="StartAll_Click" Padding="10,5" FontSize="11" Margin="0,0,6,0"
                                 IsEnabled="{Binding CanStartBatch}" ToolTip="{Binding StartAllDescription}" ToolTipService.ShowOnDisabled="True"
                                 AutomationProperties.HelpText="{Binding StartAllDescription}"/>
-                        <Button Content="Restart all" Click="RestartAll_Click" IsEnabled="{Binding CanBatch}" Padding="10,5" FontSize="11" Margin="0,0,6,0"/>
-                        <Button Content="■  Force stop all" Style="{StaticResource DangerButton}" Click="StopAll_Click" IsEnabled="{Binding CanStopBatch}" Padding="10,5" FontSize="11"/>
+                        <Button Content="Restart all" Click="RestartAll_Click" IsEnabled="{Binding CanRestartBatch}" Padding="10,5" FontSize="11" Margin="0,0,6,0"
+                                ToolTip="Restart checked services."/>
+                        <Button Content="■  Force stop all" Style="{StaticResource DangerButton}" Click="StopAll_Click" IsEnabled="{Binding CanStopBatch}" Padding="10,5" FontSize="11"
+                                ToolTip="Force stop checked services. Port conflicts still require confirmation."/>
                     </WrapPanel>
                 </Grid>
                 <Border Grid.Row="1" BorderBrush="#42546B" BorderThickness="1" CornerRadius="11" Margin="0,-14,0,0">
@@ -755,8 +790,15 @@
                         <StackPanel>
                         <ItemsControl ItemsSource="{Binding Services}">
                             <ItemsControl.ItemTemplate><DataTemplate>
-                                <StackPanel>
-                                <GroupBox Header="{Binding Name}" Style="{StaticResource AppServiceCard}" AutomationProperties.Name="{Binding Name}">
+                                <Grid>
+                                <Grid.ColumnDefinitions><ColumnDefinition Width="30"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+                                <CheckBox Style="{StaticResource BatchServiceCheckBox}" VerticalAlignment="Top" HorizontalAlignment="Left" Margin="0,3,0,0"
+                                          IsChecked="{Binding IncludeInBatch, Mode=OneWay}" Click="BatchServiceSelection_Click"
+                                          IsEnabled="{Binding DataContext.CanChangeBatchSelection, RelativeSource={RelativeSource AncestorType=Window}}"
+                                          ToolTip="Include this service in Start all, Restart all and Force stop all."
+                                          AutomationProperties.Name="{Binding Name, StringFormat=Include {0} in batch actions}"
+                                          AutomationProperties.HelpText="Checked services participate in Start all, Restart all and Force stop all. Individual controls remain available."/>
+                                <GroupBox Grid.Column="1" Header="{Binding Name}" Style="{StaticResource AppServiceCard}" AutomationProperties.Name="{Binding Name}">
                                     <StackPanel>
                                     <Border Visibility="{Binding IsEditing, Converter={StaticResource BoolToVisibility}}" Margin="0,0,0,8">
                                         <StackPanel>
@@ -1074,12 +1116,12 @@
                                      </StackPanel>
                                     </StackPanel>
                                 </GroupBox>
-                                </StackPanel>
+                                </Grid>
                             </DataTemplate></ItemsControl.ItemTemplate>
                         </ItemsControl>
                         <ItemsControl ItemsSource="{Binding Services}">
                             <ItemsControl.ItemTemplate><DataTemplate>
-                                <StackPanel>
+                                <StackPanel Margin="30,0,0,0">
                                 <ItemsControl ItemsSource="{Binding ApiDatabases}">
                                     <ItemsControl.ItemTemplate><DataTemplate>
                                 <GroupBox Header="{Binding Title}" Style="{StaticResource DatabaseServiceCard}" AutomationProperties.Name="{Binding Title}">
@@ -1228,6 +1270,10 @@
                                     <TextBlock Text="&#xE713;" FontFamily="Segoe MDL2 Assets" FontSize="14"/>
                                     <Button.ContextMenu>
                                         <ContextMenu Style="{StaticResource ServiceToolContextMenu}">
+                                            <MenuItem Header="Force refresh project Git" Style="{StaticResource ServiceToolMenuItem}" Click="ForceProjectGitRefresh_Click"
+                                                      IsEnabled="{Binding CanForceProjectGitRefresh}" ToolTipService.ShowOnDisabled="True"
+                                                      ToolTip="Fetch active connections and refresh shared project Git data. Background refresh runs every 10 minutes; local files stay unchanged."/>
+                                            <Separator Style="{StaticResource ServiceToolMenuSeparator}"/>
                                             <MenuItem Header="Git-only conflict test" Style="{StaticResource ServiceToolMenuItem}" Click="DashboardGitConflictCheck_Click"
                                                       IsEnabled="{Binding CanRequestDashboardGitCheck}" ToolTipService.ShowOnDisabled="True"
                                                       ToolTip="{Binding DashboardGitConflictSchedule}" AutomationProperties.Name="Queue Git-only conflict test"/>

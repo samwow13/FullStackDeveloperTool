@@ -36,6 +36,8 @@ internal sealed class CodexAppServerConnection : IAsyncDisposable
     private int _bufferedCharacters;
     private int _disposed;
 
+    internal string NativeExecutablePath => _process.StartInfo.FileName;
+
     private CodexAppServerConnection(Process process, bool includeImagePayloads)
     {
         _process = process;
@@ -53,7 +55,7 @@ internal sealed class CodexAppServerConnection : IAsyncDisposable
         CodexAppServerConnection? connection = null;
         try
         {
-            process.StartInfo = CreateStartInfo(FindExecutable(), folder);
+            process.StartInfo = CreateStartInfo(CodexNativeExecutable.Find(), folder);
             if (!process.Start())
                 throw new InvalidOperationException(UnavailableMessage);
             connection = new CodexAppServerConnection(process, includeImagePayloads);
@@ -67,7 +69,18 @@ internal sealed class CodexAppServerConnection : IAsyncDisposable
                 }
             };
             if (experimentalApi) parameters["capabilities"] = new { experimentalApi = true };
-            await connection.RequestAsync("initialize", parameters, token).ConfigureAwait(false);
+            try
+            {
+                await connection.RequestAsync("initialize", parameters, token).ConfigureAwait(false);
+            }
+            catch (CodexRequestException ex) when (experimentalApi && ex.Code == -32602)
+            {
+                // Older servers can reject the optional capabilities field. This
+                // handshake creates no thread or turn and changes no permissions.
+                // Never apply this retry to a submitted chat or failed command.
+                parameters.Remove("capabilities");
+                await connection.RequestAsync("initialize", parameters, token).ConfigureAwait(false);
+            }
             await connection.SendAsync(new { method = "initialized", @params = new { } }, token).ConfigureAwait(false);
             return connection;
         }
@@ -250,41 +263,10 @@ internal sealed class CodexAppServerConnection : IAsyncDisposable
             StandardErrorEncoding = Encoding.UTF8
         };
         info.ArgumentList.Add("app-server");
-        info.ArgumentList.Add("--listen");
-        info.ArgumentList.Add("stdio://");
+        // Both older and current native CLIs default to stdio. The explicit
+        // --listen option is newer than the app-server command itself.
+        CodexNativeExecutable.AddBundledToolsToPath(info);
         return info;
-    }
-
-    private static string FindExecutable()
-    {
-        foreach (var directory in (Environment.GetEnvironmentVariable("PATH") ?? "").Split(Path.PathSeparator))
-        {
-            var candidate = ExecutableIn(directory.Trim().Trim('"'));
-            if (candidate is not null) return candidate;
-        }
-        var bin = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "OpenAI", "Codex", "bin");
-        var direct = ExecutableIn(bin);
-        if (direct is not null) return direct;
-        if (Directory.Exists(bin))
-        {
-            foreach (var directory in new DirectoryInfo(bin).EnumerateDirectories().OrderByDescending(item => item.LastWriteTimeUtc))
-            {
-                var candidate = ExecutableIn(directory.FullName);
-                if (candidate is not null) return candidate;
-            }
-        }
-        throw new InvalidOperationException(NotFoundMessage);
-    }
-
-    private static string? ExecutableIn(string directory)
-    {
-        try
-        {
-            if (!Path.IsPathFullyQualified(directory)) return null;
-            var candidate = Path.GetFullPath(Path.Combine(directory, "codex.exe"));
-            return File.Exists(candidate) ? candidate : null;
-        }
-        catch (Exception ex) when (ex is ArgumentException or NotSupportedException or IOException or UnauthorizedAccessException) { return null; }
     }
 
     private static void KillOwnedProcess(Process process)
@@ -343,4 +325,22 @@ internal sealed class CodexRequestException(int code, JsonElement error, string?
 })
 {
     internal int Code { get; } = code;
+
+    internal bool IsMethodUnavailable { get; } = IsUnsupportedMethod(code, error, method);
+
+    private static bool IsUnsupportedMethod(int code, JsonElement error, string? method)
+    {
+        if (code == -32601) return true;
+        if (code != -32600 || string.IsNullOrEmpty(method)
+            || error.ValueKind != JsonValueKind.Object
+            || !error.TryGetProperty("message", out var message)
+            || message.ValueKind != JsonValueKind.String) return false;
+        var text = message.GetString();
+        // Older Rust servers deserialize a tagged method enum before dispatch.
+        // Recognize only its exact unknown-method prefix for this pending request.
+        // Other invalid requests, parameters, configuration, and provider errors
+        // must not trigger a fallback. Raw error text never leaves this boundary.
+        return text is { Length: <= 4096 }
+            && text.StartsWith($"Invalid request: unknown variant `{method}`,", StringComparison.Ordinal);
+    }
 }

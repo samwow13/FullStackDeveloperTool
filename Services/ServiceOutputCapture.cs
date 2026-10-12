@@ -13,9 +13,11 @@ internal sealed class ServiceOutputCapture : IDisposable
     {
         _output = process.StandardOutput;
         _error = process.StandardError;
-        _ = ReadAsync(_output, false, receive);
-        _ = ReadAsync(_error, true, receive);
+        OutputCompletion = Task.WhenAll(ReadAsync(_output, false, receive), ReadAsync(_error, true, receive));
     }
+
+    internal Task OutputCompletion { get; }
+    internal bool OutputDrainAttempted { get; set; }
 
     private static async Task ReadAsync(StreamReader reader, bool error, Action<string, bool> receive)
     {

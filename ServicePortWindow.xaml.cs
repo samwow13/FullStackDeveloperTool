@@ -3,11 +3,15 @@ using System.Globalization;
 using System.Windows;
 using System.Windows.Input;
 using System.Windows.Media;
+using FullStackLauncher.Services;
 
 namespace FullStackLauncher;
 
-public partial class ServicePortWindow : Window
+public partial class ServicePortWindow : Window, IDashboardReplacementWindow
 {
+    public bool IsDashboardReplacementReady => !_saving || _saved;
+    public bool IsDashboardReplacementClosePending => false;
+
     private readonly Func<string, Task> _save;
     private readonly string _initialPort;
     private readonly bool _editable;

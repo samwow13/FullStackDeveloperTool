@@ -1,4 +1,3 @@
-using FullStackLauncher.Services;
 using FullStackLauncher.Models;
 
 namespace FullStackLauncher;
@@ -34,28 +33,5 @@ public partial class GitWorkspaceWindow
             if (comparison.BinaryFiles > 0) detail += $" · {comparison.BinaryFiles:N0} binary (lines excluded)";
             return detail;
         }
-    }
-
-    private async Task RefreshComparisonAsync(CancellationToken token)
-    {
-        _comparison = null;
-        _comparisonError = null;
-        if (_snapshot is not { IsRepository: true, IsDetached: false } snapshot || SelectedRemote is not { } remote)
-        {
-            Changed();
-            return;
-        }
-        try
-        {
-            _comparison = await GitRepositoryService.ReadComparisonAsync(snapshot.RepositoryRoot!, remote.Name, snapshot.Branch, token);
-        }
-        catch (GitCommandExitUnconfirmedException) { throw; }
-        catch (Exception ex)
-        {
-            _comparisonError = ex is OperationCanceledException ? "Comparison canceled or timed out. Refresh to retry."
-                : "Could not read remote comparison. Review error details below.";
-            ReportError(SafeError(ex));
-        }
-        Changed();
     }
 }

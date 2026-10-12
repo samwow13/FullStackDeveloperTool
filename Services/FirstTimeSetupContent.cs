@@ -10,8 +10,24 @@ internal sealed record FirstTimeSetupContent(
     string AgentsInstructions,
     string SetupPrompt,
     string CodexCommand,
-    string ManualInstructions)
+    string ManualInstructions,
+    string ConnectedSetupPrompt)
 {
+    internal const string AgentsSectionHeading = "## Full Stack Dev Tool MCP integration";
+    internal const string AgentsResourceUri = "fullstacklauncher://setup/agents.md";
+    internal const string AgentsWriteGuidance = "Install only when the user requests first-time setup or instruction installation. " +
+        "Use the agent client's own filesystem tools and its recognized instructions file. " +
+        "For Codex, use the client's CODEX_HOME/AGENTS.md (default ~/.codex/AGENTS.md) for global setup; " +
+        "if a non-empty AGENTS.override.md takes precedence, preserve it and merge this section into that active file instead. " +
+        "Use the applicable repository instructions file only when the user requests project-scoped setup. " +
+        "For other clients, determine their supported instructions filename and scope; do not guess that AGENTS.md is loaded. " +
+        "Read existing instructions first. Append the integration section once, or replace only its existing section through " +
+        "the next level-one or level-two Markdown heading outside code fences. Preserve all unrelated content, file encoding, " +
+        "and existing user preferences. If duplicate sections or conflicting connection details make replacement ambiguous, " +
+        "explain the exact conflict before changing them. Re-read the saved file and report its actual path and verified result. " +
+        "The MCP server returns text; it does not write or verify the client's instructions file. " +
+        "Explain when a new chat or client restart is required to load updated instructions.";
+
     internal static FirstTimeSetupContent Create(string settingsPath, string? projectRoot)
     {
         var command = Path.GetFullPath(Environment.ProcessPath
@@ -31,9 +47,9 @@ internal sealed record FirstTimeSetupContent(
         var codexCommand = "codex mcp add fullStackLauncher -- " + PowerShellLiteral(command) + " " +
             string.Join(" ", arguments.Select(PowerShellLiteral)) + Environment.NewLine + "codex mcp list";
         var projectHint = string.IsNullOrWhiteSpace(projectRoot)
-            ? "Use the current repository's applicable AGENTS.md file."
+            ? "Use this client's recognized global instructions file unless I request project-scoped setup."
             : "Project working folder: " + Path.GetFullPath(projectRoot) + Environment.NewLine +
-              "Use that repository's applicable AGENTS.md file.";
+              "Use this folder when matching configured projects for read-only checks. Install instructions globally unless I request project-scoped setup.";
 
         var manualInstructions = $$"""
             1. Keep Full Stack Dev Tool open under the same Windows user and desktop session as your agent. Keep the app in a stable folder; moving its executable requires updating the MCP command.
@@ -43,7 +59,7 @@ internal sealed record FirstTimeSetupContent(
 
             No environment variables, API keys, or remote URL are required.
             3. Save and enable the server. Reconnect MCP or restart your agent app, then open a new chat if existing chats do not discover the tools.
-            4. Ask your agent to call launcher_projects. A successful response, even with an empty project list, proves the client can reach the running dashboard. A saved entry or listed tools alone does not prove that connection. If a project is configured, use launcher_services and launcher_service_status for read-only checks. Do not start, stop, or restart services just to verify setup.
+            4. Ask your agent to call launcher_agent_setup and install its returned integration section into the client's recognized instructions file, preserving existing instructions. The response contains this computer's current connection values and the complete section. Then call launcher_projects. A successful response, even with an empty project list, proves the client can reach the running dashboard. A saved entry or listed tools alone does not prove that connection. If a project is configured, use launcher_services and launcher_service_status for read-only checks. Do not start, stop, or restart services just to verify setup.
 
             Codex CLI alternative, when codex is installed and available in PowerShell:
 
@@ -56,6 +72,10 @@ internal sealed record FirstTimeSetupContent(
             ## Full Stack Dev Tool MCP integration
 
             Keep existing AGENTS.md instructions. Append this section once, or update only this integration section when its connection details change.
+
+            ### Setup through a connected agent
+
+            When asked to install or refresh this integration, call launcher_agent_setup through the existing MCP connection. It returns the running dashboard's current machine-specific connection values, this complete section, and installation guidance. The same instructions are available from the read-only resource fullstacklauncher://setup/agents.md. Use the client's own file tools to merge only this section into its recognized instructions file. Preserve unrelated instructions and verify the saved file before reporting success. For Codex global setup, respect CODEX_HOME (default ~/.codex) and any active AGENTS.override.md. Retrieving setup text alone does not write a file or prove that a client has loaded it.
 
             ### First-time connection
 
@@ -95,7 +115,7 @@ internal sealed record FirstTimeSetupContent(
             """;
 
         var setupPrompt = $$"""
-            Read the applicable existing AGENTS.md instructions first, including the Full Stack Dev Tool MCP integration section I appended. Preserve all existing instructions and unrelated client settings. Perform first-time MCP setup for Full Stack Dev Tool on this computer.
+            Read the applicable existing agent instructions first. Preserve all existing instructions and unrelated client settings. Perform first-time MCP setup for Full Stack Dev Tool on this computer. If launcher_agent_setup is already available, call it and use its live installation guidance and agentsInstructions to merge only the Full Stack Dev Tool MCP integration section into this client's recognized instructions file. Do not register a second connection when the existing connection works.
 
             {{projectHint}}
 
@@ -109,11 +129,22 @@ internal sealed record FirstTimeSetupContent(
 
             {{codexCommand}}
 
-            Keep the dashboard open under the same Windows user and desktop session. Tell me when MCP must reconnect, the client must restart, or a new chat is needed; an existing chat may not gain new tools. After reconnecting, call launcher_projects through the configured MCP connection. A successful response, even with no configured projects, proves the live connection. A saved registration or tools list proves less. Match my checkout before read-only launcher_services and launcher_service_status checks. Do not add projects, change service configuration, start/stop/restart services, stage, commit, or push as part of setup. Report what you configured, what the live check proved, and any remaining manual step.
+            Keep the dashboard open under the same Windows user and desktop session. Tell me when MCP must reconnect, the client must restart, or a new chat is needed; an existing chat may not gain new tools. After reconnecting, call launcher_agent_setup through the configured MCP connection and install its returned integration section with the client's file tools, preserving existing instructions. Then call launcher_projects. A successful response, even with no configured projects, proves the live connection. A saved registration or tools list proves less. Match my checkout before read-only launcher_services and launcher_service_status checks. Do not add projects, change service configuration, start/stop/restart services, stage, commit, or push as part of setup. Report what you configured, the actual verified instructions file path, what the live check proved, and any remaining manual step.
             """;
 
+        var connectedSetupPrompt = "Full Stack Dev Tool MCP is already connected. Call launcher_agent_setup now. " +
+            "Follow its writeGuidance and install the returned agentsInstructions section into this agent client's " +
+            "recognized global instructions file on my computer. Preserve all existing instructions and update only " +
+            "the Full Stack Dev Tool MCP integration section; do not add duplicates. Use my client's actual profile " +
+            "and respect any active override file. Use a repository file only if I request project-scoped setup. " +
+            "Verify the saved file by reading it back, then call launcher_projects to confirm the live connection. " +
+            "Do not add projects, change MCP registrations, change services, stage, commit, or push. " +
+            "Report the actual file path, what was installed, and whether a new chat or restart is needed. " +
+            "If local file tools or the setup tool are unavailable, return exact instructions and the required manual step; " +
+            "do not claim the file was written.";
+
         return new FirstTimeSetupContent(command, arguments.AsReadOnly(), workingDirectory,
-            agentsInstructions, setupPrompt, codexCommand, manualInstructions);
+            agentsInstructions, setupPrompt, codexCommand, manualInstructions, connectedSetupPrompt);
     }
 
     private static string BuildConnectionFields(string command, IReadOnlyList<string> arguments,

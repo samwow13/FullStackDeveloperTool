@@ -1,10 +1,14 @@
 using System.ComponentModel;
 using System.Windows;
+using FullStackLauncher.Services;
 
 namespace FullStackLauncher.ProjectTasks;
 
-public partial class CodexConnectionWindow : Window
+public partial class CodexConnectionWindow : Window, IDashboardReplacementWindow
 {
+    public bool IsDashboardReplacementReady => !_model.IsBusy;
+    public bool IsDashboardReplacementClosePending => false;
+
     private readonly CodexConnectionViewModel _model;
 
     public CodexConnectionWindow(string projectId, string projectName, string folder)

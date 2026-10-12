@@ -20,21 +20,25 @@ public sealed class ProjectQueueCoordinator
     private readonly ProjectTaskStore _store;
     private readonly SettingsStore _settingsStore;
     private readonly Func<ICodexQueueTaskRunner> _runnerFactory;
+    private readonly Func<bool> _dashboardIsAlive;
     private readonly SemaphoreSlim _gate = new(1, 1);
     private readonly SemaphoreSlim _wake = new(0, 1);
     private readonly TaskCompletionSource _ready = new(TaskCreationOptions.RunContinuationsAsynchronously);
     private ActiveAttempt? _active;
+    private ActiveAttempt? _shutdownAttempt;
+    private bool _shuttingDown;
     private bool _started;
     private bool _waitingOnActivePredecessor;
     private bool _handoffPending;
     private string _ownerStatus = "Queue owner is starting.";
 
     public ProjectQueueCoordinator(ProjectTaskStore store, SettingsStore settingsStore,
-        Func<ICodexQueueTaskRunner> runnerFactory)
+        Func<ICodexQueueTaskRunner> runnerFactory, Func<bool>? dashboardIsAlive = null)
     {
         _store = store ?? throw new ArgumentNullException(nameof(store));
         _settingsStore = settingsStore ?? throw new ArgumentNullException(nameof(settingsStore));
         _runnerFactory = runnerFactory ?? throw new ArgumentNullException(nameof(runnerFactory));
+        _dashboardIsAlive = dashboardIsAlive ?? (() => true);
     }
 
     /// <summary>Completes only after outstanding attempts are held and saved.</summary>
@@ -94,6 +98,7 @@ public sealed class ProjectQueueCoordinator
                         attempt.ExecutionLock.Dispose();
                     }
                     finally { _gate.Release(); }
+                    attempt.Finished.TrySetResult();
                 }
                 continue;
             }
@@ -109,6 +114,8 @@ public sealed class ProjectQueueCoordinator
         await _gate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
+            if (_shuttingDown)
+                throw new InvalidOperationException("The queue owner is shutting down. Reopen Notes & queue after dashboard closure before enabling work.");
             var data = LoadWritable();
             var queue = FindQueue(data, projectId);
             var removed = ProjectQueueMaintenance.RemoveFailedItems(data, projectId, _active?.AttemptId);
@@ -167,6 +174,8 @@ public sealed class ProjectQueueCoordinator
         await _gate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
+            if (_shuttingDown && !paused)
+                throw new InvalidOperationException("The queue owner is shutting down. All queues remain paused.");
             var data = LoadWritable();
             data.PauseAllQueues = paused;
             if (paused) { _waitingOnActivePredecessor = false; _handoffPending = false; }
@@ -467,6 +476,88 @@ public sealed class ProjectQueueCoordinator
         return status;
     }
 
+    /// <summary>
+    /// Stop the owned exact turn before clearing execution intent. A stop request,
+    /// timeout, or disconnected runner never confirms task inactivity.
+    /// </summary>
+    public async Task<ProjectQueueCoordinatorStatus> ShutdownAsync(
+        CancellationToken cancellationToken = default)
+    {
+        ActiveAttempt? attempt;
+        await _gate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            _shuttingDown = true; // Latch before the next selection can claim work.
+            _waitingOnActivePredecessor = false;
+            _handoffPending = false;
+            _shutdownAttempt ??= _active;
+            attempt = _shutdownAttempt;
+            var data = LoadWritable();
+            data.PauseAllQueues = true;
+            foreach (var queue in data.Queues)
+            {
+                queue.Enabled = false;
+                queue.StatusMessage = "Dashboard closing. Queues paused while the current task stops.";
+            }
+            _store.Save(data);
+            _ownerStatus = "Queue owner is shutting down.";
+            Wake();
+        }
+        finally { _gate.Release(); }
+
+        using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        timeout.CancelAfter(TimeSpan.FromSeconds(45));
+        try
+        {
+            if (attempt is not null)
+            {
+                if (!attempt.Finished.Task.IsCompleted)
+                    await attempt.Runner.StopCurrentAsync(timeout.Token).ConfigureAwait(false);
+                // Do not hold _gate: execution must persist its exact terminal result
+                // and release the global execution lock before this wait completes.
+                await attempt.Finished.Task.WaitAsync(timeout.Token).ConfigureAwait(false);
+                ProjectTaskExecutionReceipt receipt;
+                await _gate.WaitAsync(timeout.Token).ConfigureAwait(false);
+                try { receipt = FindReceipt(LoadWritable(), attempt); }
+                finally { _gate.Release(); }
+                if (!ProjectQueueMaintenance.HasConfirmedInactiveTask(receipt))
+                {
+                    var confirmed = false;
+                    if (!string.IsNullOrWhiteSpace(receipt.ThreadId) && !string.IsNullOrWhiteSpace(receipt.TurnId))
+                    {
+                        var observed = await _runnerFactory().InspectExactAsync(attempt.Snapshot,
+                            receipt.ThreadId, receipt.TurnId, timeout.Token).ConfigureAwait(false);
+                        confirmed = observed.TerminalConfirmed && observed.Outcome != ProjectTaskOutcome.Unknown &&
+                            observed.ThreadId == receipt.ThreadId && observed.TurnId == receipt.TurnId;
+                    }
+                    if (!confirmed)
+                        throw new InvalidOperationException("Queue shutdown could not confirm that the owned Codex task and child work stopped. Queues remain paused; retained task evidence needs review before exit.");
+                    // Read-only reconciliation confirms inactivity only. Preserve
+                    // the existing receipt's immutable unknown outcome for review.
+                }
+            }
+
+            await _gate.WaitAsync(timeout.Token).ConfigureAwait(false);
+            try
+            {
+                if (_active is not null)
+                    throw new InvalidOperationException("The queue owner still has active work. Dashboard closure was not completed.");
+                var data = LoadWritable();
+                ProjectQueueMaintenance.ClearForShutdown(data);
+                _store.Save(data);
+                TryClearSettledMarker();
+                _shutdownAttempt = null;
+                _ownerStatus = "Queues stopped and cleared. Notes and task history remain saved.";
+                return Status(data, null) with { Message = _ownerStatus };
+            }
+            finally { _gate.Release(); }
+        }
+        catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+        {
+            throw new InvalidOperationException("Queue shutdown timed out before the owned task stopped or cleanup was saved. Queues remain paused. Retry closure after reviewing the current task.");
+        }
+    }
+
     public async Task<ProjectQueueCoordinatorStatus> GetStatusAsync(string? projectId = null,
         CancellationToken cancellationToken = default)
     {
@@ -553,6 +644,7 @@ public sealed class ProjectQueueCoordinator
     {
         _waitingOnActivePredecessor = false;
         _handoffPending = false;
+        if (_shuttingDown) return null;
         var data = LoadWritable();
         if (data.PauseAllQueues) return null;
         if (HasUnresolvedAttempt(data))
@@ -560,7 +652,7 @@ public sealed class ProjectQueueCoordinator
             _ownerStatus = "An unresolved queue attempt needs explicit review before further dispatch.";
             return null;
         }
-        if (!QueueDashboardPermit.IsEnabled(_settingsStore.SettingsPath))
+        if (!DashboardPermitsDispatch())
         {
             _ownerStatus = DashboardRequiredMessage;
             return null;
@@ -707,9 +799,9 @@ public sealed class ProjectQueueCoordinator
                     loopPredecessor.ResultSummary + "\n\n" + loopPredecessor.FinalResponse
             };
             var receipt = new ProjectTaskExecutionReceipt { Snapshot = snapshot };
-            // Recheck after predecessor inspection and project validation. Closing
-            // or disabling the dashboard never changes pending intent or receipts.
-            if (!QueueDashboardPermit.IsEnabled(_settingsStore.SettingsPath))
+            // Recheck after predecessor inspection and project validation. A lost
+            // dashboard permit never authorizes a queued submission.
+            if (!DashboardPermitsDispatch())
             {
                 _waitingOnActivePredecessor = false;
                 _handoffPending = false;
@@ -798,7 +890,8 @@ public sealed class ProjectQueueCoordinator
             }
             else if (update.Stage == CodexQueueRunStage.Terminal)
                 ApplyTerminal(data, receipt, item, queue, update.State, update.Outcome,
-                    update.TerminalConfirmed, update.Summary, update.FinalResponse);
+                    update.TerminalConfirmed, update.Summary, update.FinalResponse,
+                    allowLoopContinuation: !_shuttingDown);
             else if (receipt.State == ProjectTaskRunState.Prepared)
                 receipt.State = ProjectTaskRunState.Starting;
             receipt.UpdatedAt = now;
@@ -827,7 +920,8 @@ public sealed class ProjectQueueCoordinator
             ApplyIdentity(receipt, result.ThreadId, result.TurnId);
             if (recovered) queue.Enabled = false; // Recovery never silently advances the queue.
             ApplyTerminal(data, receipt, item, queue, result.State, result.Outcome,
-                result.TerminalConfirmed, result.Summary, result.FinalResponse, allowLoopContinuation: !recovered);
+                result.TerminalConfirmed, result.Summary, result.FinalResponse,
+                allowLoopContinuation: !recovered && !_shuttingDown);
             receipt.UpdatedAt = DateTimeOffset.UtcNow;
             _handoffPending = receipt.State == ProjectTaskRunState.Completed &&
                 receipt.Outcome == ProjectTaskOutcome.Succeeded && queue.Enabled &&
@@ -1099,7 +1193,7 @@ public sealed class ProjectQueueCoordinator
     {
         var queue = projectId is null ? null : data.Queues.FirstOrDefault(candidate => candidate.ProjectId == projectId);
         var activeMatches = _active is not null && (projectId is null || _active.ProjectId == projectId);
-        var dashboardPermitsStarts = QueueDashboardPermit.IsEnabled(_settingsStore.SettingsPath);
+        var dashboardPermitsStarts = DashboardPermitsDispatch();
         var message = queue?.StatusMessage;
         if (!activeMatches && queue is not null && ProjectQueueDelay.IsWaiting(data, queue, DateTimeOffset.UtcNow))
             message = ProjectQueueDelay.WaitingMessage(data, queue, DateTimeOffset.UtcNow);
@@ -1122,6 +1216,9 @@ public sealed class ProjectQueueCoordinator
 
     private static string NormalizeFolder(string path) =>
         Path.TrimEndingDirectorySeparator(Path.GetFullPath(path));
+
+    private bool DashboardPermitsDispatch() =>
+        _dashboardIsAlive() && QueueDashboardPermit.IsEnabled(_settingsStore.SettingsPath);
 
     private static string ShortId(string id) => id.Length <= 12 ? id : id[..12];
 
@@ -1238,7 +1335,10 @@ public sealed class ProjectQueueCoordinator
     }
 
     private sealed record ActiveAttempt(string ProjectId, string AttemptId,
-        ProjectTaskDispatchSnapshot Snapshot, ICodexQueueTaskRunner Runner, FileStream ExecutionLock);
+        ProjectTaskDispatchSnapshot Snapshot, ICodexQueueTaskRunner Runner, FileStream ExecutionLock)
+    {
+        internal TaskCompletionSource Finished { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+    }
 
     private sealed record QueueExecutionMarker(string StorePath, string AttemptId, string ProjectId,
         string Folder, DateTimeOffset CreatedAt);

@@ -3,6 +3,61 @@ namespace FullStackLauncher.ProjectTasks;
 /// <summary>Moves saved task content while retaining its execution evidence.</summary>
 internal static class ProjectQueueMaintenance
 {
+    /// <summary>
+    /// Clear execution intent after the owner has stopped, without deleting notes,
+    /// immutable receipts, or queue entries whose task inactivity is still unknown.
+    /// </summary>
+    internal static int ClearForShutdown(ProjectTaskData data)
+    {
+        ArgumentNullException.ThrowIfNull(data);
+        data.PauseAllQueues = true;
+        foreach (var queue in data.Queues)
+        {
+            queue.Enabled = false;
+            queue.ExternalPredecessor = null;
+            queue.ExternalPredecessorSatisfiedAt = null;
+            queue.AutomaticLoopEnabled = false;
+            queue.AutomaticLoopEnabledAt = null;
+            queue.AutomaticLoopChainId = "";
+            queue.AutomaticLoopSeedAttemptId = "";
+            queue.AutomaticLoopLastGeneratedAttemptId = "";
+        }
+
+        var removed = data.QueueItems.RemoveAll(item => item.LastAttemptId is null &&
+                item.State is ProjectQueueItemState.Pending or ProjectQueueItemState.Completed or
+                    ProjectQueueItemState.Failed or ProjectQueueItemState.Interrupted ||
+            item.LastAttemptId is not null && data.Receipts.Any(receipt =>
+                receipt.AttemptId == item.LastAttemptId &&
+                receipt.Purpose == ProjectTaskExecutionPurpose.QueueItem &&
+                receipt.Snapshot.ProjectId == item.ProjectId && receipt.Snapshot.QueueItemId == item.Id &&
+                (HasConfirmedInactiveTask(receipt) || receipt.QueueAbandonedAt is not null)));
+        foreach (var item in data.QueueItems) item.Enabled = false;
+        foreach (var queue in data.Queues)
+        {
+            var unresolved = data.Receipts.Any(receipt =>
+                receipt.Purpose == ProjectTaskExecutionPurpose.QueueItem &&
+                receipt.Snapshot.ProjectId == queue.ProjectId &&
+                receipt.QueueReviewCompletedAt is null && receipt.QueueAbandonedAt is null &&
+                !(receipt.FinishedAt is not null && receipt.State == ProjectTaskRunState.Completed &&
+                    receipt.Outcome == ProjectTaskOutcome.Succeeded &&
+                    !string.IsNullOrWhiteSpace(receipt.ThreadId) && !string.IsNullOrWhiteSpace(receipt.TurnId)));
+            queue.RecoveryState = unresolved
+                ? ProjectQueueRecoveryState.NeedsAttention : ProjectQueueRecoveryState.None;
+            queue.StatusMessage = unresolved
+                ? "Queue stopped and cleared. Retained attempt evidence still needs review."
+                : "Queue stopped and cleared when the dashboard closed. Notes and task history remain saved.";
+        }
+        return removed;
+    }
+
+    internal static bool HasConfirmedInactiveTask(ProjectTaskExecutionReceipt receipt) =>
+        receipt.QueueReviewCompletedAt is not null ||
+        receipt.FinishedAt is not null && receipt.Outcome != ProjectTaskOutcome.Unknown &&
+            !string.IsNullOrWhiteSpace(receipt.ThreadId) && !string.IsNullOrWhiteSpace(receipt.TurnId) ||
+        receipt.SubmissionStartedAt is null && receipt.StartedAt is null &&
+            receipt.ThreadId is null && receipt.TurnId is null &&
+            receipt.Outcome is ProjectTaskOutcome.Failed or ProjectTaskOutcome.Interrupted;
+
     internal static bool CanRemoveFailedItem(ProjectTaskData data, ProjectQueueItem item,
         string? activeAttemptId = null)
     {

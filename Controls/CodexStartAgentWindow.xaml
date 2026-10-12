@@ -48,6 +48,9 @@
                               SelectionChanged="Access_Changed" AutomationProperties.Name="Agent access"
                               ToolTip="Workspace limits file writes to this project. Full access allows commands and file access outside this project. Both run without approval prompts; choose the access you want before starting."/>
                 </DockPanel>
+                <CheckBox x:Name="KeepAwakeChoice" Content="_Keep awake" Margin="44,0,0,12" FontSize="12"
+                          AutomationProperties.Name="Keep agent awake"
+                          ToolTip="Send &quot;Keep Going&quot; after each successful turn until Keep awake is unchecked in Codex Crew. Pauses on requests for input, failure, or an uncertain outcome. Turning it off lets the current turn finish."/>
                 <Expander x:Name="ContextExpander" Header="Project context" Foreground="{StaticResource TextBrush}" Margin="44,0,0,12">
                     <StackPanel Margin="0,9,0,0">
                         <TextBox x:Name="ContextBox" AcceptsReturn="True" TextWrapping="Wrap" MinHeight="75" MaxHeight="160"

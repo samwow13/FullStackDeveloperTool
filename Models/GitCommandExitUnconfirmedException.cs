@@ -6,6 +6,9 @@ namespace FullStackLauncher.Models;
 public sealed class GitCommandExitUnconfirmedException(string message, int processId, DateTime? startedAt,
     CancellationToken token) : OperationCanceledException(message, token)
 {
+    internal GitCommandExitUnconfirmedException WithContext(string context) =>
+        new(context + "\n" + Message, processId, startedAt, CancellationToken);
+
     public bool IsExitConfirmed()
     {
         try

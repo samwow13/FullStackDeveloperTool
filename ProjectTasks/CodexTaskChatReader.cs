@@ -53,14 +53,24 @@ internal static class CodexTaskChatReader
             for (var page = 0; page < MaximumPages; page++)
             {
                 timeout.Token.ThrowIfCancellationRequested();
-                var turns = await connection.RequestAsync("thread/turns/list", new
+                JsonElement turns;
+                try
                 {
-                    threadId = receipt.ThreadId,
-                    limit = PageSize,
-                    sortDirection = "desc",
-                    itemsView = "full",
-                    cursor
-                }, timeout.Token).ConfigureAwait(false);
+                    turns = await connection.RequestAsync("thread/turns/list", new
+                    {
+                        threadId = receipt.ThreadId,
+                        limit = PageSize,
+                        sortDirection = "desc",
+                        itemsView = "full",
+                        cursor
+                    }, timeout.Token).ConfigureAwait(false);
+                }
+                catch (CodexRequestException ex) when (ex.IsMethodUnavailable)
+                {
+                    // Older App Servers return full saved turns on thread/read.
+                    // This fallback remains read-only and anchored to the exact receipt.
+                    return await ReadLegacyTurnsAsync(connection, receipt, timeout.Token).ConfigureAwait(false);
+                }
                 if (!turns.TryGetProperty("data", out var data) || data.ValueKind != JsonValueKind.Array ||
                     data.GetArrayLength() > PageSize)
                     return Empty(CodexAppServerConnection.IncompatibleMessage);
@@ -96,6 +106,35 @@ internal static class CodexTaskChatReader
         {
             return Empty("Codex chat is unavailable. Refresh to try again.");
         }
+    }
+
+    private static async Task<CodexTaskChatResult> ReadLegacyTurnsAsync(CodexAppServerConnection connection,
+        ProjectTaskExecutionReceipt receipt, CancellationToken token)
+    {
+        var response = await connection.RequestAsync("thread/read", new
+        {
+            threadId = receipt.ThreadId,
+            includeTurns = true
+        }, token).ConfigureAwait(false);
+        if (!TryObject(response, "thread", out var thread) ||
+            !string.Equals(OptionalString(thread, "id"), receipt.ThreadId, StringComparison.Ordinal))
+            return Empty("Codex task identity differs from this saved attempt.");
+        if (!thread.TryGetProperty("turns", out var turns) || turns.ValueKind != JsonValueKind.Array)
+            return Empty(CodexAppServerConnection.IncompatibleMessage);
+        if (turns.GetArrayLength() > PageSize * MaximumPages)
+            return Empty("This Codex version returns full history exceeding the 500-turn read limit.");
+        var seen = new HashSet<string>(StringComparer.Ordinal);
+        var selected = new List<JsonElement>();
+        var found = false;
+        foreach (var turn in turns.EnumerateArray())
+        {
+            var id = OptionalString(turn, "id");
+            if (string.IsNullOrWhiteSpace(id) || !seen.Add(id))
+                return Empty(CodexAppServerConnection.IncompatibleMessage);
+            found |= string.Equals(id, receipt.TurnId, StringComparison.Ordinal);
+            if (found) selected.Add(turn.Clone());
+        }
+        return found ? ReadTurns(selected) : Empty("The exact Codex turn is not in stored history yet. Refresh later.");
     }
 
     private static CodexTaskChatResult ReadTurns(IReadOnlyList<JsonElement> turns)

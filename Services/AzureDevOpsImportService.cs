@@ -9,7 +9,7 @@ using FullStackLauncher.Models;
 
 namespace FullStackLauncher.Services;
 
-/// <summary>Reads Azure DevOps Services metadata using a transient Git Credential Manager credential.</summary>
+/// <summary>Reads Azure DevOps Services metadata with explicit GCM or protected personal-token authentication.</summary>
 public static class AzureDevOpsImportService
 {
     private const int ResponseLimit = 8 * 1024 * 1024;
@@ -63,7 +63,15 @@ public static class AzureDevOpsImportService
     }
 
     public static Task<IReadOnlyList<AzureDevOpsImportRepository>> ListRepositoriesAsync(string projectUrl,
-        bool interactive, CancellationToken token = default)
+        bool interactive, CancellationToken token = default) =>
+        ListRepositoriesCoreAsync(projectUrl, interactive, false, null, token);
+
+    public static Task<IReadOnlyList<AzureDevOpsImportRepository>> ListRepositoriesWithTokenAsync(string projectUrl,
+        string? personalAccessToken, CancellationToken token = default) =>
+        ListRepositoriesCoreAsync(projectUrl, false, true, personalAccessToken, token);
+
+    private static Task<IReadOnlyList<AzureDevOpsImportRepository>> ListRepositoriesCoreAsync(string projectUrl,
+        bool interactive, bool useToken, string? personalAccessToken, CancellationToken token)
     {
         var target = ParseProjectUrl(projectUrl);
         return WithAuthenticationAsync<IReadOnlyList<AzureDevOpsImportRepository>>(target, interactive, async (client, deadline) =>
@@ -119,11 +127,18 @@ public static class AzureDevOpsImportService
                 });
             }
             return repositories.OrderBy(repository => repository.Name, StringComparer.OrdinalIgnoreCase).ToArray();
-        }, token);
+        }, token, useToken, personalAccessToken);
     }
 
     public static Task<IReadOnlyList<string>> ListBranchesAsync(string projectUrl, string repositoryId,
-        bool interactive, CancellationToken token = default)
+        bool interactive, CancellationToken token = default) =>
+        ListBranchesCoreAsync(projectUrl, repositoryId, interactive, false, token);
+
+    public static Task<IReadOnlyList<string>> ListBranchesWithTokenAsync(string projectUrl, string repositoryId,
+        CancellationToken token = default) => ListBranchesCoreAsync(projectUrl, repositoryId, false, true, token);
+
+    private static Task<IReadOnlyList<string>> ListBranchesCoreAsync(string projectUrl, string repositoryId,
+        bool interactive, bool useToken, CancellationToken token)
     {
         var target = ParseProjectUrl(projectUrl);
         if (!Guid.TryParse(repositoryId, out var id) || id == Guid.Empty)
@@ -153,12 +168,54 @@ public static class AzureDevOpsImportService
                 if (!continuations.Add(continuation)) throw InvalidMetadata();
             }
             throw new InvalidOperationException("Azure DevOps returned too many branch pages. Clone with Git, then add its folder.");
-        }, token);
+        }, token, useToken);
     }
 
     private static Task<T> WithAuthenticationAsync<T>(AzureDevOpsProjectTarget target, bool interactive,
-        Func<HttpClient, CancellationToken, Task<T>> read, CancellationToken token) =>
-        Task.Run(() => WithAuthenticationCoreAsync(target, interactive, read, token), token);
+        Func<HttpClient, CancellationToken, Task<T>> read, CancellationToken token,
+        bool useToken = false, string? personalAccessToken = null) =>
+        Task.Run(() => useToken ? WithTokenAuthenticationAsync(target, personalAccessToken, read, token)
+            : WithAuthenticationCoreAsync(target, interactive, read, token), token);
+
+    private static async Task<T> WithTokenAuthenticationAsync<T>(AzureDevOpsProjectTarget target, string? personalAccessToken,
+        Func<HttpClient, CancellationToken, Task<T>> read, CancellationToken token)
+    {
+        token.ThrowIfCancellationRequested();
+        var supplied = !string.IsNullOrEmpty(personalAccessToken);
+        var secret = supplied ? personalAccessToken! : AzureDevOpsTokenStore.Read(target.ProjectUrl);
+        AzureDevOpsTokenStore.ValidateToken(secret);
+        using var timeout = CancellationTokenSource.CreateLinkedTokenSource(token);
+        timeout.CancelAfter(TimeSpan.FromSeconds(90));
+        using var handler = new HttpClientHandler { AllowAutoRedirect = false, UseCookies = false, UseDefaultCredentials = false };
+        using var client = new HttpClient(handler) { Timeout = Timeout.InfiniteTimeSpan };
+        client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Basic",
+            Convert.ToBase64String(Encoding.UTF8.GetBytes("pat:" + secret)));
+        client.DefaultRequestHeaders.UserAgent.ParseAdd("FullStackLauncher-Azure-Import/1.0");
+        client.DefaultRequestHeaders.Accept.ParseAdd("application/json");
+        try
+        {
+            // A public repository response alone does not establish authenticated token access.
+            using var identity = await ReadPageAsync(client, "https://dev.azure.com/" +
+                Uri.EscapeDataString(target.Organization) + "/_apis/connectionData?connectOptions=0&lastChangeId=-1&lastChangeId64=-1",
+                timeout.Token).ConfigureAwait(false);
+            var root = identity.Document.RootElement;
+            if (!root.TryGetProperty("authenticatedUser", out var authenticated) || !GitConnectionService.IsAuthenticatedAzureIdentity(authenticated)
+                || !root.TryGetProperty("authorizedUser", out var authorized) || !GitConnectionService.IsAuthenticatedAzureIdentity(authorized))
+                throw new InvalidOperationException("Azure DevOps did not verify this token's account. Check token expiry, organization, and permissions.");
+            var result = await read(client, timeout.Token).ConfigureAwait(false);
+            token.ThrowIfCancellationRequested();
+            if (supplied) AzureDevOpsTokenStore.Save(target.ProjectUrl, secret);
+            return result;
+        }
+        catch (OperationCanceledException) when (!token.IsCancellationRequested)
+        { throw new InvalidOperationException("Azure DevOps discovery timed out. Check network access, then retry."); }
+        catch (HttpRequestException)
+        { throw new InvalidOperationException("Azure DevOps could not be reached. Check network access and TLS trust, then retry."); }
+        catch (IOException)
+        { throw new InvalidOperationException("Azure DevOps returned an unreadable response. Check network access, then retry."); }
+        catch (JsonException) { throw InvalidMetadata(); }
+        finally { client.DefaultRequestHeaders.Authorization = null; secret = ""; }
+    }
 
     private static async Task<T> WithAuthenticationCoreAsync<T>(AzureDevOpsProjectTarget target, bool interactive,
         Func<HttpClient, CancellationToken, Task<T>> read, CancellationToken token)
@@ -315,8 +372,8 @@ public static class AzureDevOpsImportService
         if (!response.IsSuccessStatusCode)
             throw new InvalidOperationException(response.StatusCode switch
             {
-                HttpStatusCode.Unauthorized => "Azure DevOps authentication failed. Choose Sign in & load and check the organization account.",
-                HttpStatusCode.Forbidden => "Your Microsoft account cannot read this Azure DevOps project. Check project and repository permissions.",
+                HttpStatusCode.Unauthorized => "Azure DevOps authentication failed. Reconnect with your chosen method and check the organization, account, or token expiry.",
+                HttpStatusCode.Forbidden => "This Azure DevOps connection cannot read the project. Check project permissions and token Code Read scope when using a token.",
                 HttpStatusCode.NotFound => "Azure DevOps could not find this project or repository for your account. Check the project URL and permissions.",
                 HttpStatusCode.TooManyRequests => "Azure DevOps rate limited this request. Wait before retrying.",
                 _ when (int)response.StatusCode is >= 300 and < 400 => "Azure DevOps redirected this request. Use the current HTTPS project URL at dev.azure.com.",

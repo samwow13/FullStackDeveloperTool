@@ -90,10 +90,10 @@ public partial class MainWindow
         e.Handled = true;
     }
 
-    private async void GitCommit_Click(object sender, RoutedEventArgs e)
+    private void GitCommit_Click(object sender, RoutedEventArgs e)
     {
         if (!NextCommitVisible || SelectedProject is null || IsEditing || _closeRequested || _closing || _closed) return;
-        await RefreshNextCommitAsync(force: true);
+        PresentNextCommit();
     }
 
     private async void OpenGit_Click(object sender, RoutedEventArgs e) =>
@@ -130,6 +130,10 @@ public partial class MainWindow
         var generation = _nextCommitProjectGeneration;
         try
         {
+            var item = ProjectItems.First(candidate => ReferenceEquals(candidate.Profile, project));
+            var sharedProject = await _projectGitService.GetProjectAsync(project.Id, ProjectGitFolders(item), _nextCommitLifetime.Token);
+            await Task.WhenAll(sharedProject.Repositories.Keys.Select(root =>
+                _projectGitService.RefreshLedgerAsync(root, _nextCommitLifetime.Token)));
             var discovery = await DiscoverAgentGitAsync(project, null, _nextCommitLifetime.Token);
             var results = await Task.WhenAll(discovery.Repositories.Select(async repository =>
             {
@@ -139,8 +143,12 @@ public partial class MainWindow
                 var remote = repository.Connections.Single(connection => connection.IsActive);
                 try
                 {
-                    var batch = await AgentGitChangeStore.ReadPendingAsync(repository.RepositoryRoot, repository.Branch,
-                        remote.RemoteName, remote.ConnectionId, _nextCommitLifetime.Token);
+                    var shared = await _projectGitService.GetRepositoryAsync(repository.RepositoryRoot, remote.RemoteName, _nextCommitLifetime.Token);
+                    if (shared.LedgerError is not null) throw new InvalidOperationException(shared.LedgerError);
+                    var batch = shared.PendingSummaries;
+                    if (batch is null || batch.Branch != repository.Branch || batch.ConnectionId != remote.ConnectionId
+                        || batch.RemoteName != remote.RemoteName)
+                        throw new InvalidOperationException("The active commit-summary scope changed. Refresh the project before continuing.");
                     return (Repository: repository, Batch: (AgentGitSummaryBatch?)batch, Error: (string?)null);
                 }
                 catch (OperationCanceledException) { throw; }

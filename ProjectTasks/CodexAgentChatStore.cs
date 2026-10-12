@@ -7,6 +7,7 @@ public sealed record CodexAgentChatRequest(string ProjectId, string ProjectName,
 {
     public IReadOnlyList<CodexAgentChatImage> Images { get; init; } = [];
     public CodexAgentAccessMode AccessMode { get; init; } = CodexAgentAccessMode.Workspace;
+    public bool KeepAwake { get; init; }
 }
 
 /// <summary>A clipboard image frozen with one explicit agent chat submission.</summary>

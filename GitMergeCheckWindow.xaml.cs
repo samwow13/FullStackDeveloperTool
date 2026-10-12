@@ -25,7 +25,7 @@ public partial class GitMergeCheckWindow : Window
             ? new SolidColorBrush(Color.FromRgb(255, 188, 139)) : (Brush)FindResource("AccentBrush");
         if (reviewLocalMerge)
         {
-            Title = "Local merge comparison";
+            Title = "Local merge preview";
             if (result.IncomingCommits == 0)
             {
                 Heading.Text = $"{result.CurrentBranch} is up to date with {result.Remote}/{result.SourceBranch}";
@@ -42,20 +42,10 @@ public partial class GitMergeCheckWindow : Window
                 BackToGit.IsDefault = false;
             }
         }
-        var paths = result.ConflictedPaths.Count > 0
-            ? "\n\nConflicting paths (relative to this repository):\n" + string.Join("\n", result.ConflictedPaths.Select(path => "• " + DisplayPath(path))) : "";
-        var diagnostics = string.IsNullOrWhiteSpace(result.GitDiagnostics) ? "" : "\n\nGit details:\n" + result.GitDiagnostics;
-        var scope = reviewLocalMerge && result.IncomingCommits == 0
-            ? "\n\nUncommitted edits are preserved. The current branch already includes the selected source commit; this action does not checkpoint or merge those edits. Later remote updates require another comparison."
-            : result.HasUncommittedChanges
-            ? "\n\nThis repository has uncommitted changes. They were excluded. An actual merge checkpoints those changes first and may produce different conflicts."
-            : "\n\nThis result covers only the exact commits above. Later local edits or release updates can change the outcome.";
-        Details.Text = SensitiveDataProtection.Redact($"Repository:\n{root}\n\nCurrent branch: {result.CurrentBranch}\nCurrent commit: {result.CurrentCommit}\nRemote source: {result.Remote}/{result.SourceBranch}\nSource commit: {result.SourceCommit}\nIncoming commits: {result.IncomingCommits:N0}\nChecked: {result.CheckedAt.ToLocalTime():g}\n\n{result.Message}{paths}{diagnostics}{scope}\n\nOnly Git history was checked. No application build or tests ran. Submodule contents were not checked.");
+        Details.Text = GitMergePresentation.FormatComparisonDetails(root, result, reviewLocalMerge);
     }
 
     private void ReviewMerge_Click(object sender, RoutedEventArgs e) => DialogResult = true;
-
-    private static string DisplayPath(string path) => path.Replace("\r", "\\r").Replace("\n", "\\n").Replace("\t", "\\t");
 
     private void OpenFolder_Click(object sender, RoutedEventArgs e)
     {

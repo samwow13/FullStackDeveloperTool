@@ -8,8 +8,11 @@ using Microsoft.Win32;
 
 namespace FullStackLauncher;
 
-public partial class ConsoleServiceWindow : Window
+public partial class ConsoleServiceWindow : Window, IDashboardReplacementWindow
 {
+    public bool IsDashboardReplacementReady => !_saving && !_detecting;
+    public bool IsDashboardReplacementClosePending => false;
+
     private readonly ProjectProfile _project;
     private readonly string _settingsDirectory;
     private readonly IReadOnlyList<ProjectProfile> _savedProjects;

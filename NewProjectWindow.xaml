@@ -85,10 +85,18 @@
                             </StackPanel>
                         </Button>
                         <Button x:Name="RemoteSourceButton" Click="RemoteSource_Click" HorizontalContentAlignment="Left"
-                                Padding="16" AutomationProperties.Name="Integrate from DevOps or Git">
+                                Padding="16" Margin="0,0,0,12" AutomationProperties.Name="Integrate from DevOps or Git">
                             <StackPanel>
                                 <TextBlock Text="Integrate from DevOps or Git" FontSize="16" FontWeight="SemiBold"/>
-                                <TextBlock Text="Import an Azure DevOps repository and choose its branch. Other Git providers are coming next."
+                                <TextBlock Text="Connect with your Azure DevOps project URL and choose repositories and branches."
+                                           Style="{StaticResource HelpText}" Margin="0,5,0,0"/>
+                            </StackPanel>
+                        </Button>
+                        <Button x:Name="TokenSourceButton" Click="TokenSource_Click" HorizontalContentAlignment="Left"
+                                Padding="16" AutomationProperties.Name="Connect with Azure DevOps Token">
+                            <StackPanel>
+                                <TextBlock Text="Connect with Azure DevOps Token" FontSize="16" FontWeight="SemiBold"/>
+                                <TextBlock Text="Save a personal access token for your Azure DevOps project, then choose repositories and branches."
                                            Style="{StaticResource HelpText}" Margin="0,5,0,0"/>
                             </StackPanel>
                         </Button>

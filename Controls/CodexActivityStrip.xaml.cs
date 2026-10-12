@@ -11,6 +11,7 @@ using System.Windows.Media;
 using System.Windows.Threading;
 using FullStackLauncher.CodexMonitor;
 using FullStackLauncher.Models;
+using FullStackLauncher.ProjectTasks;
 using FullStackLauncher.Services;
 
 namespace FullStackLauncher.Controls;
@@ -80,11 +81,11 @@ public partial class CodexActivityStrip : UserControl, INotifyPropertyChanged
     public bool HasAgents => !IsCodexNotRunning && Agents.Count != 0;
     public bool IsEmpty => !HasAgents;
     public bool CanClear => !_clearing && !_resetting && Agents.Any(agent => agent.CanClear);
-    public bool CanDismissCards => !_clearing && !_resetting && !_readFailed && _snapshot?.IsAvailable == true &&
+    public bool CanDismissCards => !_clearing && !_resetting &&
         _feed is not null && _lifetime is not null;
     public bool GoodbyeWaveEnabled => SystemParameters.ClientAreaAnimation;
     public bool CanForceClear => !_initializing && !_clearing && !_resetting && _feed is not null;
-    public string? ActivityError => _resetError ?? (!_initializing && !IsCodexNotRunning && (_readFailed || _snapshot?.IsAvailable == false)
+    public string? ActivityError => _resetError ?? _muteReadError ?? (!_initializing && !IsCodexNotRunning && (_readFailed || _snapshot?.IsAvailable == false)
         ? "Local Codex activity could not be read. The launcher will retry automatically." : null);
     public bool HasActivityError => !string.IsNullOrWhiteSpace(ActivityError);
     public string ActivityDetail => (_resetError ?? (_readFailed ? "Local Codex activity could not be read. The launcher will retry automatically."
@@ -237,10 +238,13 @@ public partial class CodexActivityStrip : UserControl, INotifyPropertyChanged
         var token = _lifetime.Token;
         var projects = _projects;
         var scopeVersion = _projectScopeVersion;
+        var projectId = _selectedProjectId;
+        var keepAwakeRevision = _keepAwakeRevision;
+        var muteRevision = _muteRevision;
         _refreshing = true;
         try
         {
-            var snapshot = await Task.Run(() =>
+            var read = await Task.Run(() =>
             {
                 token.ThrowIfCancellationRequested();
                 var codexHome = Environment.GetEnvironmentVariable("CODEX_HOME");
@@ -248,12 +252,15 @@ public partial class CodexActivityStrip : UserControl, INotifyPropertyChanged
                     codexHome = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".codex");
                 _feed ??= new CodexActivityFeedService(codexHome,
                     new SettingsStore().SettingsPath + ".codex-crew-reset.json");
-                return _feed.ReadSnapshot(projects, token);
+                var snapshot = _feed.ReadSnapshot(projects, token);
+                return (Snapshot: snapshot, KeepAwake: ReadKeepAwake(snapshot, projectId), Mute: ReadMute(token));
             }, token);
             if (token.IsCancellationRequested) return;
             if (scopeVersion != _projectScopeVersion) { _projectRefreshPending = true; return; }
             _readFailed = false;
-            Apply(snapshot);
+            if (keepAwakeRevision == _keepAwakeRevision) ApplyKeepAwakeRead(read.KeepAwake);
+            if (muteRevision == _muteRevision) ApplyMuteRead(read.Mute);
+            Apply(read.Snapshot);
         }
         catch (OperationCanceledException) when (token.IsCancellationRequested) { }
         catch (Exception)
@@ -268,6 +275,7 @@ public partial class CodexActivityStrip : UserControl, INotifyPropertyChanged
                 StatusText = "Local Codex activity could not be read. The launcher will retry automatically."
             });
             foreach (var agent in Agents) agent.MarkUnavailable();
+            ApplyKeepAwakeCards();
             NotifyView();
         }
         finally
@@ -299,6 +307,7 @@ public partial class CodexActivityStrip : UserControl, INotifyPropertyChanged
         {
             HideThoughtPopups();
             foreach (var agent in Agents) agent.MarkUnavailable();
+            ApplyKeepAwakeCards();
             NotifyView();
             return;
         }
@@ -317,7 +326,9 @@ public partial class CodexActivityStrip : UserControl, INotifyPropertyChanged
                 if (oldIndex != index) Agents.Move(oldIndex, index);
             }
         }
+        ApplyMuteCards();
         UpdateBubbleTimer();
+        ApplyKeepAwakeCards();
         NotifyView();
     }
 
@@ -325,7 +336,7 @@ public partial class CodexActivityStrip : UserControl, INotifyPropertyChanged
 
     private async void DismissAgent_Click(object sender, RoutedEventArgs e)
     {
-        if (sender is not FrameworkElement { DataContext: ActivityCard { CanClear: true } card } button) return;
+        if (!CanDismissCards || sender is not FrameworkElement { DataContext: ActivityCard card } button) return;
         e.Handled = true;
         var restoreFocus = button.IsKeyboardFocusWithin;
         await ClearRecentAsync(card.Id, card.ActivityIdentity);
@@ -347,7 +358,43 @@ public partial class CodexActivityStrip : UserControl, INotifyPropertyChanged
             // Wait for an in-flight read before dismissal so its captured rows cannot reappear.
             while (_refreshing) await Task.Delay(40, token);
             if (token.IsCancellationRequested || !ReferenceEquals(lifetime, _lifetime)) return;
-            Apply(agentId is null ? feed.ClearRecent(projectId) : feed.DismissRecent(agentId, activityIdentity));
+            if (_selectedProjectId != projectId) return;
+            if (agentId is not null)
+            {
+                var current = feed.CurrentSnapshot;
+                var row = current.Agents.FirstOrDefault(agent => agent.Id == agentId && agent.ProjectId == projectId);
+                if (row is null || row.ActivityIdentity != activityIdentity) return;
+                if (_readFailed || !current.IsAvailable || !row.CanDismiss)
+                {
+                    CloseMenus();
+                    HideThoughtPopups();
+                    var knownUnfinished = !_readFailed && current.IsAvailable &&
+                        (row.IsRunning || row.IsWaiting || row.NeedsInput);
+                    var warning = knownUnfinished
+                        ? "This chat or one of its subagents has unfinished work."
+                        : "This chat's completion is unconfirmed. It may still be active.";
+                    var choice = MessageBox.Show(Window.GetWindow(this),
+                        warning + "\n\nWaving goodbye hides this chat and its subagents from Codex Crew. " +
+                        "Their work continues, and chat and queue history are preserved.\n\nWave goodbye anyway?",
+                        knownUnfinished ? "Agent still active" : "Agent status unconfirmed",
+                        MessageBoxButton.YesNo, MessageBoxImage.Warning, MessageBoxResult.No);
+                    if (choice != MessageBoxResult.Yes) return;
+                    if (token.IsCancellationRequested || !ReferenceEquals(lifetime, _lifetime) ||
+                        _selectedProjectId != projectId) return;
+                }
+            }
+            var cleared = agentId is null ? feed.ClearRecent(projectId)
+                : feed.DismissRecent(agentId, activityIdentity, allowUnsettled: true);
+            Apply(cleared);
+            // Unavailable reads intentionally retain stale cards. An explicit Wave
+            // still removes its confirmed hidden card without implying fresh status.
+            if (agentId is not null && !cleared.Agents.Any(agent => agent.Id == agentId))
+            {
+                var card = Agents.FirstOrDefault(agent => agent.Id == agentId);
+                if (card is not null) Agents.Remove(card);
+                UpdateBubbleTimer();
+                NotifyView();
+            }
         }
         catch (OperationCanceledException) when (token.IsCancellationRequested) { }
         finally
@@ -504,6 +551,42 @@ public partial class CodexActivityStrip : UserControl, INotifyPropertyChanged
         if (ReferenceEquals(_hoverThoughtPopup?.PlacementTarget, sender)) DelayThoughtHoverClose();
     }
 
+    private void RobotMessage_Click(object sender, MouseButtonEventArgs e)
+    {
+        if (sender is not FrameworkElement anchor) return;
+        anchor.Focus();
+        var popup = _thoughtPopups.FirstOrDefault(value => ReferenceEquals(value.PlacementTarget, anchor));
+        if (popup is not null) BeginThoughtHover(popup);
+        e.Handled = true;
+    }
+
+    private void RobotFocus_Enter(object sender, KeyboardFocusChangedEventArgs e)
+    {
+        var popup = _thoughtPopups.FirstOrDefault(value => ReferenceEquals(value.PlacementTarget, sender));
+        if (popup is not null) BeginThoughtHover(popup);
+    }
+
+    private void RobotFocus_Leave(object sender, KeyboardFocusChangedEventArgs e)
+    {
+        if (ReferenceEquals(_hoverThoughtPopup?.PlacementTarget, sender)) DelayThoughtHoverClose();
+    }
+
+    private void RobotMessage_KeyDown(object sender, KeyEventArgs e)
+    {
+        if (e.Key == Key.Escape)
+        {
+            ClearThoughtHover();
+            UpdateBubbleTimer();
+            e.Handled = true;
+        }
+        else if (e.Key is Key.Enter or Key.Space)
+        {
+            var popup = _thoughtPopups.FirstOrDefault(value => ReferenceEquals(value.PlacementTarget, sender));
+            if (popup is not null) BeginThoughtHover(popup);
+            e.Handled = true;
+        }
+    }
+
     private void ThoughtHover_Enter(object sender, MouseEventArgs e)
     {
         var popup = _thoughtPopups.FirstOrDefault(value => ReferenceEquals(value.Child, sender));
@@ -638,13 +721,13 @@ public partial class CodexActivityStrip : UserControl, INotifyPropertyChanged
         if (!popup.IsLoaded || !ReferenceEquals(popup.DataContext, _hoverThoughtContext)
             || popup.PlacementTarget is not FrameworkElement anchor || !anchor.IsVisible || !IsThoughtAnchorVisible(anchor)
             || (_hoverThoughtLeaveAt is { } deadline && now >= deadline
-                && popup.PlacementTarget?.IsMouseOver != true && !IsThoughtPointerActive(popup)))
+                && popup.PlacementTarget?.IsMouseOver != true && !anchor.IsKeyboardFocusWithin && !IsThoughtPointerActive(popup)))
         {
             ClearThoughtHover();
             return;
         }
         // A layout change can move the pointer out without a matching leave event.
-        if (_hoverThoughtLeaveAt is null && anchor.IsMouseOver != true && !IsThoughtPointerActive(popup))
+        if (_hoverThoughtLeaveAt is null && anchor.IsMouseOver != true && !anchor.IsKeyboardFocusWithin && !IsThoughtPointerActive(popup))
             _hoverThoughtLeaveAt = now.AddMilliseconds(350);
     }
 
@@ -692,7 +775,7 @@ public partial class CodexActivityStrip : UserControl, INotifyPropertyChanged
                 var hovered = ReferenceEquals(_hoverThoughtPopup, popup) && ReferenceEquals(popup.DataContext, _hoverThoughtContext);
                 var visible = show && popup.IsLoaded && popup.DataContext is ActivityCard { Animate: true } card &&
                     !string.IsNullOrWhiteSpace(card.ThoughtBubbleText) &&
-                    (hovered || (ThoughtBubblesEnabled && card.HasCurrentStatus && card.HasThoughtBubble)) &&
+                    (hovered || (ThoughtBubblesEnabled && !card.IsMuted && card.HasCurrentStatus && card.HasThoughtBubble)) &&
                     anchor is { IsLoaded: true, IsVisible: true } && IsThoughtAnchorVisible(anchor);
                 if (!visible || popup.Child is not FrameworkElement child)
                 {
@@ -845,6 +928,7 @@ public partial class CodexActivityStrip : UserControl, INotifyPropertyChanged
     private void UpdateSettingsMenu()
     {
         UpdateViewMenu();
+        UpdateKeepAwakeMenu();
         BubbleEnabledItem.IsChecked = ThoughtBubblesEnabled;
         BubbleDurationItem.IsEnabled = ThoughtBubblesEnabled;
         foreach (var item in BubbleDurationItem.Items.OfType<MenuItem>())
@@ -868,7 +952,7 @@ public partial class CodexActivityStrip : UserControl, INotifyPropertyChanged
     private void SettingsMenu_PreviewKeyDown(object sender, KeyEventArgs e)
     {
         if (e.Key != Key.Escape) return;
-        if (ViewOptionsItem.IsSubmenuOpen || BubbleDurationItem.IsSubmenuOpen) return;
+        if (ViewOptionsItem.IsSubmenuOpen || BubbleDurationItem.IsSubmenuOpen || KeepAwakeAgentsItem.IsSubmenuOpen) return;
         CloseMenus();
         SettingsButton.Focus();
         e.Handled = true;
@@ -938,6 +1022,36 @@ public partial class CodexActivityStrip : UserControl, INotifyPropertyChanged
         private string _displaySummary = "";
         private bool _copyingHistory;
         private string _historyCopyStatus = "";
+        private CodexAgentKeepAwakeStatus _keepAwake = new(false, false, "Keep awake requires a connected Launcher-started agent.");
+        private bool _changingKeepAwake;
+        private bool _muted;
+        private bool _canChangeMute = true;
+        public bool IsMuted => _muted;
+        public bool CanChangeMute => _canChangeMute;
+        public string MuteButtonText => _muted ? "Muted" : "Mute";
+        public string MuteDescription => _muted
+            ? "Unmute this chat and its subagents. Messages remain available by hovering, clicking or focusing each robot."
+            : "Mute automatic messages and waving/talking for this chat and its subagents. Work, completion and sleep remain visible.";
+        public void SetMuted(bool muted, bool canChange = true)
+        {
+            var changed = _muted != muted || _canChangeMute != canChange;
+            _muted = muted;
+            _canChangeMute = canChange;
+            if (muted) HideBubbles();
+            foreach (var subagent in Subagents) subagent.SetMuted(muted, canChange);
+            if (changed) PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(null));
+        }
+        public bool KeepAwakeEnabled => _keepAwake.IsEnabled;
+        public bool CanChangeKeepAwake => !_changingKeepAwake && (_keepAwake.CanEnable || _keepAwake.IsEnabled);
+        public string KeepAwakeStatus => _changingKeepAwake ? "Saving Keep awake…" : _keepAwake.Status;
+        public void SetKeepAwakeStatus(CodexAgentKeepAwakeStatus status, bool changing)
+        {
+            _keepAwake = status;
+            _changingKeepAwake = changing;
+            PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(KeepAwakeEnabled)));
+            PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(CanChangeKeepAwake)));
+            PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(KeepAwakeStatus)));
+        }
         public ActivityCard(CodexActivityAgent value, bool bubbleEnabled, int bubbleSeconds, bool showFeedback)
         {
             _value = value;
@@ -950,7 +1064,7 @@ public partial class CodexActivityStrip : UserControl, INotifyPropertyChanged
             UpdateSubagents(showFeedback);
         }
         public bool HasThoughtBubble => _bubbleRequestedAt is not null;
-        public bool IsWaitingToSpeak => !_unavailable && HasThoughtBubble && !_bubblePresented;
+        public bool IsWaitingToSpeak => !_unavailable && !_muted && HasThoughtBubble && !_bubblePresented;
         public bool HasCurrentStatus => !_unavailable;
         public DateTimeOffset? ThoughtBubbleRequestedAt => _bubbleRequestedAt;
         public bool HasVisibleBubbles => HasThoughtBubble || Subagents.Any(agent => agent.HasVisibleBubbles);
@@ -981,7 +1095,9 @@ public partial class CodexActivityStrip : UserControl, INotifyPropertyChanged
         public double ThoughtBubbleTailScaleY => _thoughtBubbleTailAbove ? -1 : 1;
         public ObservableCollection<ActivityCard> Subagents { get; } = [];
         public bool HasSubagents => Subagents.Count > 0;
-        public string SubagentSummary => $"{Subagents.Count} subagent{(Subagents.Count == 1 ? "" : "s")}. Robots wave for new messages and rest after speaking. Hover each robot for its latest saved message.";
+        public string SubagentSummary => $"{Subagents.Count} subagent{(Subagents.Count == 1 ? "" : "s")}. " +
+            (_muted ? "Messages are muted. Robots keep working and sleep when completed. " : "Robots wave for new messages and rest after speaking. ") +
+            "Hover, click or focus each robot for its latest saved message.";
         public string Id => _value.Id;
         public string? ActivityIdentity => _value.ActivityIdentity;
         public string Title => _value.Title;
@@ -1158,7 +1274,7 @@ public partial class CodexActivityStrip : UserControl, INotifyPropertyChanged
 
         private void ShowBubble()
         {
-            if (!_bubbleEnabled || _value.FeedbackIdentity is null
+            if (!_bubbleEnabled || _muted || _value.FeedbackIdentity is null
                 || !HasReadableFeedback() || _value.TaskSummary == "Reading saved chat…") return;
             _bubbleRequestedAt = DateTimeOffset.UtcNow;
             _bubblePresented = false;
@@ -1275,6 +1391,7 @@ public partial class CodexActivityStrip : UserControl, INotifyPropertyChanged
                     if (oldIndex != index) Subagents.Move(oldIndex, index);
                     existing.Animate = _animate;
                 }
+                existing.SetMuted(_muted, _canChangeMute);
             }
         }
     }

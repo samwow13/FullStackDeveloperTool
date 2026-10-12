@@ -23,6 +23,7 @@ public partial class MainWindow
         AgentGitFolder[] Folders, AgentGitRepository[] Repositories)
     {
         public string? Warning { get; init; }
+        public DateTimeOffset ReadAt { get; init; }
     }
 
     private async Task<object> ListAgentGitConnectionsAsync(AgentBridgeRequest request, CancellationToken token)
@@ -34,7 +35,7 @@ public partial class MainWindow
             projectId = discovery.Project.Id,
             projectName = discovery.Project.Name,
             projectRoot = _store.ResolveRoot(discovery.Project),
-            observedUtc = DateTime.UtcNow,
+            observedUtc = discovery.ReadAt.UtcDateTime,
             authentication = "not_checked",
             warning = discovery.Warning,
             folders = discovery.Folders,
@@ -54,7 +55,8 @@ public partial class MainWindow
             || request.Bullets.Any(bullet => string.IsNullOrWhiteSpace(bullet) || bullet.Length > 120))
             throw new ArgumentException("Supply a stable updateId up to 100 characters and 1-5 short bullets, each at most 120 characters.");
 
-        var discovery = await DiscoverAgentGitAsync(project, request.RepositoryId, token);
+        // Cached state is presentation data, never authorization to save a report.
+        var discovery = await DiscoverAgentGitAsync(project, request.RepositoryId, token, requireFresh: true);
         var repository = discovery.Repositories.SingleOrDefault(item => item.RepositoryId == request.RepositoryId)
             ?? throw new InvalidOperationException("This repository is not resolved from this project's configured folders. Refresh launcher_git_connections.");
         if (!repository.CanRecordChanges || repository.ActiveConnectionId != request.ConnectionId
@@ -77,6 +79,11 @@ public partial class MainWindow
         var entry = recorded.Entry;
         if (recorded.IsNew)
         {
+            // The report is already durable. Cache repair must not turn that confirmed
+            // save into an apparent failure; the background refresh can retry the read.
+            try { await _projectGitService.RefreshLedgerAsync(repository.RepositoryRoot, _nextCommitLifetime.Token); }
+            catch (OperationCanceledException) when (_nextCommitLifetime.IsCancellationRequested) { }
+            catch (Exception) { }
             ShowAgentGitUpdateNotice();
             if (ReferenceEquals(SelectedProject, project))
             {
@@ -112,18 +119,20 @@ public partial class MainWindow
     }
 
     private async Task<AgentGitDiscovery> DiscoverAgentGitAsync(ProjectProfile project,
-        string? requestedRepositoryId, CancellationToken token)
+        string? requestedRepositoryId, CancellationToken token, bool requireFresh = false)
     {
         var folders = AgentGitFolders(project);
         if (folders.Length > 64)
             throw new InvalidOperationException("This project has too many configured Git folders for one bridge request. Use the WPF Git workspace.");
-        using var limiter = new SemaphoreSlim(4);
-        // Use the same bounded metadata discovery as the Git workspace and Next commit.
-        // Non-service checkouts such as ORKidsDatabase must also remain reportable through
-        // the bridge, including a fresh discovery before saving a change summary.
-        var discovered = await GitRepositoryDiscovery.DiscoverAsync(folders.Select((folder, index) =>
-            new GitRepositoryDiscoveryFolder(index == 0 ? "Project root" : Path.GetFileName(folder), folder,
-                ScanImmediateChildren: index == 0)).ToArray(), token);
+        var item = ProjectItems.FirstOrDefault(candidate => ReferenceEquals(candidate.Profile, project))
+            ?? throw new InvalidOperationException("The configured project changed during Git inspection. Refresh launcher_projects and launcher_git_connections.");
+        var sources = ProjectGitFolders(item);
+        // Preview, comparison, sidebar and bridge listing share one discovery and snapshot.
+        // A report refreshes only its selected checkout after validating cached membership.
+        var state = await _projectGitService.GetProjectAsync(project.Id, sources, token);
+        if (requireFresh && state.Error is not null)
+            throw new InvalidOperationException("The configured project could not be inspected before this report was saved. Refresh launcher_git_connections.");
+        var discovered = state.Discovery;
         // Preserve the original configured-folder mapping for bridge callers and the final
         // report recheck, even when several source folders resolve to the same checkout.
         var metadata = discovered.ResolvedFolders.Select(folder => new AgentGitFolder(folder.Directory,
@@ -132,24 +141,61 @@ public partial class MainWindow
             .GroupBy(item => item.RepositoryRoot!, StringComparer.OrdinalIgnoreCase)
             .Where(group => requestedRepositoryId is null || AgentGitRepositoryId(group.Key) == requestedRepositoryId)
             .ToArray();
-        var repositories = await Task.WhenAll(groups.Select(async group =>
+        if (requireFresh)
         {
-            await limiter.WaitAsync(token);
-            try { return await ReadAgentGitRepositoryAsync(group.Key, group.Select(item => item.Directory).ToArray(), token); }
-            finally { limiter.Release(); }
-        }));
-        var discovery = new AgentGitDiscovery(project, folders, metadata, repositories) { Warning = discovered.Warning };
+            foreach (var group in groups)
+            {
+                await RequireAgentGitFoldersCurrentAsync(group.Key,
+                    group.Select(item => item.Directory).ToArray(), folders, token);
+                _projectGitService.InvalidateRepository(group.Key);
+                await _projectGitService.RefreshRepositoryAsync(group.Key, fetchRemote: false, token: token);
+            }
+        }
+        var repositories = await Task.WhenAll(groups.Select(group =>
+            ReadAgentGitRepositoryAsync(group.Key, group.Select(item => item.Directory).ToArray(), token)));
+        var discovery = new AgentGitDiscovery(project, folders, metadata, repositories)
+        {
+            Warning = discovered.Warning,
+            ReadAt = state.ReadAt
+        };
         EnsureAgentGitProjectCurrent(discovery);
         return discovery;
     }
 
-    private static async Task<AgentGitRepository> ReadAgentGitRepositoryAsync(string root,
+    private async Task RequireAgentGitFoldersCurrentAsync(string root, string[] resolvedFolders,
+        string[] configuredFolders, CancellationToken token)
+    {
+        // Configured folders may be linked. Discovered children must retain the narrower
+        // immediate-child, non-linked metadata boundary used by initial discovery.
+        await Task.Run(() =>
+        {
+            foreach (var directory in resolvedFolders)
+            {
+                token.ThrowIfCancellationRequested();
+                if (configuredFolders.Contains(directory, StringComparer.OrdinalIgnoreCase)) continue;
+                if (!string.Equals(Path.GetDirectoryName(directory), configuredFolders[0], StringComparison.OrdinalIgnoreCase)
+                    || File.GetAttributes(configuredFolders[0]).HasFlag(FileAttributes.ReparsePoint)
+                    || File.GetAttributes(directory).HasFlag(FileAttributes.ReparsePoint)
+                    || File.GetAttributes(Path.Combine(directory, ".git")).HasFlag(FileAttributes.ReparsePoint))
+                    throw new InvalidOperationException("The configured repository folder changed. Refresh launcher_git_connections.");
+            }
+        }, token).WaitAsync(TimeSpan.FromSeconds(2), token);
+        var current = await Task.WhenAll(resolvedFolders.Select(directory => ReadBranchFolderAsync(directory).WaitAsync(token)));
+        if (current.Any(snapshot => !snapshot.HasRepository
+            || !string.Equals(snapshot.RepositoryPath, root, StringComparison.OrdinalIgnoreCase)))
+            throw new InvalidOperationException("The configured repository folder changed. Refresh launcher_git_connections.");
+    }
+
+    private async Task<AgentGitRepository> ReadAgentGitRepositoryAsync(string root,
         string[] configuredFolders, CancellationToken token)
     {
         var repositoryId = AgentGitRepositoryId(root);
         try
         {
-            var snapshot = await GitRepositoryService.ReadAsync(root, token);
+            var state = await _projectGitService.GetRepositoryAsync(root, token: token);
+            var snapshot = state.Snapshot;
+            if (state.Error is not null || snapshot is null)
+                throw new InvalidOperationException("Git connection information is unavailable.");
             if (!snapshot.IsRepository || snapshot.RepositoryRoot is null
                 || !string.Equals(Path.TrimEndingDirectorySeparator(snapshot.RepositoryRoot),
                     Path.TrimEndingDirectorySeparator(root), StringComparison.OrdinalIgnoreCase))
@@ -160,32 +206,12 @@ public partial class MainWindow
             // ReadAsync has already withheld unsafe and multi-target URLs. Never expose or select
             // one of those placeholders as a connection, even when it is the only saved remote.
             var eligible = snapshot.Remotes.Where(remote => remote.UrlCanCopy).ToArray();
-            var selection = await AgentGitChangeStore.ReadSelectionAsync(root, token);
-            GitRemoteInfo? active = null;
-            string? selectionSource = null;
-            string? detail = null;
-            if (selection is not null)
-            {
-                active = eligible.SingleOrDefault(remote => remote.Name == selection.RemoteName
-                    && AgentGitChangeStore.ConnectionId(remote) == selection.ConnectionId);
-                selectionSource = "saved_workspace_selection";
-                if (active is null) detail = "The saved active connection changed or was removed. Select a connection in the WPF Git workspace.";
-            }
-            else
-            {
-                active = eligible.SingleOrDefault(remote => snapshot.Upstream?.StartsWith(remote.Name + "/", StringComparison.Ordinal) == true);
-                if (active is not null) selectionSource = "current_branch_upstream";
-                else if (snapshot.Upstream is null && snapshot.Remotes.Count == 1 && eligible.Length == 1)
-                {
-                    active = eligible[0];
-                    selectionSource = "only_configured_connection";
-                }
-                else detail = eligible.Length == 0
-                    ? "No supported credential-free connection is configured. Complete Git setup in the WPF app."
-                    : snapshot.Upstream is not null
-                        ? "The current branch's upstream does not identify a supported connection. Select the active connection in the WPF Git workspace."
-                        : "Several connections are configured. Select the active connection in the WPF Git workspace.";
-            }
+            var active = state.ActiveRemote is { } selected
+                ? eligible.SingleOrDefault(remote => remote.Name == selected.Name
+                    && AgentGitChangeStore.ConnectionId(remote) == AgentGitChangeStore.ConnectionId(selected))
+                : null;
+            var selectionSource = state.SelectionSource;
+            var detail = state.SelectionError;
             var activeId = active is null ? null : AgentGitChangeStore.ConnectionId(active);
             var connections = eligible.Select(remote => new AgentGitRemote(
                 AgentGitChangeStore.ConnectionId(remote), remote.Name,

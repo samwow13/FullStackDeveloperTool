@@ -6,8 +6,11 @@ using FullStackLauncher.Services;
 
 namespace FullStackLauncher;
 
-public partial class ToolCredentialEditorWindow : Window
+public partial class ToolCredentialEditorWindow : Window, IDashboardReplacementWindow
 {
+    public bool IsDashboardReplacementReady => !_busy;
+    public bool IsDashboardReplacementClosePending => false;
+
     private readonly ToolCredentialProfile? _profile;
     private bool _initialized;
     private bool _busy;

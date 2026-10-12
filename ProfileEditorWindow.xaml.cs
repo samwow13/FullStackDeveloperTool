@@ -373,6 +373,7 @@ public partial class ProfileEditorWindow : Window
         CleanCommand = service.CleanCommand, SetupCommand = service.SetupCommand,
         Url = service.Url, UiPath = service.UiPath, ApiTargetServiceId = service.ApiTargetServiceId,
         OpenAfterBuild = service.OpenAfterBuild,
+        IncludeInBatch = service.IncludeInBatch,
         DisableLegacyApiPortSync = service.DisableLegacyApiPortSync,
         ProductionDatabase = service.ProductionDatabase is { } productionDatabase
             ? new() { SourceId = productionDatabase.SourceId, DatabaseName = productionDatabase.DatabaseName } : null,

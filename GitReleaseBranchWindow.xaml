@@ -10,9 +10,9 @@
         <Grid.RowDefinitions><RowDefinition Height="*"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
         <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
             <StackPanel>
-                <TextBlock x:Name="Headline" Text="Which branch should supply release changes?" FontSize="22" FontWeight="SemiBold" TextWrapping="Wrap"/>
-                <TextBlock x:Name="Context" TextWrapping="Wrap" Foreground="{StaticResource MutedBrush}" Margin="0,12,0,16"/>
-                <Grid Margin="0,0,0,12" AutomationProperties.LiveSetting="Polite">
+                <TextBlock x:Name="Context" TextWrapping="Wrap" FontSize="16" FontWeight="SemiBold" Foreground="{StaticResource AccentBrush}" Margin="0,0,0,14" AutomationProperties.LiveSetting="Polite"/>
+                <TextBlock x:Name="Headline" Text="Which branch should supply release changes?" FontSize="20" FontWeight="SemiBold" TextWrapping="Wrap" Margin="0,0,0,12"/>
+                <Grid x:Name="StatusRow" Margin="0,0,0,12" AutomationProperties.LiveSetting="Polite">
                     <Grid.ColumnDefinitions><ColumnDefinition Width="Auto"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
                     <Grid x:Name="LoadingIndicator" Width="26" Height="26" Margin="0,0,10,0" VerticalAlignment="Top" AutomationProperties.Name="Loading remote branches">
                         <Ellipse Stroke="#293B50" StrokeThickness="3"/>
@@ -22,18 +22,40 @@
                     </Grid>
                     <TextBlock x:Name="LoadingStatus" Grid.Column="1" Text="Loading remote branches…" TextWrapping="Wrap" Foreground="{StaticResource MutedBrush}" VerticalAlignment="Center" AutomationProperties.Name="Remote branch loading status"/>
                 </Grid>
+                <ProgressBar x:Name="OperationProgress" Height="6" IsIndeterminate="True" Visibility="Collapsed" Margin="0,0,0,14"
+                             AutomationProperties.Name="Local merge operation in progress"/>
                 <TextBox x:Name="ErrorDetails" IsReadOnly="True" TextWrapping="Wrap" VerticalScrollBarVisibility="Auto" MaxHeight="130" Visibility="Collapsed" Margin="0,0,0,12"
                          Foreground="#FFBC8B" Background="Transparent" BorderThickness="0" Padding="0" AutomationProperties.Name="Remote branch loading error details" AutomationProperties.LiveSetting="Polite"/>
-                <TextBlock x:Name="SourceSummary" TextWrapping="Wrap" Foreground="{StaticResource AccentBrush}" FontWeight="SemiBold" Margin="0,0,0,12" AutomationProperties.LiveSetting="Polite"/>
                 <StackPanel x:Name="BranchPicker" IsEnabled="False">
                     <Label Content="_Search remote branches" Target="{Binding ElementName=Search}" Foreground="{StaticResource TextBrush}" Padding="0,0,0,6"/>
                     <TextBox x:Name="Search" TextChanged="Search_Changed" AutomationProperties.Name="Search remote release branches"/>
                     <ListBox x:Name="Branches" DisplayMemberPath="Name" SelectionChanged="Branch_Changed" Height="165" Margin="0,10,0,12" Background="#111923" BorderBrush="{StaticResource BorderBrush}" BorderThickness="1" AutomationProperties.Name="Branches currently on selected remote"/>
                 </StackPanel>
                 <TextBlock x:Name="Description" Text="Save the release source for this remote. You can change it later in Config. Saving this choice does not merge or push." TextWrapping="Wrap" Foreground="{StaticResource MutedBrush}"/>
-                <Expander Header="Repository details" Margin="0,10,0,0" Foreground="{StaticResource MutedBrush}">
-                    <TextBlock x:Name="RepositoryContext" TextWrapping="Wrap" Margin="0,8,0,0"/>
-                </Expander>
+                <StackPanel x:Name="MergeFlowPanel" Visibility="Collapsed" Margin="0,12,0,0">
+                    <TextBox x:Name="ComparisonDetails" IsReadOnly="True" TextWrapping="Wrap" Height="420" VerticalScrollBarVisibility="Auto"
+                             FontSize="13" AutomationProperties.Name="Incoming commits and merge conflicts"/>
+                    <StackPanel x:Name="MergeApprovalPanel" Visibility="Collapsed" Margin="0,12,0,0">
+                        <TextBlock x:Name="MergeApprovalScope" TextWrapping="Wrap"/>
+                        <Expander x:Name="CheckpointPanel" Header="Local checkpoint message" Margin="0,10,0,0" Foreground="{StaticResource TextBrush}">
+                            <TextBox x:Name="CheckpointMessage" IsReadOnly="True" TextWrapping="Wrap" Margin="0,8,0,0"/>
+                        </Expander>
+                    </StackPanel>
+                    <TextBox x:Name="MergeOutcomeDetails" IsReadOnly="True" TextWrapping="Wrap" MaxHeight="220" VerticalScrollBarVisibility="Auto"
+                             Visibility="Collapsed" Margin="0,10,0,0" AutomationProperties.Name="Local merge result and recovery details"/>
+                    <StackPanel x:Name="ResolutionPromptPanel" Visibility="Collapsed" Margin="0,12,0,0">
+                        <DockPanel LastChildFill="True">
+                            <Button x:Name="CopyResolutionPrompt" Content="Copy prompt" Click="CopyResolutionPrompt_Click" DockPanel.Dock="Right" Margin="12,0,0,0"
+                                    AutomationProperties.Name="Copy conflict resolution prompt for Codex or Claude"/>
+                            <TextBlock Text="Codex / Claude" VerticalAlignment="Center" FontWeight="SemiBold"/>
+                        </DockPanel>
+                        <Expander Header="View prompt" Margin="0,6,0,0" Foreground="{StaticResource TextBrush}">
+                            <TextBox x:Name="ResolutionPrompt" IsReadOnly="True" TextWrapping="Wrap" Height="150" VerticalScrollBarVisibility="Auto"
+                                     AutomationProperties.Name="Conflict resolution prompt for Codex or Claude"/>
+                        </Expander>
+                    </StackPanel>
+                    <Button x:Name="CopyFlowDetails" Content="Copy details" Click="CopyFlowDetails_Click" HorizontalAlignment="Left" Margin="0,12,0,0"/>
+                </StackPanel>
                 <TextBlock x:Name="EmptyNotice" Text="No branches match. Change the search, or cancel and check the remote." TextWrapping="Wrap" Foreground="#FFBC8B" Margin="0,10,0,0" Visibility="Collapsed"/>
             </StackPanel>
         </ScrollViewer>

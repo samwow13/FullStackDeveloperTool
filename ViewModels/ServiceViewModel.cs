@@ -152,6 +152,8 @@ public sealed partial class ServiceViewModel(ServiceRunner runner) : ObservableO
     public ServiceRunner Runner { get; } = runner;
     public ServiceProfile Profile => Runner.Profile;
     public string Name => Profile.Name;
+    public bool IncludeInBatch => Profile.IncludeInBatch;
+    public void RefreshBatchSelection() => Changed(nameof(IncludeInBatch));
     public string Kind => Profile.Kind.ToUpperInvariant();
     public string Directory => Runner.WorkingDirectory;
     public string Command => Profile.ApiConfiguration is null ? Profile.StartCommand
@@ -436,6 +438,7 @@ public sealed partial class ServiceViewModel(ServiceRunner runner) : ObservableO
         // The same VM appears in the sidebar and the service card. Re-notifying every property
         // for an unchanged poll unnecessarily invalidates both visual trees and their layout.
         NotifyIfChanged(Name, nameof(Name));
+        NotifyIfChanged(IncludeInBatch, nameof(IncludeInBatch));
         NotifyIfChanged(Kind, nameof(Kind));
         NotifyIfChanged(IsConsoleApp, nameof(IsConsoleApp));
         NotifyIfChanged(IsCommandApi, nameof(IsCommandApi));

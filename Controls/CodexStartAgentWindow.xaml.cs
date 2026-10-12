@@ -9,8 +9,13 @@ using FullStackLauncher.Services;
 namespace FullStackLauncher.Controls;
 
 /// <summary>A project-scoped prompt draft and explicit, independent Codex chat submission.</summary>
-public partial class CodexStartAgentWindow : Window
+public partial class CodexStartAgentWindow : Window, IDashboardReplacementWindow
 {
+    private bool _replacementClosePending;
+    public bool IsDashboardReplacementReady => !IsSubmitting && !_savingContext && !_checkingStatus &&
+        !_closingContext && !_pastingImage && !_loadingAccess;
+    public bool IsDashboardReplacementClosePending => _replacementClosePending;
+
     private readonly string _projectId;
     private readonly string _projectName;
     private readonly string _folder;
@@ -35,6 +40,7 @@ public partial class CodexStartAgentWindow : Window
     private CodexAgentChatReceipt? _pendingReceipt;
 
     public string Draft => PromptBox.Text;
+    public bool DraftKeepAwake => KeepAwakeChoice.IsChecked == true;
     public bool HasUnsavedContext => !_discardContext && _preferences is not null &&
         !string.Equals(ContextBox.Text, _preferences.Context, StringComparison.Ordinal);
     public bool IsSubmitting { get; private set; }
@@ -43,7 +49,8 @@ public partial class CodexStartAgentWindow : Window
     public string? ThreadId { get; private set; }
 
     public CodexStartAgentWindow(string projectId, string projectName, string folder, string draft = "",
-        string? pendingAttemptId = null, IReadOnlyList<CodexAgentChatImage>? draftImages = null)
+        string? pendingAttemptId = null, IReadOnlyList<CodexAgentChatImage>? draftImages = null,
+        bool keepAwake = false)
     {
         _projectId = projectId;
         _projectName = projectName;
@@ -53,6 +60,7 @@ public partial class CodexStartAgentWindow : Window
         ProjectTitle.Text = projectName;
         ProjectTitle.ToolTip = folder;
         PromptBox.Text = draft;
+        KeepAwakeChoice.IsChecked = keepAwake;
         InitializeMessageImages(draftImages);
         AccessChoice.ItemsSource = new[]
         {
@@ -207,6 +215,7 @@ public partial class CodexStartAgentWindow : Window
         ModelChoice.IsEnabled = canChoose;
         EffortChoice.IsEnabled = canChoose;
         AccessChoice.IsEnabled = canChoose && _accessAvailable;
+        KeepAwakeChoice.IsEnabled = !locked;
         EffortChoice.ToolTip = (EffortChoice.SelectedItem as CodexReasoningEffortOption)?.Description;
         RefreshButton.IsEnabled = canChoose;
         PromptBox.IsReadOnly = locked;
@@ -298,6 +307,7 @@ public partial class CodexStartAgentWindow : Window
         if (!ValidateContext()) return;
         var prompt = PromptBox.Text;
         var context = ContextBox.Text;
+        var keepAwake = DraftKeepAwake;
         var candidate = _preferences with { ModelId = model.Id, ReasoningEffort = effort.Id, AccessMode = access.Mode };
         IsSubmitting = true;
         ShowStatus("Starting a new Codex chat…");
@@ -307,7 +317,7 @@ public partial class CodexStartAgentWindow : Window
             // Save only the remembered model and access choices here. Context changes require Save context.
             _preferences = await Task.Run(() => _store.Save(candidate));
             var request = new CodexAgentChatRequest(_projectId, _projectName, _folder, prompt,
-                context, model.Id, effort.Id) { Images = DraftImages, AccessMode = access.Mode };
+                context, model.Id, effort.Id) { Images = DraftImages, AccessMode = access.Mode, KeepAwake = keepAwake };
             var receipt = await _client.StartAsync(request, _lifetime.Token);
             if (!_closed) ApplyReceipt(receipt);
         }
@@ -330,15 +340,20 @@ public partial class CodexStartAgentWindow : Window
     private void ApplyReceipt(CodexAgentChatReceipt receipt)
     {
         ThreadId = receipt.ThreadId;
+        KeepAwakeChoice.IsChecked = receipt.Request.KeepAwake;
         if (receipt.IsAccepted)
         {
             SentSuccessfully = true;
             PendingAttemptId = null;
             _pendingReceipt = null;
             PromptBox.Clear();
+            // The empty editor now belongs to a new draft. The submitted chat's switch lives in Crew.
+            KeepAwakeChoice.IsChecked = false;
             ClearMessageImages();
             ClearFrozenModel();
-            ShowStatus(string.IsNullOrWhiteSpace(receipt.Summary) ? "Agent chat started." : receipt.Summary,
+            var summary = string.IsNullOrWhiteSpace(receipt.Summary) ? "Agent chat started." : receipt.Summary;
+            if (receipt.Request.KeepAwake) summary += " Keep awake was requested for the primary agent. Manage it on its Crew card.";
+            ShowStatus(summary,
                 error: receipt.State == CodexAgentChatState.Failed);
         }
         else if (receipt.RequiresReview || receipt.SubmissionAttempted || receipt.State is CodexAgentChatState.Prepared or CodexAgentChatState.Starting)
@@ -526,7 +541,9 @@ public partial class CodexStartAgentWindow : Window
         }
         if (!HasUnsavedContext) return;
         e.Cancel = true;
+        _replacementClosePending = true;
         _closingContext = true;
+        var resumeClose = false;
         UpdateControls();
         try
         {
@@ -535,14 +552,20 @@ public partial class CodexStartAgentWindow : Window
             if (choice == MessageBoxResult.Cancel) return;
             if (choice == MessageBoxResult.Yes && !await SaveContextAsync()) return;
             if (choice == MessageBoxResult.No) _discardContext = true;
+            resumeClose = true;
         }
         finally
         {
             _closingContext = false;
+            if (!resumeClose) _replacementClosePending = false;
             UpdateControls();
         }
         // The synchronous Discard branch still runs inside WPF's Closing event.
-        _ = Dispatcher.BeginInvoke(new Action(Close));
+        _ = Dispatcher.BeginInvoke(new Action(() =>
+        {
+            try { Close(); }
+            finally { _replacementClosePending = false; }
+        }));
     }
 
     private void Window_PreviewKeyDown(object sender, KeyEventArgs e)

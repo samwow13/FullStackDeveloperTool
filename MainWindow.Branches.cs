@@ -13,10 +13,12 @@ public partial class MainWindow
     public ProjectViewModel? SelectedProjectItem =>
         ProjectItems.FirstOrDefault(item => ReferenceEquals(item.Profile, SelectedProject));
 
-    // Each project refreshes independently of process/HTTP checks and other projects.
+    // All dashboard surfaces consume the same project state. Frequent presentation
+    // refreshes do not repeat repository discovery or Git commands.
     private async Task RefreshProjectBranchesAsync()
     {
         if (_closeRequested || _closing || _closed) return;
+        SynchronizeProjectGitRegistrations();
         await Task.WhenAll(ProjectItems.ToArray().Select(RefreshProjectBranchAsync));
     }
 
@@ -26,8 +28,14 @@ public partial class MainWindow
         try
         {
             var folders = BranchFolders(project);
-            var results = await Task.WhenAll(folders.Select(async folder =>
-                (Folder: folder, Snapshot: await ReadBranchFolderAsync(folder.Directory))));
+            var state = await _projectGitService.GetProjectAsync(project.Profile.Id,
+                ProjectGitFolders(project), _branchLifetime.Token);
+            var results = folders.Select(folder => (Folder: folder,
+                Snapshot: state.Discovery.ResolvedFolders.FirstOrDefault(resolved =>
+                    string.Equals(resolved.Directory, folder.Directory, StringComparison.OrdinalIgnoreCase))?.Snapshot
+                    ?? new GitBranchSnapshot(null, "Branch unavailable",
+                        "The configured folder has no current Git information. Refresh to inspect it again.",
+                        false, GitBranchState.Unavailable))).ToArray();
 
             // Profile replacement/removal or an inline rename can happen while reading.
             if (_closeRequested || _closing || _closed || !ProjectItems.Contains(project) || !folders.SequenceEqual(BranchFolders(project))) return;

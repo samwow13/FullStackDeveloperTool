@@ -74,6 +74,21 @@ public static class GitConnectionWarmup
         }
     }
 
+    internal static void InvalidateAzureOrganization(string organization)
+    {
+        static bool Matches(ConnectionKey key, string expected)
+        {
+            if (key.Provider != GitHostingProvider.AzureDevOps) return false;
+            try { return GitConnectionService.ParseTarget(key.Provider, key.Url).Organization.Equals(expected, StringComparison.OrdinalIgnoreCase); }
+            catch (InvalidOperationException) { return false; }
+        }
+        lock (Sync)
+        {
+            foreach (var key in Entries.Keys.Where(key => Matches(key, organization)).ToArray()) RemoveEntry(key);
+            foreach (var key in ReadyForSession.Keys.Where(key => Matches(key, organization)).ToArray()) ReadyForSession.Remove(key);
+        }
+    }
+
     private static async Task RecheckSessionAsync(ConnectionKey key, string root, GitHostingProvider provider, string url)
     {
         try { await GetOrCheckAsync(root, provider, url).ConfigureAwait(false); }

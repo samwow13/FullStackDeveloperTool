@@ -198,7 +198,7 @@ public partial class MainWindow
     private async Task ForceStopAllAsync()
     {
         if (!CanStopBatch) return;
-        var targets = Services.Where(service => service.CanForceStop).ToArray();
+        var targets = Services.Where(service => service.IncludeInBatch && service.CanForceStop).ToArray();
         var projectId = SelectedProject?.Id;
         if (projectId is not null)
             RecordAgentBridgeProjectEvent(projectId, "force_stop_all", "requested", revokeReservations: true);

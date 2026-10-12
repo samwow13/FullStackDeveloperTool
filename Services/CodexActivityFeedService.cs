@@ -27,6 +27,7 @@ public sealed partial class CodexActivityFeedService
     private readonly object _readLock = new();
     private readonly object _stateLock = new();
     private readonly Dictionary<string, TrackedAgent> _tracked = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, DismissedFamily> _dismissedFamilies = new(StringComparer.Ordinal);
     private Dictionary<string, AgentSnapshot> _familyAnchors = new(StringComparer.Ordinal);
     private CodexActivityFeedSnapshot _current = CodexActivityFeedSnapshot.Initial;
     private CodexDesktopPresence _desktopPresence;
@@ -74,7 +75,7 @@ public sealed partial class CodexActivityFeedService
             try
             {
                 resetBaseline = _resetStore.Load(token);
-                agents = _reader.ReadAllSnapshot(retained, includeGuardians: false);
+                agents = _reader.ReadAllSnapshot(retained, includeGuardians: false, token: token);
                 ReadProjectEvidence(projects, agents, token);
                 token.ThrowIfCancellationRequested();
                 desktopPresence = CodexDesktopPresenceReader.Read();
@@ -199,9 +200,9 @@ public sealed partial class CodexActivityFeedService
                     .Select(agent => ResolveFamilyRoot(agent).Id).Where(id => !listedFamilies.Contains(id))
                     .Distinct(StringComparer.Ordinal).ToArray();
                 _unlistedUnknownCount = _unlistedUnknownFamilies.Length;
-                foreach (var tracked in _tracked.Values.Where(item => string.IsNullOrWhiteSpace(item.Agent.LatestTurnId)))
+                foreach (var tracked in _tracked.Values.Where(item => !HasSavedChatIdentity(item.Agent)))
                     tracked.Summary = new(null, "", "Chat title · current turn's saved chat unavailable");
-                summaryIds = _tracked.Values.Where(item => !string.IsNullOrWhiteSpace(item.Agent.LatestTurnId))
+                summaryIds = _tracked.Values.Where(item => HasSavedChatIdentity(item.Agent))
                     .OrderBy(item => IsTerminal(item.Agent.State))
                     .ThenByDescending(item => item.ObservedAt).Select(item => item.Agent.Id).ToArray();
             }
@@ -215,7 +216,8 @@ public sealed partial class CodexActivityFeedService
             {
                 _desktopPresence = desktopPresence;
                 foreach (var (id, summary) in summaries)
-                    if (_tracked.TryGetValue(id, out var tracked) && tracked.Agent.LatestTurnId == summary.TurnId)
+                    if (_tracked.TryGetValue(id, out var tracked) && tracked.Agent.LatestTurnId == summary.TurnId &&
+                        tracked.Agent.ActivityIdentity == summary.ActivityIdentity)
                     {
                         tracked.Summary = summary;
                         tracked.MessageHistory = summary.MessageHistory;
@@ -226,6 +228,12 @@ public sealed partial class CodexActivityFeedService
             }
         }
     }
+
+    private static bool HasSavedChatIdentity(AgentSnapshot agent) =>
+        !string.IsNullOrWhiteSpace(agent.LatestTurnId) ||
+        agent.ActivityIdentity is { } identity && identity.StartsWith("start:", StringComparison.Ordinal) &&
+        long.TryParse(identity.AsSpan(6), System.Globalization.NumberStyles.None,
+            System.Globalization.CultureInfo.InvariantCulture, out var position) && position >= 0;
 
     private CodexActivityFeedSnapshot SuspendRead(CodexDesktopPresence desktopPresence)
     {
@@ -267,24 +275,45 @@ public sealed partial class CodexActivityFeedService
         }
     }
 
-    /// <summary>Removes one settled chat family from this dashboard's transient feed.</summary>
-    public CodexActivityFeedSnapshot DismissRecent(string agentId, string? activityIdentity)
+    /// <summary>Hides one chat family until proven new activity. Unsettled work requires explicit caller confirmation.</summary>
+    public CodexActivityFeedSnapshot DismissRecent(string agentId, string? activityIdentity, bool allowUnsettled = false)
     {
         lock (_stateLock)
         {
             var row = _current.Agents.FirstOrDefault(agent => agent.Id == agentId);
-            if (!_current.IsAvailable || row is not { CanDismiss: true } ||
-                row.ActivityIdentity != activityIdentity ||
+            if (row is null || row.ActivityIdentity != activityIdentity) return _current;
+            if (!allowUnsettled && (!_current.IsAvailable || !row.CanDismiss ||
                 !TryGetFamilyRoot(agentId, out var root) || ActivityIdentity(root) != activityIdentity ||
-                !FamilyMembers(agentId).All(item => !item.Missing && IsSettled(item)))
+                !FamilyMembers(agentId).All(item => !item.Missing && IsSettled(item))))
                 return _current;
 
-            // Remove hidden children too, so they cannot recreate the dismissed chat.
-            // A later observed active turn is tracked normally.
-            foreach (var id in FamilyMembers(agentId).Select(item => item.Agent.Id).ToArray())
-                _tracked.Remove(id);
+            // Keep tracking in the background. Hiding the root also hides children
+            // observed later in the same turn, without changing Codex work or history.
+            var members = CaptureDismissedMembers(agentId);
+            members[agentId] = new(row.ActivityIdentity, row.ActivityStartedAt);
+            _dismissedFamilies[agentId] = new(row.ActivityIdentity, row.ActivityStartedAt, DateTimeOffset.UtcNow, members);
             return _current = CreateSnapshot(_current.IsAvailable, _current.StatusText, _current.CheckedAt);
         }
+    }
+
+    private Dictionary<string, DismissedActivity> CaptureDismissedMembers(string rootId)
+    {
+        var members = new Dictionary<string, DismissedActivity>(StringComparer.Ordinal);
+        foreach (var member in FamilyMembers(rootId))
+        {
+            var current = member.Agent;
+            var visited = new HashSet<string>(StringComparer.Ordinal);
+            while (visited.Add(current.Id))
+            {
+                members[current.Id] = new(ActivityIdentity(current), current.ActivityStartedAt);
+                if (current.ParentId is not { Length: > 0 } parentId) break;
+                var parent = _tracked.TryGetValue(parentId, out var tracked) ? tracked.Agent :
+                    _familyAnchors.GetValueOrDefault(parentId);
+                if (parent is null) break;
+                current = parent;
+            }
+        }
+        return members;
     }
 
     /// <summary>
@@ -340,6 +369,7 @@ public sealed partial class CodexActivityFeedService
                 _resetBaseline = saved;
                 _suppressed = IndexReset(saved);
                 _tracked.Clear();
+                _dismissedFamilies.Clear();
                 _familyAnchors.Clear();
                 _previousAgentIds = [];
                 _unlistedUnknownCount = 0;
@@ -412,6 +442,17 @@ public sealed partial class CodexActivityFeedService
 
     private void PruneRecent()
     {
+        // Check restoration before pruning: a new terminal turn must not inherit
+        // an older dismissal or consume the visible recent-chat allowance.
+        var hiddenFamilies = _tracked.Values.GroupBy(item => ResolveFamilyRoot(item.Agent).Id, StringComparer.Ordinal)
+            .Where(family => TryGetFamilyRoot(family.Key, out var root) && IsTerminal(root.State) &&
+                family.All(item => !item.Missing && IsSettled(item)) &&
+                IsDismissed(family.Key, ActivityIdentity(root), root.ActivityStartedAt))
+            .Select(family => family.Key).ToHashSet(StringComparer.Ordinal);
+        foreach (var id in _tracked.Values.Where(item => hiddenFamilies.Contains(ResolveFamilyRoot(item.Agent).Id))
+                     .Select(item => item.Agent.Id).ToArray())
+            _tracked.Remove(id);
+
         var removeFamilies = _tracked.Values.GroupBy(item => ResolveFamilyRoot(item.Agent).Id, StringComparer.Ordinal)
             .Where(family => TryGetFamilyRoot(family.Key, out var root) && IsTerminal(root.State) &&
                 family.All(item => !item.Missing && IsSettled(item)))
@@ -482,7 +523,7 @@ public sealed partial class CodexActivityFeedService
                     ReasoningEffort = agent.ReasoningEffort,
                     MessageHistory = tracked.MessageHistory });
         }
-        var chats = GroupChatRows(rows);
+        var chats = GroupChatRows(rows).Where(chat => !IsDismissed(chat));
         return new(chats.OrderBy(row => row.NeedsInput ? 0 : row.IsRunning ? 1 : row.IsWaiting ? 2 : row.IsUnknown ? 3 : 4)
             .ThenByDescending(row => row.IsRecent ? row.CompletedAt ?? row.ObservedAt : row.ObservedAt)
             .ThenBy(row => row.Id, StringComparer.Ordinal).ToArray(), available, status, checkedAt)
@@ -490,6 +531,62 @@ public sealed partial class CodexActivityFeedService
                 ProjectUnknownCounts = _unlistedUnknownFamilies.Select(id => _projectOwners.GetValueOrDefault(id)?.Id)
                     .Where(id => id is not null).GroupBy(id => id!, StringComparer.Ordinal)
                     .ToDictionary(group => group.Key, group => group.Count(), StringComparer.Ordinal) };
+    }
+
+    private bool IsDismissed(CodexActivityAgent chat) =>
+        IsDismissed(chat.Id, chat.ActivityIdentity, chat.ActivityStartedAt);
+
+    private bool IsDismissed(string rootId, string? activityIdentity, DateTimeOffset? activityStartedAt)
+    {
+        if (!_dismissedFamilies.TryGetValue(rootId, out var dismissed))
+        {
+            // Missing parent metadata can later resolve an already dismissed
+            // member beneath a different root. Transfer only proven old work.
+            var previous = _dismissedFamilies.Where(pair =>
+                CanTransferDismissal(rootId, activityIdentity, activityStartedAt, pair.Value)).ToArray();
+            if (previous.Length == 0) return false;
+            var members = new Dictionary<string, DismissedActivity>(StringComparer.Ordinal);
+            foreach (var pair in previous)
+            {
+                foreach (var member in pair.Value.Members) members.TryAdd(member.Key, member.Value);
+                _dismissedFamilies.Remove(pair.Key);
+            }
+            members[rootId] = new(activityIdentity, activityStartedAt);
+            dismissed = new(activityIdentity, activityStartedAt, previous.Min(pair => pair.Value.DismissedAt), members);
+            _dismissedFamilies[rootId] = dismissed;
+        }
+        var before = dismissed.ActivityIdentity;
+        var after = activityIdentity;
+        var comparable = before is not null && after is not null && IdentityKind(before) == IdentityKind(after);
+        var newActivity = before is not null && after is not null && before != after &&
+            (comparable || dismissed.ActivityStartedAt is { } priorStart &&
+                activityStartedAt is { } currentStart && currentStart > priorStart);
+        // A previously missing root/identity can return. Only a start after the
+        // Wave proves new work when identities cannot be compared.
+        newActivity |= !comparable && activityStartedAt is { } started && started > dismissed.DismissedAt;
+        if (!newActivity) return true;
+        _dismissedFamilies.Remove(rootId);
+        return false;
+    }
+
+    private bool CanTransferDismissal(string rootId, string? activityIdentity,
+        DateTimeOffset? activityStartedAt, DismissedFamily dismissed)
+    {
+        if (activityStartedAt is { } started && started > dismissed.DismissedAt) return false;
+        var sameRoot = dismissed.Members.TryGetValue(rootId, out var root)
+            ? IsSameDismissedActivity(root, activityIdentity, activityStartedAt)
+            : activityStartedAt is not null;
+        if (!sameRoot) return false;
+        return dismissed.Members.Any(member => _tracked.TryGetValue(member.Key, out var tracked) &&
+            ResolveFamilyRoot(tracked.Agent).Id == rootId &&
+            IsSameDismissedActivity(member.Value, ActivityIdentity(tracked.Agent), tracked.Agent.ActivityStartedAt));
+    }
+
+    private static bool IsSameDismissedActivity(DismissedActivity previous, string? identity, DateTimeOffset? startedAt)
+    {
+        if (previous.ActivityIdentity is { } before && identity is { } after && IdentityKind(before) == IdentityKind(after))
+            return before == after && !(previous.ActivityStartedAt is { } priorStart && startedAt is { } currentStart && currentStart > priorStart);
+        return previous.ActivityStartedAt is { } started && startedAt == started;
     }
 
     private IReadOnlyList<CodexActivityAgent> GroupChatRows(IReadOnlyList<CodexActivityAgent> rows)
@@ -707,6 +804,10 @@ public sealed partial class CodexActivityFeedService
         try { return Path.GetFileName(Path.TrimEndingDirectorySeparator(path)); }
         catch (ArgumentException) { return "Local project"; }
     }
+
+    private sealed record DismissedActivity(string? ActivityIdentity, DateTimeOffset? ActivityStartedAt);
+    private sealed record DismissedFamily(string? ActivityIdentity, DateTimeOffset? ActivityStartedAt,
+        DateTimeOffset DismissedAt, IReadOnlyDictionary<string, DismissedActivity> Members);
 
     private sealed class TrackedAgent(AgentSnapshot agent, DateTimeOffset observedAt)
     {

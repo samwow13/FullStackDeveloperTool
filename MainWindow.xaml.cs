@@ -59,17 +59,19 @@ public partial class MainWindow : Window, INotifyPropertyChanged
             return databases == 0 ? webApps : $"{webApps} · {connectedDatabases} / {databases} databases connected";
         }
     }
-    public bool CanBatch => !IsEditing && !_addingProjectService && !_savingProjectEdits && !_checkingStartupServices && !_closeRequested && !_batchBusy && !_forceStopBatchBusy && !_closing && Services.Count > 0 && Services.All(x => !x.IsBusy && !x.IsStopping);
+    public bool CanBatch => CanChangeBatchSelection && Services.Any(service => service.IncludeInBatch) && Services.Where(service => service.IncludeInBatch).All(service => !service.IsBusy && !service.IsStopping);
     public bool AllServicesRunning => Services.Count > 0 && Services.All(service => service.ShowRunningDot);
     public bool AllTrackedServicesReady => AllServicesRunning &&
         Services.All(service => service.DatabaseServiceCount == service.ConnectedDatabaseServiceCount);
-    public bool CanStartBatch => CanBatch && !_closeRequested && Services.Any(service => service.CanStart);
-    public string StartAllDescription => AllServicesRunning
-        ? "All apps are already running. No start is needed."
-        : CanStartBatch ? "Start only services that are stopped. Running services stay running."
-        : Services.Count == 0 ? "No services are configured for this project."
+    public bool CanStartBatch => CanBatch && Services.Any(service => service.IncludeInBatch && service.CanStart);
+    public bool CanRestartBatch => CanBatch && Services.Any(service => service.IncludeInBatch && service.CanRestart);
+    public string StartAllDescription => Services.Count == 0 ? "No services are configured for this project."
+        : !Services.Any(service => service.IncludeInBatch) ? "Check a service to include it in batch actions."
+        : Services.Where(service => service.IncludeInBatch).All(service => service.ShowRunningDot)
+        ? "All checked services are already running. No start is needed."
+        : CanStartBatch ? "Start checked services that are stopped. Running services stay running."
         : "Start is unavailable while services are checking, starting, busy, blocked, or being edited. Review each service's status.";
-    public bool CanStopBatch => !_addingProjectService && !_checkingStartupServices && !_closeRequested && !_closing && !_forceStopBatchBusy && Services.Any(x => x.CanForceStop);
+    public bool CanStopBatch => !_addingProjectService && !_checkingStartupServices && !_closeRequested && !_closing && !_forceStopBatchBusy && Services.Any(service => service.IncludeInBatch && service.CanForceStop);
     public bool CanEdit => SelectedProject is not null && !_addingProjectService && (!_closeRequested || (_resolvingCloseDrafts && IsEditing)) && !_savingProjectEdits && !_batchBusy && !_forceStopBatchBusy && !_closing && Services.All(x => !x.IsBusy && !x.IsStopping);
     public string Notice { get => _notice; private set { _notice = value; Changed(nameof(Notice)); } }
     public string LastChecked { get => _lastChecked; private set { _lastChecked = value; Changed(nameof(LastChecked)); } }
@@ -120,6 +122,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         InitializeLongRunningTaskMode();
         InitializeNextCommitReminder();
         InitializeDashboardGitComparison();
+        InitializeProjectGitService();
         InitializeCodexAccountUsage();
         _timer.Tick += async (_, _) => await Task.WhenAll(RefreshAsync(), RefreshProjectBranchesAsync(), RefreshNextCommitAsync());
         Activated += async (_, _) => await Task.WhenAll(RefreshProjectBranchesAsync(), RefreshNextCommitAsync());
@@ -317,6 +320,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         Changed(nameof(CanChangeProject)); Changed(nameof(CanEditDetails)); Changed(nameof(CanSaveProjectEdits));
         Changed(nameof(CanRemoveProject)); Changed(nameof(CanCancelProjectEdits));
         Changed(nameof(CanAddService)); Changed(nameof(CanStartAgent));
+        Changed(nameof(CanChangeBatchSelection));
         Changed(nameof(ProductionNotice)); Changed(nameof(HasProductionNotice));
         NotifyStartAllChanged();
         UpdateArchiveActions();
@@ -327,6 +331,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         Changed(nameof(AllServicesRunning));
         Changed(nameof(AllTrackedServicesReady));
         Changed(nameof(CanStartBatch));
+        Changed(nameof(CanRestartBatch));
         Changed(nameof(StartAllDescription));
     }
 
@@ -410,7 +415,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     {
         if (!CanBatch) return;
         _batchBusy = true;
-        var targets = Services.Where(filter).ToArray();
+        var targets = Services.Where(service => service.IncludeInBatch && filter(service)).ToArray();
         UpdateActions();
         try { await Task.WhenAll(targets.Select(service => RunActionAsync(service, action, verb))); }
         finally { _batchBusy = false; UpdateActions(); }
@@ -434,7 +439,11 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         if (!CanStartBatch) return;
         await RunBatchAsync(r => r.StartAsync(), "Starting", s => s.CanStart);
     }
-    private async void RestartAll_Click(object sender, RoutedEventArgs e) => await RunBatchAsync(r => r.RestartAsync(), "Restarting", s => s.CanRestart);
+    private async void RestartAll_Click(object sender, RoutedEventArgs e)
+    {
+        if (!CanRestartBatch) return;
+        await RunBatchAsync(r => r.RestartAsync(), "Restarting", s => s.CanRestart);
+    }
     private async void StopAll_Click(object sender, RoutedEventArgs e) => await ForceStopAllAsync();
     private void ProjectTasks_Click(object sender, RoutedEventArgs e)
     {

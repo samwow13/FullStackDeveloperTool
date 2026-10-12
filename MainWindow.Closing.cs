@@ -1,7 +1,5 @@
 using System.ComponentModel;
-using System.Runtime.InteropServices;
 using System.Windows;
-using System.Windows.Interop;
 using System.Windows.Threading;
 using FullStackLauncher.Models;
 using FullStackLauncher.Services;
@@ -26,30 +24,17 @@ public partial class MainWindow
         if (_closed) return true;
         if (_closeRequested || _closing) return false;
         cancellationToken.ThrowIfCancellationRequested();
-        if (automaticReplacement && (CodexCrewPanel.HasReplyDrafts || HasStartAgentDrafts))
-        {
-            Notice = "Finish or clear unsent Codex messages, then open the new launcher again. Apps remain running.";
-            return false;
-        }
-        if (automaticReplacement && (!IsEnabled || _checkingStartupServices || _savingProjectEdits ||
-            _addingProjectService || _batchBusy || _forceStopBatchBusy ||
-            HasOpenReplacementDialog() ||
-            _runners.Values.SelectMany(project => project).Any(service => service.IsBusy || service.IsStopping)))
-        {
-            Notice = "Finish the open dialog or service operation, then open the new launcher again. Apps remain running.";
-            return false;
-        }
-        if (_resettingCodex)
+        if (!automaticReplacement && _resettingCodex)
         {
             Notice = "Codex reset is in progress. Close the launcher again when it finishes.";
             return false;
         }
-        if (_restartingMonitor)
+        if (!automaticReplacement && _restartingMonitor)
         {
             Notice = "The Codex watcher is restarting. Close the launcher again when it finishes.";
             return false;
         }
-        if (_savingProjectEdits || _addingProjectService) return false;
+        if (!automaticReplacement && (_savingProjectEdits || _addingProjectService)) return false;
 
         // Modal windows run a nested dispatcher loop. Pause passive work before any
         // confirmation, so polling and build output cannot compete with its first paint.
@@ -63,10 +48,20 @@ public partial class MainWindow
         _consoleTimer.Stop();
         ServiceRunner[] runners = [];
         var closeFailed = false;
+        var interactionSuspended = false;
         UpdateActions();
         try
         {
             await Dispatcher.Yield(DispatcherPriority.Background);
+            if (automaticReplacement)
+            {
+                if (!await PrepareDashboardReplacementAsync(cancellationToken)) return false;
+                // Do not let a new editor open while draft saves or service checks
+                // yield. Its Closing guard would otherwise be skipped by owner exit.
+                interactionSuspended = true;
+                IsEnabled = false;
+                if (_projectTasksWindow != null) _projectTasksWindow.IsEnabled = false;
+            }
             _resolvingCloseDrafts = true;
             UpdateActions();
             try { if (!await ResolveProjectEditsForCloseAsync()) return false; }
@@ -114,6 +109,10 @@ public partial class MainWindow
                 ? "Force stopping running apps…" : "Leaving apps running and closing launcher…";
             // Paint the progress message before beginning native process cleanup.
             await Dispatcher.Yield(DispatcherPriority.Background);
+            // Prevent a late queue request from starting work during close cleanup.
+            _queueDashboardPermit?.SetEnabled(false);
+            Notice = "Stopping queued tasks and clearing queues…";
+            await ProjectTasks.QueueOwnerClient.ShutdownForDashboardAsync(cancellationToken);
             await StopGitConnectionWarmupAsync();
             await StopDashboardGitComparisonAsync();
             if (closeWatcher)
@@ -178,6 +177,11 @@ public partial class MainWindow
         {
             if (!_closed)
             {
+                if (interactionSuspended)
+                {
+                    IsEnabled = true;
+                    if (_projectTasksWindow != null) _projectTasksWindow.IsEnabled = true;
+                }
                 // A failed preparation must not leave background helpers waiting
                 // for an exit the user canceled, or change normal stop ownership.
                 try { await Task.WhenAll(runners.Select(runner => runner.CancelKeepRunningPreparationAsync())); }
@@ -189,26 +193,16 @@ public partial class MainWindow
                 if (resumeStatus) _timer.Start();
                 if (resumeConsole) _consoleTimer.Start();
                 if (resumeGitComparison) _dashboardGitTimer.Start();
+                _projectGitService.StartBackgroundRefresh();
+                if (LongRunningTaskEnabled)
+                {
+                    try { _queueDashboardPermit?.SetEnabled(true); }
+                    catch (InvalidOperationException ex) { closeFailed = true; Notice = ex.Message; }
+                }
                 if (!closeFailed) Notice = "Exit canceled. Apps keep running.";
                 UpdateActions();
             }
         }
     }
 
-    private bool HasOpenReplacementDialog()
-    {
-        var windows = Application.Current.Windows.Cast<Window>().Where(window => window.IsVisible).ToArray();
-        // Note editors can belong to the notes host rather than this window.
-        // Include all visible windows, plus native modal dialogs that disable an owner.
-        return windows.Any(window => window != this && window != _projectTasksWindow &&
-                window is not ServiceConsoleWindow) || windows.Any(window =>
-            {
-                var handle = new WindowInteropHelper(window).Handle;
-                return handle != IntPtr.Zero && !IsReplacementWindowEnabled(handle);
-            });
-    }
-
-    [DllImport("user32.dll", EntryPoint = "IsWindowEnabled")]
-    [return: MarshalAs(UnmanagedType.Bool)]
-    private static extern bool IsReplacementWindowEnabled(IntPtr window);
 }

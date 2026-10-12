@@ -25,6 +25,8 @@ public sealed record AgentSnapshot(
     public DateTimeOffset? ActivityStartedAt { get; init; }
     public string? Model { get; init; }
     public string? ReasoningEffort { get; init; }
+    // Verified local metadata path; content readers still enforce history-folder boundaries.
+    internal string? RolloutPath { get; init; }
 }
 
 public sealed record ReminderUpdate(

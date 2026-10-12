@@ -17,6 +17,7 @@ public sealed record AzureDevOpsImportRepository
 
 public sealed record AzureDevOpsWorkspaceRepository
 {
+    public bool UseAzureDevOpsToken { get; init; }
     public AzureDevOpsImportRepository Repository { get; init; } = new();
     public string ProjectUrl { get; init; } = "";
     public string ProjectName { get; init; } = "";

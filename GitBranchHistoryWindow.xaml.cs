@@ -5,8 +5,11 @@ using FullStackLauncher.Services;
 
 namespace FullStackLauncher;
 
-public partial class GitBranchHistoryWindow : Window, INotifyPropertyChanged
+public partial class GitBranchHistoryWindow : Window, INotifyPropertyChanged, IDashboardReplacementWindow
 {
+    public bool IsDashboardReplacementReady => true;
+    public bool IsDashboardReplacementClosePending => _closing && _loading;
+
     private readonly GitBranchComparison _comparison;
     private GitBranchHistoryPage? _page;
     private CancellationTokenSource? _loadCancellation;

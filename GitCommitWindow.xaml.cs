@@ -13,25 +13,29 @@ public enum GitCommitMode
     FinishSync
 }
 
-public partial class GitCommitWindow : Window
+public partial class GitCommitWindow : Window, IDashboardReplacementWindow
 {
     private readonly GitRepositorySnapshot _snapshot;
     private readonly GitRemoteInfo _remote;
-    private readonly string? _lastCreatedBranch;
     private readonly GitCommitMode _mode;
     private readonly bool _freezeDestination;
     private readonly string _fixedDestination;
     private readonly string _sourceLabel;
     private readonly AgentGitSummaryBatch? _agentSummaries;
-    private AgentGitSummaryBatch? _reviewedAgentSummaries;
+    private readonly AgentGitSummaryBatch? _reviewedAgentSummaries;
     private readonly bool _canIncludeAgentSummaries;
     private readonly string? _previewConnectionId;
     private bool _ready;
     private bool _settingMessage;
     private bool _messageEdited;
-    private bool _includeAgentSummaries;
-    private bool _inclusionWasChosen;
+    private readonly bool _includeAgentSummaries;
+    private readonly bool _inclusionWasChosen;
     private string? _messagePreparationError;
+    private readonly CancellationTokenSource _trackingCancellation = new();
+    private GitCommitTracking? _tracking;
+    private string? _trackingError;
+    private bool _trackingLoading;
+    private bool _closeAfterTracking;
 
     public GitCommitWindow(GitRepositorySnapshot snapshot, GitRemoteInfo remote, string? lastCreatedBranch,
         string? branchDraft = null, string? messageDraft = null,
@@ -40,7 +44,6 @@ public partial class GitCommitWindow : Window
     {
         _snapshot = snapshot;
         _remote = remote;
-        _lastCreatedBranch = string.IsNullOrWhiteSpace(lastCreatedBranch) ? null : lastCreatedBranch;
         _mode = mode;
         _freezeDestination = freezeDestination;
         _fixedDestination = branchDraft?.Trim() ?? snapshot.Branch;
@@ -68,51 +71,45 @@ public partial class GitCommitWindow : Window
         MinHeight = Math.Min(MinHeight, SystemParameters.WorkArea.Height);
         MinWidth = Math.Min(MinWidth, SystemParameters.WorkArea.Width);
 
-        CurrentBranch.Text = snapshot.IsDetached ? "Detached HEAD" : snapshot.Branch;
-        LastCreatedBranch.Text = _lastCreatedBranch ?? "Creation history unavailable";
-        UseLastCreated.Visibility = _lastCreatedBranch == null || freezeDestination ? Visibility.Collapsed : Visibility.Visible;
-        Repository.Text = snapshot.RepositoryRoot ?? snapshot.Folder;
         TargetBranchBox.Text = mode == GitCommitMode.PrepareSync ? snapshot.Branch : branchDraft ?? snapshot.Branch;
         _messageEdited = mode != GitCommitMode.PrepareSync && messageDraft != null;
         SetMessage(mode == GitCommitMode.PrepareSync ? CreateMessage() : messageDraft ?? CreateMessage());
         if (!string.IsNullOrWhiteSpace(recoveryNote))
         {
-            RecoveryNotice.Visibility = Visibility.Visible;
+            RecoveryText.Visibility = Visibility.Visible;
             RecoveryText.Text = SensitiveDataProtection.Redact(recoveryNote);
         }
         ConfigureMode();
         if (freezeDestination && mode != GitCommitMode.PrepareSync)
         {
             DestinationEditor.Visibility = Visibility.Collapsed;
-            DestinationReview.Visibility = Visibility.Visible;
-            TargetBranchReview.Text = _fixedDestination;
-        }
-        if (_agentSummaries != null && mode != GitCommitMode.PrepareSync)
-        {
-            AgentSummaryNotice.Visibility = Visibility.Visible;
-            var unviewed = _agentSummaries.Entries.Count(entry => entry.ViewedAt == null);
-            AgentSummaryInfo.Text = $"{_agentSummaries.Entries.Count:N0} pending agent update(s) · {unviewed:N0} unviewed · {_agentSummaries.Entries.Count - unviewed:N0} viewed\n{snapshot.Branch} · {remote.Name}";
-            AgentSummaryText.Text = _agentSummaries.ComposeMessage("Agent changes");
-            IncludeAgentSummaries.IsEnabled = _canIncludeAgentSummaries;
-            IncludeAgentSummaries.IsChecked = _canIncludeAgentSummaries && _includeAgentSummaries;
-            UseAgentSummaries.IsEnabled = _canIncludeAgentSummaries;
-            UpdateAgentSummaryHint();
-            MessagePreview.IsExpanded = _canIncludeAgentSummaries;
         }
         _ready = true;
         UpdatePreview();
-        Loaded += (_, _) =>
+        Loaded += async (_, _) =>
         {
             if (_mode == GitCommitMode.PrepareSync || _freezeDestination)
             {
-                Submit.Focus();
-                return;
+                MessageBox.Focus();
+                MessageBox.CaretIndex = 0;
             }
-            TargetBranchBox.Focus();
-            TargetBranchBox.SelectAll();
+            else
+            {
+                TargetBranchBox.Focus();
+                TargetBranchBox.SelectAll();
+            }
+            if (_mode != GitCommitMode.PrepareSync) await VerifyTrackingAsync();
+        };
+        Closing += (_, e) =>
+        {
+            if (!_trackingLoading) return;
+            _closeAfterTracking = true;
+            _trackingCancellation.Cancel();
+            e.Cancel = true;
         };
         Closed += (_, _) =>
         {
+            _trackingCancellation.Dispose();
             if (_mode != GitCommitMode.PrepareSync && _snapshot.RepositoryRoot is { } previewRoot && _previewConnectionId is { } previewConnection)
                 GitCommitPreviewState.EndReview(previewRoot, _snapshot.Branch, previewConnection);
         };
@@ -122,45 +119,35 @@ public partial class GitCommitWindow : Window
         : _freezeDestination ? _fixedDestination : TargetBranchBox.Text.Trim();
     public string Message => MessageBox.Text;
     public bool MessageWasEdited => _messageEdited;
-    public AgentGitSummaryBatch? ReviewedAgentSummaries => _canIncludeAgentSummaries && IncludeAgentSummaries.IsChecked == true
+    bool IDashboardReplacementWindow.IsDashboardReplacementReady => !_trackingLoading;
+    bool IDashboardReplacementWindow.IsDashboardReplacementClosePending => _closeAfterTracking && _trackingLoading;
+    public GitCommandExitUnconfirmedException? UnconfirmedCommand { get; private set; }
+    public AgentGitSummaryBatch? ReviewedAgentSummaries => _canIncludeAgentSummaries && _includeAgentSummaries
         && _reviewedAgentSummaries is { Entries.Count: > 0 } ? _reviewedAgentSummaries : null;
 
     private void ConfigureMode()
     {
         var changedFiles = _snapshot.Changes.Count;
-        const string exclusions = " Ignored untracked files remain excluded. Changes inside submodules must be committed separately; this action can record only the submodule reference.";
         switch (_mode)
         {
             case GitCommitMode.PrepareSync:
                 Title = "Merge locally";
-                Headline.Text = "Merge into your current branch";
-                Introduction.Text = $"Recheck and merge the compared {_sourceLabel} into {_snapshot.Branch}. This action stays local and does not push.";
                 Submit.Content = "_Merge locally";
-                CreationHistory.Visibility = Visibility.Collapsed;
                 DestinationEditor.Visibility = Visibility.Collapsed;
-                BranchPreview.Visibility = Visibility.Collapsed;
-                Destination.Visibility = Visibility.Collapsed;
-                Scope.Text = changedFiles > 0
-                    ? $"Rechecks and fetches the exact source from the comparison first. If the branch or source changed, or fetching fails, stops before a checkpoint or merge. If incoming commits remain, stages all {changedFiles:N0} changed files, including additions, modifications, and deletions, and makes a protective LOCAL checkpoint on the current branch before merging. The merge commit waits for your review. Use Commit all & push separately when you want to name a destination branch and publish your work." + exclusions
-                    : "Rechecks and fetches the exact source from the comparison first. If the branch or source changed, or fetching fails, stops before a merge. If incoming commits remain, merges that source into the current branch. Your working tree is clean, so no protective checkpoint is needed. The merge commit waits for your review. Use Commit all & push separately when you want to name a destination branch and publish your work." + exclusions;
+                ActionDetails.Visibility = Visibility.Visible;
+                ActionDetails.Text = changedFiles > 0
+                    ? $"Fetch and verify {_sourceLabel}, then save all {changedFiles:N0} changed files in a local checkpoint before merging. Ignored files and submodule contents remain excluded. Review the merge before committing. Nothing is pushed."
+                    : $"Fetch and verify {_sourceLabel}, then merge locally. No checkpoint is needed. Review the merge before committing. Nothing is pushed.";
                 MessageBox.IsReadOnly = true;
-                MessagePreview.Header = "Review prepared checkpoint _message";
-                MessageHint.Text = "The protective checkpoint uses this prepared message automatically. A clean working tree needs no checkpoint.";
+                MessageLabel.Content = "Local checkpoint _message";
                 break;
             case GitCommitMode.FinishSync:
                 Title = "Commit all & push";
-                Headline.Text = "Commit all & push";
-                Introduction.Text = "No conflicts found. Any pending merge is still local. Review the destination, then commit all and push.";
                 Submit.Content = "Commit all & _push";
-                Scope.Text = "Commits the reviewed merge when a merge is pending, then pushes the destination branch. Confirmed local commits are reused; the prepared message is used only if a commit is still needed. If you choose a new destination while a merge is pending, the reviewed merge is committed locally first; a new branch is then created from that result and pushed. Existing local history is preserved." + exclusions;
-                MessageHint.Text = "This message is used only if a commit is still needed. Confirmed local commits keep their existing messages. Once you edit this message, changing the destination keeps your edits.";
                 break;
             default:
                 Title = "Commit all & push";
-                Headline.Text = "Commit all & push";
-                Introduction.Text = "Review the destination. Your commit message is already prepared.";
                 Submit.Content = "Commit all & _push";
-                Scope.Text = $"Stages all {changedFiles:N0} changed files, including additions, modifications, and deletions, then commits and pushes the destination branch. If there is nothing to commit, it pushes the existing commits." + exclusions;
                 break;
         }
     }
@@ -175,57 +162,38 @@ public partial class GitCommitWindow : Window
     private string CreateMessage() => GitCommitMessage.Compose(CreateTitle(),
         _canIncludeAgentSummaries && _includeAgentSummaries ? _reviewedAgentSummaries : null);
 
-    private void UseAgentSummaries_Click(object sender, RoutedEventArgs e)
-    {
-        if (!_canIncludeAgentSummaries) return;
-        _reviewedAgentSummaries = _agentSummaries;
-        _includeAgentSummaries = true;
-        _inclusionWasChosen = true;
-        IncludeAgentSummaries.IsChecked = true;
-        try { SetMessage(CreateMessage()); }
-        catch (InvalidOperationException exception)
-        {
-            _messagePreparationError = exception.Message;
-            UpdatePreview();
-            return;
-        }
-        _messagePreparationError = null;
-        _messageEdited = false;
-        UpdateAgentSummaryHint();
-        MessagePreview.IsExpanded = true;
-        UpdatePreview();
-    }
-
-    private void IncludeAgentSummaries_Changed(object sender, RoutedEventArgs e)
-    {
-        if (!_ready) return;
-        _includeAgentSummaries = IncludeAgentSummaries.IsChecked == true;
-        _inclusionWasChosen = true;
-        _reviewedAgentSummaries = _includeAgentSummaries ? _agentSummaries : null;
-        if (!_messageEdited) SetMessage(CreateMessage());
-        UpdateAgentSummaryHint();
-        UpdatePreview();
-    }
-
-    private void UpdateAgentSummaryHint()
-    {
-        if (!_canIncludeAgentSummaries)
-        {
-            AgentSummaryHint.Text = "No new local commit is currently needed. These summaries stay pending when pushing existing commits.";
-            return;
-        }
-        var reviewed = ReviewedAgentSummaries?.Entries.Count ?? 0;
-        var later = (_agentSummaries?.Entries.Count ?? 0) - reviewed;
-        AgentSummaryHint.Text = _messageEdited && later > 0
-            ? $"This edited message includes {reviewed:N0} reviewed update(s). {later:N0} other update(s) stay pending. Use the agent summary message to rebuild and review all displayed updates."
-            : "Review these changes before including them. Only the reviewed summaries are cleared after a new local commit; later updates stay pending.";
-    }
-
     private void SetMessage(string message)
     {
         _settingMessage = true;
         try { MessageBox.Text = message; }
         finally { _settingMessage = false; }
+    }
+
+    private async Task VerifyTrackingAsync()
+    {
+        _trackingLoading = true;
+        try
+        {
+            _tracking = await GitRepositoryService.ReadCommitTrackingAsync(
+                _snapshot.RepositoryRoot ?? _snapshot.Folder, _snapshot.Branch, _trackingCancellation.Token);
+        }
+        catch (GitCommandExitUnconfirmedException exception)
+        {
+            UnconfirmedCommand = exception;
+            _trackingError = SensitiveDataProtection.Redact(exception.Message);
+        }
+        catch (OperationCanceledException) when (_closeAfterTracking) { }
+        catch (Exception exception)
+        {
+            _trackingError = "Local branch tracking could not be verified. Close this review and refresh Git status.\n"
+                + SensitiveDataProtection.Redact(exception.Message);
+        }
+        finally
+        {
+            _trackingLoading = false;
+            UpdatePreview();
+            if (_closeAfterTracking) Close();
+        }
     }
 
     private void TargetBranch_Changed(object sender, TextChangedEventArgs e)
@@ -245,30 +213,33 @@ public partial class GitCommitWindow : Window
         if (!_ready || _settingMessage) return;
         _messageEdited = true;
         _messagePreparationError = null;
-        UpdateAgentSummaryHint();
         UpdatePreview();
-    }
-
-    private void UseLastCreated_Click(object sender, RoutedEventArgs e)
-    {
-        if (_lastCreatedBranch == null) return;
-        TargetBranchBox.Text = _lastCreatedBranch;
-        TargetBranchBox.Focus();
-        TargetBranchBox.SelectAll();
     }
 
     private void UpdatePreview()
     {
         var branch = TargetBranch;
-        var error = ValidateDestination(branch);
+        var error = ValidateDestination(branch) ?? _trackingError;
         Validation.Text = error ?? "";
         Validation.Visibility = error == null ? Visibility.Collapsed : Visibility.Visible;
         var current = string.Equals(branch, _snapshot.Branch, StringComparison.Ordinal);
-        BranchPreview.Text = error != null ? ""
-            : current ? $"Keep working on the current branch: {branch}."
-            : $"Create {branch} from the current branch. The new branch carries all current commits and local files; existing local history is preserved.";
-        var pushUrl = string.IsNullOrWhiteSpace(_remote.PushUrl) ? _remote.FetchUrl : _remote.PushUrl;
-        Destination.Text = SensitiveDataProtection.Redact($"Push destination: {_remote.Name}/{branch}\n{pushUrl}");
+        var destination = $"{_remote.Name}/{branch}";
+        var upstream = current && _tracking?.UpstreamRemote is { } upstreamRemote && _tracking.UpstreamBranch is { } upstreamBranch
+            ? upstreamRemote == "." ? upstreamBranch : $"{upstreamRemote}/{upstreamBranch}" : null;
+        var tracksDestination = current && _tracking?.UpstreamRemote == _remote.Name && _tracking?.UpstreamBranch == branch;
+        BranchRoute.Text = _mode == GitCommitMode.PrepareSync ? $"{_snapshot.Branch} (local merge)"
+            : $"{branch}{(current ? "" : " (new)")} --> " + (_tracking == null
+                ? $"{destination} ({(_trackingError == null ? "checking tracking" : "tracking unknown")})"
+                : tracksDestination
+                ? $"tracked {destination}"
+                : string.IsNullOrWhiteSpace(upstream) ? $"untracked (push to {destination})"
+                : $"{destination} (currently tracks {upstream})");
+        BranchRoute.Text = SensitiveDataProtection.Redact(BranchRoute.Text);
+        // A pending merge is finalized on its prepared branch before creating a new destination.
+        ActionDetails.Visibility = _mode == GitCommitMode.PrepareSync || (_mode == GitCommitMode.FinishSync && !current)
+            ? Visibility.Visible : Visibility.Collapsed;
+        if (_mode == GitCommitMode.FinishSync && !current)
+            ActionDetails.Text = "Commit the pending merge locally first, then create the new branch from that result and push.";
         var needsMessage = _mode != GitCommitMode.PrepareSync || _snapshot.Changes.Count > 0;
         var overLimit = Message.Length > GitCommitMessage.MaximumLength;
         MessageLength.Text = $"{Message.Length:N0} / {GitCommitMessage.MaximumLength:N0} characters"
@@ -280,8 +251,10 @@ public partial class GitCommitWindow : Window
             : Message.Contains('\0') ? "Remove the null character from the commit message."
             : "Enter a commit message or keep the prepared message.");
         MessageValidation.Visibility = messageValid ? Visibility.Collapsed : Visibility.Visible;
-        if (!messageValid) MessagePreview.IsExpanded = true;
-        Submit.IsEnabled = error == null && messageValid;
+        ReviewDetails.Visibility = RecoveryText.Visibility == Visibility.Visible || ActionDetails.Visibility == Visibility.Visible
+            || Validation.Visibility == Visibility.Visible || MessageValidation.Visibility == Visibility.Visible
+            ? Visibility.Visible : Visibility.Collapsed;
+        Submit.IsEnabled = error == null && messageValid && (_mode == GitCommitMode.PrepareSync || _tracking != null);
         if (_ready && _mode != GitCommitMode.PrepareSync && _snapshot.RepositoryRoot is { } root && _previewConnectionId is { } connectionId)
             GitCommitPreviewState.Publish(root, _snapshot.Branch, connectionId, Message, CreateTitle(), _messageEdited,
                 _messageEdited ? ReviewedAgentSummaries != null : _includeAgentSummaries,

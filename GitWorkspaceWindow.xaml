@@ -67,7 +67,7 @@
             <TextBlock Text="{Binding ProjectTitle}" FontSize="25" FontWeight="SemiBold" TextTrimming="CharacterEllipsis" ToolTip="{Binding ProjectTitle}" VerticalAlignment="Center" Margin="0,0,12,0"/>
             <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center" Visibility="{Binding GitHeaderActionsVisibility}">
                 <Button Content="_Config" Click="Config_Click" IsEnabled="{Binding IsIdle}" Margin="0,0,8,0" ToolTip="Choose the project folder and active remote, reconnect, or add GitHub and Azure DevOps connections."/>
-                <Button Content="Refresh local status" Click="Refresh_Click" IsEnabled="{Binding IsIdle}" ToolTip="Refresh local status. Fetch to update the remote comparison."/>
+                <Button Content="Force refresh" Click="Refresh_Click" IsEnabled="{Binding IsIdle}" ToolTip="Refresh this repository's shared local Git status now. Fetch updates its remote branches."/>
             </StackPanel>
         </Grid>
         <Border Grid.Row="1" Style="{StaticResource Card}" Padding="13" Margin="0,0,0,12" Visibility="{Binding BranchHeaderVisibility}">
@@ -167,7 +167,6 @@
                                         <Button Content="Merge Locally" Click="SyncRelease_Click" IsEnabled="{Binding CanPrepareSync}" Padding="20,11" FontSize="15" Margin="0,0,10,8" ToolTipService.ShowOnDisabled="True" AutomationProperties.Name="Merge Locally">
                                             <Button.ToolTip><StackPanel MaxWidth="420"><TextBlock Text="{Binding MergeTargetLabel}" TextWrapping="Wrap" FontWeight="SemiBold"/><TextBlock Text="{Binding PowerAvailabilityText}" TextWrapping="Wrap" Margin="0,5,0,0"/></StackPanel></Button.ToolTip>
                                         </Button>
-                                        <Button Content="Git-only conflict test" Click="CheckReleaseMerge_Click" IsEnabled="{Binding CanCheckReleaseMerge}" Padding="14,11" FontSize="15" Margin="0,0,0,8" ToolTip="Confirm the remote source branch, then immediately compare your current committed branch with its latest remote commit. Show incoming commits, conflicts and details here. Runs without waiting for agents. Does not merge, stage, commit, push or change local files. Uncommitted edits are excluded." ToolTipService.ShowOnDisabled="True" AutomationProperties.Name="Test release merge conflicts with Git only"/>
                                     </WrapPanel>
                                 </WrapPanel>
                                 <WrapPanel Margin="0,12,0,0">
@@ -373,6 +372,7 @@
                 <Expander Header="Error details" Visibility="{Binding GitErrorVisibility}" IsExpanded="False" Margin="0,5,0,0">
                     <TextBox Text="{Binding LatestErrorDetails, Mode=OneWay}" Style="{StaticResource CodeReadout}" TextWrapping="Wrap" MaxHeight="140" Margin="0,6,0,0" AutomationProperties.Name="Latest Git operation error details"/>
                 </Expander>
+                <Button Content="Trust this folder…" Click="TrustFolder_Click" IsEnabled="{Binding CanTrustFolder}" Visibility="{Binding CachedTrustFailureVisibility}" ToolTip="{Binding TrustFailureMessage}" HorizontalAlignment="Left" Margin="0,6,0,0"/>
             </StackPanel>
             <Button Grid.Column="1" Content="Cancel operation" Click="Cancel_Click" IsEnabled="{Binding IsBusy}" Visibility="{Binding IsBusy, Converter={StaticResource BoolToVisibility}}" Margin="0,0,8,0"/>
             <Button Grid.Column="2" Content="Close" Click="Close_Click" IsEnabled="{Binding IsIdle}"/>

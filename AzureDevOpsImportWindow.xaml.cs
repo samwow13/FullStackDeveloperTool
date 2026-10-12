@@ -6,16 +6,21 @@ using System.Windows.Controls;
 using System.Windows.Input;
 using FullStackLauncher.Models;
 using FullStackLauncher.Services;
-using Microsoft.Win32;
 
 namespace FullStackLauncher;
 
-public partial class AzureDevOpsImportWindow : Window
+public partial class AzureDevOpsImportWindow : Window, IDashboardReplacementWindow
 {
+    public bool IsDashboardReplacementReady => !_cloning && !_checkingExit && _unconfirmedCommands.Count == 0;
+    public bool IsDashboardReplacementClosePending => _closeRequested && !_closed &&
+        (_cloning || _checkingExit || _lookups.Count > 0) && _unconfirmedCommands.Count == 0;
+
     private const string DefaultFeatureBranch = "feature/DefaultNameReplaceMe";
     private enum ImportPage { Connection, Workspace, Repository, Branches, Review }
     private readonly string _settingsDirectory;
     private readonly IReadOnlyList<ProjectProfile> _savedProjects;
+    private readonly bool _useTokenAuthentication;
+    private readonly string? _existingWorkspaceFolder;
     private readonly ObservableCollection<AzureDevOpsWorkspaceRepository> _selectedRepositories = [];
     private readonly HashSet<CancellationTokenSource> _lookups = [];
     private readonly HashSet<GitCommandExitUnconfirmedException> _unconfirmedCommands = [];
@@ -32,6 +37,7 @@ public partial class AzureDevOpsImportWindow : Window
     private bool _configured;
     private bool _loadingPreferences = true;
     private bool _updatingSelections;
+    private bool _workspaceNameEdited;
     private bool _cloning;
     private bool _checkingExit;
     private bool _closeRequested;
@@ -43,29 +49,39 @@ public partial class AzureDevOpsImportWindow : Window
     public string? ImportedWorkspaceName { get; private set; }
     public IReadOnlyList<string> ImportedRepositories { get; private set; } = [];
 
-    public AzureDevOpsImportWindow(string settingsDirectory, IReadOnlyList<ProjectProfile> savedProjects)
+    public AzureDevOpsImportWindow(string settingsDirectory, IReadOnlyList<ProjectProfile> savedProjects,
+        bool useTokenAuthentication = false, string? existingWorkspaceFolder = null)
     {
         _settingsDirectory = Path.GetFullPath(settingsDirectory);
         _savedProjects = savedProjects;
+        _useTokenAuthentication = useTokenAuthentication;
+        _existingWorkspaceFolder = existingWorkspaceFolder is null ? null : Path.GetFullPath(existingWorkspaceFolder, _settingsDirectory);
+        var desktop = Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory);
+        _newWorkspaceParent = Directory.Exists(desktop) ? desktop : _settingsDirectory;
+        _selectedExistingWorkspace = _existingWorkspaceFolder ?? "";
         InitializeComponent();
+        if (_existingWorkspaceFolder is not null) DestinationModeBox.SelectedIndex = 1;
+        RestoreDestinationFolder();
+        if (_useTokenAuthentication) Title = "Connect with Azure DevOps Token";
         SelectedRepositoriesList.ItemsSource = _repositoryRows;
         _selectedRepositories.CollectionChanged += (_, _) => SynchronizeRepositoryRows();
         MinWidth = Math.Min(MinWidth, SystemParameters.WorkArea.Width);
         Width = Math.Min(Width, SystemParameters.WorkArea.Width);
         MaxHeight = SystemParameters.WorkArea.Height;
         Loaded += async (_, _) => await InitializeConnectionAsync();
-        Closed += (_, _) => _closed = true;
+        Closed += (_, _) => { _closed = true; ClearTokenDraft(); };
         UpdateControls();
     }
 
     private async Task InitializeConnectionAsync()
     {
         string? savedUrl = null;
-        await RunLookupAsync(token => Task.Run(AzureDevOpsImportPreferences.LoadLastProjectUrl, token), url =>
+        await RunLookupAsync(token => Task.Run(() => _useTokenAuthentication
+            ? AzureDevOpsTokenStore.LoadLastProjectUrl() : AzureDevOpsImportPreferences.LoadLastProjectUrl(), token), url =>
         {
-            savedUrl = url;
-            if (url is null) return;
-            SetProjectUrl(url);
+            savedUrl = string.IsNullOrWhiteSpace(url) ? null : url;
+            if (savedUrl is null) return;
+            SetProjectUrl(savedUrl);
             _configured = true;
             _page = ImportPage.Workspace;
         }, _selectionVersion, "Loading connection settings…");
@@ -111,6 +127,56 @@ public partial class AzureDevOpsImportWindow : Window
     private async void Check_Click(object sender, RoutedEventArgs e) => await LoadRepositoriesAsync(interactive: false);
     private async void SignIn_Click(object sender, RoutedEventArgs e) => await LoadRepositoriesAsync(interactive: true);
 
+    private void Token_Changed(object sender, RoutedEventArgs e)
+    {
+        if (CloneButton is null || _updatingSelections || sender is not PasswordBox box) return;
+        _updatingSelections = true;
+        try
+        {
+            if (ReferenceEquals(box, InlineTokenBox)) TokenSettingsBox.Password = box.Password;
+            else InlineTokenBox.Password = box.Password;
+        }
+        finally { _updatingSelections = false; }
+        InvalidateReview();
+        _loadedProjectUrl = null;
+        _repositories = [];
+        ResetBranchChoices();
+        ClearError();
+        SetStatus("Connect to verify and save this token.");
+        UpdateControls();
+    }
+
+    private void ClearTokenDraft()
+    {
+        _updatingSelections = true;
+        try { InlineTokenBox.Clear(); TokenSettingsBox.Clear(); }
+        finally { _updatingSelections = false; }
+    }
+
+    private async void ForgetToken_Click(object sender, RoutedEventArgs e)
+    {
+        if (!CanNavigate || !_useTokenAuthentication) return;
+        var projectUrl = ProjectUrlBox.Text.Trim();
+        InvalidateReview();
+        await RunLookupAsync(token => Task.Run(() => { AzureDevOpsTokenStore.ForgetToken(projectUrl); return true; }, token), _ =>
+        {
+            ClearTokenDraft();
+            _loadedProjectUrl = null;
+            _repositories = [];
+            ResetBranchChoices();
+            SetStatus("Saved token removed for this organization. Enter a token to connect again.");
+        }, _selectionVersion, "Removing saved token…");
+    }
+
+    private Task<IReadOnlyList<AzureDevOpsImportRepository>> ReadRepositoriesAsync(string projectUrl,
+        bool interactive, CancellationToken token, string? personalAccessToken = null) => _useTokenAuthentication
+        ? AzureDevOpsImportService.ListRepositoriesWithTokenAsync(projectUrl, personalAccessToken, token)
+        : AzureDevOpsImportService.ListRepositoriesAsync(projectUrl, interactive, token);
+
+    private Task<IReadOnlyList<string>> ReadBranchesAsync(string projectUrl, string repositoryId, CancellationToken token) => _useTokenAuthentication
+        ? AzureDevOpsImportService.ListBranchesWithTokenAsync(projectUrl, repositoryId, token)
+        : AzureDevOpsImportService.ListBranchesAsync(projectUrl, repositoryId, interactive: false, token);
+
     private async Task LoadRepositoriesAsync(bool interactive)
     {
         if (!CanNavigate) return;
@@ -129,24 +195,22 @@ public partial class AzureDevOpsImportWindow : Window
         ResetBranchChoices();
         var version = _selectionVersion;
         var connected = false;
-        await RunLookupAsync(token => AzureDevOpsImportService.ListRepositoriesAsync(projectUrl, interactive, token),
+        var tokenDraft = _useTokenAuthentication ? InlineTokenBox.Password : null;
+        await RunLookupAsync(token => ReadRepositoriesAsync(projectUrl, interactive, token, tokenDraft),
             async repositories =>
             {
                 connected = true;
                 _loadedProjectUrl = projectUrl;
                 _repositories = repositories;
                 _configured = true;
+                ClearTokenDraft();
                 SetProjectUrl(projectUrl);
-                _updatingSelections = true;
-                try
-                {
-                    if (string.IsNullOrWhiteSpace(WorkspaceNameBox.Text))
-                        WorkspaceNameBox.Text = AzureDevOpsImportService.ParseProjectUrl(projectUrl).Project;
-                }
-                finally { _updatingSelections = false; }
-
                 Exception? saveError = null;
-                try { await Task.Run(() => AzureDevOpsImportPreferences.SaveLastProjectUrl(projectUrl)); }
+                try { await Task.Run(() =>
+                {
+                    if (_useTokenAuthentication) AzureDevOpsTokenStore.SaveLastProjectUrl(projectUrl);
+                    else AzureDevOpsImportPreferences.SaveLastProjectUrl(projectUrl);
+                }); }
                 catch (Exception exception) { saveError = exception; }
                 if (_closed || _closeRequested) return;
                 if (_page == ImportPage.Connection || _page == ImportPage.Branches) _page = ImportPage.Repository;
@@ -157,7 +221,7 @@ public partial class AzureDevOpsImportWindow : Window
                 if (saveError is not null)
                     ReportError("Connected, but the project URL could not be remembered.", saveError);
                 UpdateControls();
-            }, version, interactive ? "Waiting for Microsoft sign-in and loading repositories…" : "Loading repositories…");
+            }, version, interactive && !_useTokenAuthentication ? "Waiting for Microsoft sign-in and loading repositories…" : "Loading repositories…");
 
         if (!_closed && !_closeRequested && CanStartAction)
         {
@@ -242,7 +306,7 @@ public partial class AzureDevOpsImportWindow : Window
         }
         var projectUrl = _loadedProjectUrl;
         var version = _selectionVersion;
-        await RunLookupAsync(token => AzureDevOpsImportService.ListBranchesAsync(projectUrl, repository.Id, interactive: false, token),
+        await RunLookupAsync(token => ReadBranchesAsync(projectUrl, repository.Id, token),
             branches =>
             {
                 _branchRepositoryId = repository.Id;
@@ -277,7 +341,24 @@ public partial class AzureDevOpsImportWindow : Window
         ChangeDraft();
     }
 
-    private void WorkspaceName_Changed(object sender, TextChangedEventArgs e) => ChangeDraft();
+    private void WorkspaceName_Changed(object sender, TextChangedEventArgs e)
+    {
+        if (_updatingSelections || CloneButton is null) return;
+        _workspaceNameEdited = true;
+        InvalidateReview(keepReviewPage: true);
+        ClearError();
+        SetStatus("");
+        UpdateControls();
+    }
+
+    private bool UsesExistingWorkspace => _existingWorkspaceFolder is not null || DestinationModeBox.SelectedIndex == 1;
+
+    private void DestinationMode_Changed(object sender, SelectionChangedEventArgs e)
+    {
+        if (_updatingSelections || CloneButton is null) return;
+        RestoreDestinationFolder();
+        ChangeDraft();
+    }
 
     private void ChangeDraft()
     {
@@ -347,45 +428,125 @@ public partial class AzureDevOpsImportWindow : Window
     private async void ChooseFolder_Click(object sender, RoutedEventArgs e)
     {
         if (!CanNavigate || !CanReviewWorkspace) return;
-        var initial = Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory);
-        if (!Directory.Exists(initial)) initial = _settingsDirectory;
-        var dialog = new OpenFolderDialog { Title = "Choose the folder containing your new workspace", InitialDirectory = initial, Multiselect = false };
-        if (dialog.ShowDialog(this) != true) return;
+        if (UsesExistingWorkspace)
+        {
+            await PrepareWorkspaceReviewAsync();
+            if (_cloneReview is not null && CanStartAction) CloneButton.Focus();
+            return;
+        }
+        ClearError();
+        _cloneReview = null;
+        ReviewRepositoriesList.ItemsSource = _selectedRepositories.ToArray();
+        ShowPage(ImportPage.Review);
+        if (!_workspaceNameEdited)
+        {
+            string parent;
+            string[] savedFolders;
+            try
+            {
+                parent = ResolveDestinationFolder();
+                savedFolders = _savedProjects.Select(project => Path.GetFullPath(project.RootPath, _settingsDirectory)).ToArray();
+            }
+            catch (Exception exception)
+            {
+                ReportError("Check the workspace destination.", exception);
+                return;
+            }
+            var version = _selectionVersion;
+            var suggested = false;
+            await RunLookupAsync(token => Task.Run(() => WorkspaceNameSuggestion.FindAvailable(parent, savedFolders, token), token), name =>
+            {
+                _updatingSelections = true;
+                try { WorkspaceNameBox.Text = name; }
+                finally { _updatingSelections = false; }
+                suggested = true;
+            }, version, "Checking existing workspace names…");
+            if (!CanStartAction || version != _selectionVersion) return;
+            if (!suggested)
+            {
+                WorkspaceNameBox.Focus();
+                WorkspaceNameBox.SelectAll();
+                return;
+            }
+        }
+        SetStatus("");
+        WorkspaceNameBox.Focus();
+        WorkspaceNameBox.SelectAll();
+    }
+
+    private async Task PrepareWorkspaceReviewAsync()
+    {
+        if (!CanStartAction || !CanReviewWorkspace) return;
+        var chooseExistingFolders = UsesExistingWorkspace && _page == ImportPage.Workspace;
+        InvalidateReview(keepReviewPage: true);
+        var existing = UsesExistingWorkspace;
         ClearError();
         var workspaceName = WorkspaceNameBox.Text.Trim();
         string parentFolder;
         try
         {
-            parentFolder = Path.GetFullPath(dialog.FolderName, _settingsDirectory);
-            RequireUnusedDestination(Path.Combine(parentFolder, workspaceName));
+            parentFolder = ResolveDestinationFolder();
+            RequireUnusedDestination(existing ? parentFolder : Path.Combine(parentFolder, workspaceName));
         }
         catch (Exception exception)
         {
-            ReportError("Choose a workspace outside saved projects.", exception);
+            ReportError("Check the workspace destination.", exception);
             return;
         }
         var version = _selectionVersion;
         var selections = _selectedRepositories.ToArray();
-        await RunLookupAsync(token => GitRepositoryService.PrepareWorkspaceCloneAsync(parentFolder, workspaceName, selections, token),
+        await RunLookupAsync(async token => existing
+            ? await GitRepositoryService.PrepareExistingWorkspaceCloneAsync(parentFolder,
+                chooseExistingFolders
+                    ? await Task.Run(() => ChooseAvailableRepositoryFolders(parentFolder, selections), token)
+                    : selections, token)
+            : await GitRepositoryService.PrepareWorkspaceCloneAsync(parentFolder, workspaceName, selections, token),
             review =>
             {
+                RequireUnusedDestination(review.Folder, review.Repositories.Select(item => item.Folder));
+                for (var index = 0; index < review.Repositories.Count; index++)
+                    if (_selectedRepositories[index] != review.Repositories[index].Selection)
+                        _selectedRepositories[index] = review.Repositories[index].Selection;
                 _cloneReview = review;
-                ReviewFolderText.Text = review.Folder;
                 ReviewRepositoriesList.ItemsSource = review.Repositories;
                 ShowPage(ImportPage.Review);
                 SetStatus("");
             }, version, "Checking the workspace destination and branches…");
-        if (_cloneReview is not null && CanStartAction) CloneButton.Focus();
+    }
+
+    private static AzureDevOpsWorkspaceRepository[] ChooseAvailableRepositoryFolders(string workspace,
+        IReadOnlyList<AzureDevOpsWorkspaceRepository> selections)
+    {
+        var names = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        return selections.Select(selection =>
+        {
+            var stem = SafeFolderName(string.IsNullOrEmpty(selection.LocalFolderName)
+                ? selection.Repository.Name : selection.LocalFolderName);
+            var name = stem;
+            for (var suffix = 2; names.Contains(name) || DestinationEntryExists(Path.Combine(workspace, name)); suffix++)
+                name = stem + "-" + suffix;
+            names.Add(name);
+            return selection with { LocalFolderName = name };
+        }).ToArray();
+    }
+
+    private static bool DestinationEntryExists(string path)
+    {
+        try { _ = File.GetAttributes(path); return true; }
+        catch (FileNotFoundException) { return false; }
+        catch (DirectoryNotFoundException) { return false; }
     }
 
     private async void Clone_Click(object sender, RoutedEventArgs e)
     {
-        if (!CanStartAction || _cloneReview is not { } review || !ReviewMatchesSelection(review)) return;
-        try { RequireUnusedDestination(review.Folder); }
+        if (!CanStartAction || _page != ImportPage.Review || !CanReviewWorkspace
+            || (!UsesExistingWorkspace && string.IsNullOrWhiteSpace(WorkspaceNameBox.Text))) return;
+        await PrepareWorkspaceReviewAsync();
+        if (!CanStartAction || _page != ImportPage.Review || _cloneReview is not { } review || !ReviewMatchesSelection(review)) return;
+        try { RequireUnusedDestination(review.Folder, review.Repositories.Select(item => item.Folder)); }
         catch (Exception exception)
         {
-            InvalidateReview();
-            ShowPage(ImportPage.Workspace);
+            InvalidateReview(keepReviewPage: true);
             ReportError("The destination needs review again.", exception);
             UpdateControls();
             return;
@@ -437,7 +598,7 @@ public partial class AzureDevOpsImportWindow : Window
             _cloneCancellation = null;
             _cloning = false;
             _cloneReview = null;
-            if (!succeeded && !_closeRequested) ShowPage(ImportPage.Workspace);
+            if (!succeeded && !_closeRequested) ShowPage(ImportPage.Review);
             UpdateControls();
         }
 
@@ -468,7 +629,8 @@ public partial class AzureDevOpsImportWindow : Window
         catch (OperationCanceledException exception)
         {
             if (IsCurrent(version, cancellation, allowCanceled: true) && !_closeRequested)
-                ReportError("Operation canceled or timed out. Check again, or use Sign in & load.", exception);
+                ReportError(_useTokenAuthentication ? "Operation canceled or timed out. Connect again."
+                    : "Operation canceled or timed out. Check again, or use Sign in & load.", exception);
         }
         catch (Exception exception)
         {
@@ -503,16 +665,21 @@ public partial class AzureDevOpsImportWindow : Window
         selection = new AzureDevOpsWorkspaceRepository
         {
             Repository = repository, StartingBranch = branch, FeatureBranch = FeatureBranchBox.Text.Trim(),
-            ProjectUrl = projectUrl, ProjectName = AzureDevOpsImportService.ParseProjectUrl(projectUrl).Project
+            ProjectUrl = projectUrl, ProjectName = AzureDevOpsImportService.ParseProjectUrl(projectUrl).Project,
+            UseAzureDevOpsToken = _useTokenAuthentication
         };
         return true;
     }
 
     private bool CanReviewWorkspace => _inlineRow is null && _selectedRepositories.Count > 0
-        && !string.IsNullOrWhiteSpace(WorkspaceNameBox.Text) && _page is ImportPage.Workspace or ImportPage.Review;
+        && (!_useTokenAuthentication || InlineTokenBox.Password.Length == 0)
+        && !string.IsNullOrWhiteSpace(DestinationFolderBox.Text)
+        && _page is ImportPage.Workspace or ImportPage.Review;
 
     private bool ReviewMatchesSelection(GitWorkspaceCloneReview review) => CanReviewWorkspace
-        && string.Equals(WorkspaceNameBox.Text.Trim(), review.WorkspaceName, StringComparison.Ordinal)
+        && review.UsesExistingWorkspace == UsesExistingWorkspace
+        && DestinationMatchesReview(review)
+        && (review.UsesExistingWorkspace || string.Equals(WorkspaceNameBox.Text.Trim(), review.WorkspaceName, StringComparison.Ordinal))
         && _selectedRepositories.SequenceEqual(review.Repositories.Select(item => item.Selection));
 
     private static bool SameRepository(AzureDevOpsImportRepository first, AzureDevOpsImportRepository second) =>
@@ -557,28 +724,32 @@ public partial class AzureDevOpsImportWindow : Window
         return clean;
     }
 
-    private void RequireUnusedDestination(string folder)
+    private void RequireUnusedDestination(string folder, IEnumerable<string>? repositoryFolders = null)
     {
         foreach (var project in _savedProjects)
         {
             var root = Path.GetFullPath(project.RootPath, _settingsDirectory);
-            if (SettingsStore.WorkingFoldersOverlap(folder, root))
-                throw new InvalidOperationException($"This destination overlaps saved project '{project.Name}'. Choose a separate workspace.");
+            var selectedProject = _existingWorkspaceFolder is not null
+                && string.Equals(Path.TrimEndingDirectorySeparator(folder), Path.TrimEndingDirectorySeparator(_existingWorkspaceFolder), StringComparison.OrdinalIgnoreCase)
+                && string.Equals(Path.TrimEndingDirectorySeparator(folder), Path.TrimEndingDirectorySeparator(root), StringComparison.OrdinalIgnoreCase);
+            if (!selectedProject && SettingsStore.WorkingFoldersOverlap(folder, root))
+                throw new InvalidOperationException($"This destination overlaps saved project '{project.Name}'. Use that project's Functions → Clone repositories action, or choose a separate workspace.");
             foreach (var service in project.Services)
             {
                 var working = Path.GetFullPath(service.WorkingDirectory, root);
-                if (SettingsStore.WorkingFoldersOverlap(folder, working))
+                if ((!selectedProject && SettingsStore.WorkingFoldersOverlap(folder, working))
+                    || (selectedProject && repositoryFolders is not null && repositoryFolders.Any(child => SettingsStore.WorkingFoldersOverlap(child, working))))
                     throw new InvalidOperationException($"This destination overlaps '{project.Name}' / '{service.Name}'. Choose a separate workspace.");
             }
         }
     }
 
-    private void InvalidateReview()
+    private void InvalidateReview(bool keepReviewPage = false)
     {
         _selectionVersion++;
         CancelLookups();
         _cloneReview = null;
-        if (_page == ImportPage.Review) _page = ImportPage.Workspace;
+        if (!keepReviewPage && _page == ImportPage.Review) _page = ImportPage.Workspace;
     }
 
     private void ResetBranchChoices()
@@ -753,14 +924,22 @@ public partial class AzureDevOpsImportWindow : Window
         ReviewPage.Visibility = _page == ImportPage.Review ? Visibility.Visible : Visibility.Collapsed;
         TitleText.Text = _page switch
         {
-            ImportPage.Connection => "Connect Azure DevOps", ImportPage.Repository => "Add repository",
-            ImportPage.Branches => "Choose branches", ImportPage.Review => "Clone workspace", _ => "Workspace"
+            ImportPage.Connection => _useTokenAuthentication ? "Connect with Azure DevOps Token" : "Connect Azure DevOps",
+            ImportPage.Repository => "Add repository", ImportPage.Branches => "Choose branches",
+            ImportPage.Review => UsesExistingWorkspace ? "Add repositories to workspace" : "Clone workspace", _ => "Workspace"
         };
         SettingsButton.Visibility = _configured ? Visibility.Visible : Visibility.Collapsed;
         SettingsButton.IsEnabled = navigate && _page != ImportPage.Review;
         ProjectUrlBox.IsEnabled = InlineProjectUrlBox.IsEnabled = navigate && _page != ImportPage.Review;
         CheckButton.IsEnabled = SignInButton.IsEnabled = InlineCheckButton.IsEnabled = InlineSignInButton.IsEnabled = navigate && _page != ImportPage.Review;
-        WorkspaceNameBox.IsEnabled = navigate && _page == ImportPage.Workspace;
+        TokenSettingsPanel.Visibility = InlineTokenPanel.Visibility = _useTokenAuthentication ? Visibility.Visible : Visibility.Collapsed;
+        CheckButton.Visibility = InlineCheckButton.Visibility = _useTokenAuthentication ? Visibility.Collapsed : Visibility.Visible;
+        SignInButton.Content = InlineSignInButton.Content = _useTokenAuthentication ? "_Connect & save" : "_Sign in & load";
+        TokenSettingsBox.IsEnabled = InlineTokenBox.IsEnabled = ForgetTokenButton.IsEnabled = navigate && _page != ImportPage.Review;
+        DestinationModeBox.IsEnabled = navigate && _existingWorkspaceFolder is null;
+        WorkspaceNamePanel.Visibility = UsesExistingWorkspace ? Visibility.Collapsed : Visibility.Visible;
+        UpdateDestinationControls(navigate);
+        WorkspaceNameBox.IsEnabled = navigate && _page == ImportPage.Review && !UsesExistingWorkspace;
         StartRepositoryButton.IsEnabled = navigate && _configured && _selectedRepositories.Count < 128;
         SelectedRepositoriesList.IsEnabled = !_loadingPreferences && !_cloning && !_checkingExit && !_closeRequested
             && _unconfirmedCommands.Count == 0 && (_lookups.Count == 0 || _inlineRow is not null);
@@ -776,8 +955,12 @@ public partial class AzureDevOpsImportWindow : Window
         AddRepositoryButton.IsEnabled = ready && TryGetSelection(out _);
         ChooseFolderButton.Visibility = _page == ImportPage.Workspace ? Visibility.Visible : Visibility.Collapsed;
         ChooseFolderButton.IsEnabled = navigate && CanReviewWorkspace;
+        ChooseFolderButton.Content = UsesExistingWorkspace ? "_Review repositories" : "_Review workspace";
+        ChooseFolderButton.ToolTip = UsesExistingWorkspace ? "Review new repository folders inside this workspace." : "Review the new workspace folder and selected repository branches.";
         CloneButton.Visibility = _page == ImportPage.Review ? Visibility.Visible : Visibility.Collapsed;
-        CloneButton.IsEnabled = ready && _cloneReview is { } review && ReviewMatchesSelection(review);
+        CloneButton.Content = UsesExistingWorkspace ? "_Add repositories" : "_Create workspace";
+        CloneButton.IsEnabled = ready && CanReviewWorkspace
+            && (UsesExistingWorkspace || !string.IsNullOrWhiteSpace(WorkspaceNameBox.Text));
         NextButton.IsDefault = _page == ImportPage.Repository;
         AddRepositoryButton.IsDefault = _page == ImportPage.Branches;
         CloneButton.IsDefault = _page == ImportPage.Review;

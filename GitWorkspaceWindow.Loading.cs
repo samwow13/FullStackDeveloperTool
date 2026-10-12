@@ -10,8 +10,6 @@ public partial class GitWorkspaceWindow
     private int _gitLoadDepth;
     private bool _gitLoadFailed;
     private GitCommandExitUnconfirmedException? _unconfirmedGitCommand;
-    private string? _automaticFetchOutcome;
-    private string? _automaticFetchError;
     public bool CanRetryGit => !_busy && _gitLoadDepth == 0;
     private string _gitLoadFailure = "Git could not load. Try again.";
     private bool IsGitLoading => _initialGitLoad || _gitLoadDepth > 0;
@@ -25,6 +23,8 @@ public partial class GitWorkspaceWindow
     public Visibility GitErrorVisibility => !IsGitLoading && !string.IsNullOrEmpty(_latestErrorDetails) ? Visibility.Visible : Visibility.Collapsed;
     public string GitLoadFailure => _gitLoadFailure;
     public Visibility TrustFailureVisibility => _trustRoot != null ? Visibility.Visible : Visibility.Collapsed;
+    public Visibility CachedTrustFailureVisibility => _snapshot != null && _trustRoot != null && !_gitLoadFailed
+        ? Visibility.Visible : Visibility.Collapsed;
     public string TrustFailureMessage => $"Git reports a different owner for:\n{_trustRoot}\n\nTrust only if you recognize this repository and its contents.";
 
     private void BeginGitLoad()
@@ -53,13 +53,16 @@ public partial class GitWorkspaceWindow
     private void CheckGitReadFailures()
     {
         if (_comparisonError != null || _powerReadError != null)
-            FailGitLoad("Git status could not finish loading. Try again.");
+        {
+            _cacheRefreshFailed = true;
+            if (_snapshot == null) FailGitLoad("Git status could not finish loading. Try again.");
+        }
     }
 
-    private async Task LoadGitWorkspaceAsync(bool verifyConnection = true)
+    private async Task LoadGitWorkspaceAsync(bool verifyConnection = true, bool forceRefresh = false)
     {
         if (_busy || _gitLoadDepth > 0) return;
-        if (!await EnsureRepositorySelectedAsync()) return;
+        if (!await EnsureRepositorySelectedAsync(forceRefresh)) return;
         if (_unconfirmedGitCommand is { } command)
         {
             _busy = true;
@@ -73,48 +76,28 @@ public partial class GitWorkspaceWindow
             }
             _unconfirmedGitCommand = null;
         }
-        BeginGitLoad();
-        _automaticFetchOutcome = null;
-        _automaticFetchError = null;
+        var loading = _snapshot == null;
+        if (loading) BeginGitLoad();
         try
         {
-            await RefreshAsync(fetchRemote: verifyConnection);
+            await RefreshAsync(showLoading: false, forceRefresh: forceRefresh);
             if (!_gitLoadFailed) await EnsureSetupAsync(verifyConnection);
-            // Connection verification can replace the latest-operation details. Preserve
-            // the fetch failure so a successful access check cannot hide stale remote refs.
-            if (_automaticFetchError != null && !_latestErrorDetails.Contains(_automaticFetchError, StringComparison.Ordinal))
-                ReportError(_automaticFetchError);
-            if (!_gitLoadFailed && _automaticFetchOutcome != null && (_automaticFetchError != null || (!_setupOpen && string.IsNullOrEmpty(_latestErrorDetails))))
-                SetStatus(_automaticFetchOutcome);
-            else if (!_gitLoadFailed && _setupOpen && string.IsNullOrEmpty(_latestErrorDetails)) SetStatus("");
+            if (!_gitLoadFailed && _setupOpen && string.IsNullOrEmpty(_latestErrorDetails)) SetStatus("");
         }
         catch (Exception ex)
         {
             if (ex is GitCommandExitUnconfirmedException unconfirmed) _unconfirmedGitCommand = unconfirmed;
             ReportError(SafeError(ex));
-            FailGitLoad(_unconfirmedGitCommand != null ? "Git may still be running. Wait, then Retry to check again." : "Git could not finish loading. Try again.");
+            _cacheRefreshFailed = true;
+            if (_snapshot == null || _unconfirmedGitCommand != null)
+                FailGitLoad(_unconfirmedGitCommand != null ? "Git may still be running. Wait, then Retry to check again." : "Git could not finish loading. Try again.");
         }
-        finally { EndGitLoad(); }
-    }
-
-    private async Task FetchForGitLoadAsync(GitRepositorySnapshot snapshot, GitRemoteInfo remote, CancellationToken token)
-    {
-        SetStatus($"Fetching {remote.Name} and loading Git status…");
-        try
+        finally
         {
-            await GitRepositoryService.RunWithSnapshotAsync(snapshot,
-                cancellation => GitRepositoryService.FetchAsync(snapshot.RepositoryRoot!, remote.Name, cancellation, strictSsh: true), token);
-            _automaticFetchOutcome = $"Fetch complete. Branches for {remote.Name} refreshed.";
-        }
-        catch (GitCommandExitUnconfirmedException) { throw; }
-        catch (OperationCanceledException) { throw; }
-        catch (Exception ex)
-        {
-            _automaticFetchOutcome = $"Automatic fetch for {remote.Name} failed. Remote history uses cached refs; use Fetch to retry.";
-            _automaticFetchError = _automaticFetchOutcome + "\n" + SafeError(ex);
-            ReportError(_automaticFetchError);
+            if (loading) EndGitLoad();
+            await ConsumeSharedUpdateAsync();
         }
     }
 
-    private async void RetryGit_Click(object sender, RoutedEventArgs e) => await LoadGitWorkspaceAsync();
+    private async void RetryGit_Click(object sender, RoutedEventArgs e) => await LoadGitWorkspaceAsync(verifyConnection: false, forceRefresh: true);
 }

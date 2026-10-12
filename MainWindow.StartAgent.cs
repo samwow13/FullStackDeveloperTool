@@ -25,7 +25,7 @@ public partial class MainWindow
         try
         {
             window = new CodexStartAgentWindow(project.Id, project.Name, _store.ResolveRoot(project),
-                draft?.Text ?? "", draft?.PendingAttemptId, draft?.Images) { Owner = this };
+                draft?.Text ?? "", draft?.PendingAttemptId, draft?.Images, draft?.KeepAwake ?? false) { Owner = this };
             _startAgentWindow = window;
             Changed(nameof(CanStartAgent));
             window.ShowDialog();
@@ -41,8 +41,9 @@ public partial class MainWindow
         {
             if (window is not null)
             {
-                if (!string.IsNullOrEmpty(window.Draft) || window.DraftImages.Count > 0 || window.PendingAttemptId is not null)
-                    _startAgentDrafts[project.Id] = new(window.Draft, window.PendingAttemptId, window.DraftImages);
+                if (!string.IsNullOrEmpty(window.Draft) || window.DraftImages.Count > 0 || window.PendingAttemptId is not null ||
+                    (window.DraftKeepAwake && !window.SentSuccessfully))
+                    _startAgentDrafts[project.Id] = new(window.Draft, window.PendingAttemptId, window.DraftImages, window.DraftKeepAwake);
                 else _startAgentDrafts.Remove(project.Id);
             }
             _startAgentWindow = null;
@@ -74,5 +75,6 @@ public partial class MainWindow
             MessageBoxResult.No) == MessageBoxResult.Yes;
     }
 
-    private sealed record StartAgentDraft(string Text, string? PendingAttemptId, IReadOnlyList<CodexAgentChatImage> Images);
+    private sealed record StartAgentDraft(string Text, string? PendingAttemptId, IReadOnlyList<CodexAgentChatImage> Images,
+        bool KeepAwake);
 }

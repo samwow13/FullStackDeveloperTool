@@ -25,6 +25,9 @@ public partial class CodexRobot : UserControl
     public static readonly DependencyProperty IsHoveredProperty = DependencyProperty.Register(
         nameof(IsHovered), typeof(bool), typeof(CodexRobot), new PropertyMetadata(false, AppearanceChanged));
 
+    public static readonly DependencyProperty IsMutedProperty = DependencyProperty.Register(
+        nameof(IsMuted), typeof(bool), typeof(CodexRobot), new PropertyMetadata(false, AppearanceChanged));
+
     private static readonly Brush RunningBrush = FrozenBrush(0x72, 0xE5, 0xC3);
     private static readonly Brush CompletedBrush = FrozenBrush(0xA3, 0xCB, 0xD4);
     private static readonly Brush WaitingBrush = FrozenBrush(0xE7, 0xC1, 0x79);
@@ -86,10 +89,17 @@ public partial class CodexRobot : UserControl
         set => SetValue(IsHoveredProperty, value);
     }
 
+    public bool IsMuted
+    {
+        get => (bool)GetValue(IsMutedProperty);
+        set => SetValue(IsMutedProperty, value);
+    }
+
     private static void AppearanceChanged(DependencyObject sender, DependencyPropertyChangedEventArgs e)
     {
         var robot = (CodexRobot)sender;
-        if (e.Property == IsHoveredProperty && robot._pose != "Completed") return;
+        if (e.Property == IsHoveredProperty && (robot._pose != "Completed" || robot.IsMuted)) return;
+        if (robot.IsMuted && (e.Property == IsSpeakingProperty || e.Property == IsWaitingToSpeakProperty)) return;
         robot.ApplyAppearance();
     }
 
@@ -148,8 +158,9 @@ public partial class CodexRobot : UserControl
             "IDLE" => "Idle",
             _ => "Unknown"
         };
-        var queuedMessage = IsWaitingToSpeak && !IsSpeaking;
-        var completedAwake = _pose == "Completed" && (IsSpeaking || queuedMessage || IsHovered);
+        var speaking = !IsMuted && IsSpeaking;
+        var queuedMessage = !IsMuted && IsWaitingToSpeak && !speaking;
+        var completedAwake = !IsMuted && _pose == "Completed" && (speaking || queuedMessage || IsHovered);
         if (_pose != "Completed")
         {
             _sleepEntryPending = false;
@@ -170,7 +181,7 @@ public partial class CodexRobot : UserControl
             }
         }
         _completedAwake = completedAwake;
-        var awake = IsSpeaking || queuedMessage || completedAwake;
+        var awake = speaking || queuedMessage || completedAwake;
         // Interrupted transitions restart from the effective head position, never from a snapped pose.
         if (_sleepEntryPending) _sleepEntryStart = previousHead;
         if (_wakeEntryPending)
@@ -195,7 +206,7 @@ public partial class CodexRobot : UserControl
         FailedEyes.Visibility = !awake && _pose == "Failed" ? Visibility.Visible : Visibility.Collapsed;
         UnknownEyes.Visibility = !awake && _pose == "Unknown" ? Visibility.Visible : Visibility.Collapsed;
         SleepMarks.Visibility = _pose == "Completed" && (!awake || _wakeEntryPending) ? Visibility.Visible : Visibility.Collapsed;
-        RestingMouth.Visibility = IsSpeaking ? Visibility.Collapsed : Visibility.Visible;
+        RestingMouth.Visibility = speaking ? Visibility.Collapsed : Visibility.Visible;
         RestingMouth.Data = Geometry.Parse(_pose switch
         {
             "Completed" => "M 29,25 L 31,25",
@@ -204,7 +215,7 @@ public partial class CodexRobot : UserControl
             "Waiting" or "Unknown" => "M 29,25 L 32,25",
             _ => "M 28,24 Q 30,25.5 32,24"
         });
-        TalkingMouth.Visibility = IsSpeaking ? Visibility.Visible : Visibility.Collapsed;
+        TalkingMouth.Visibility = speaking ? Visibility.Visible : Visibility.Collapsed;
         MouthOpening.ScaleY = 1;
         StateMark.Visibility = _pose is "Waiting" or "NeedsInput" or "Unknown" or "Failed" ? Visibility.Visible : Visibility.Collapsed;
         StateMark.Text = _pose switch { "Waiting" => "…", "Failed" => "!", _ => "?" };
@@ -215,7 +226,7 @@ public partial class CodexRobot : UserControl
         HeadMotion.Y = !awake && _pose == "Completed" ? SleepingHeadY : 0;
         LeftHandMotion.Y = _pose is "Running" or "Completed" ? 0 : 1;
         RightHandMotion.Y = _pose is "Running" or "Completed" ? 0 : 1;
-        var needsAnswerPose = _pose == "NeedsInput" && !IsSpeaking && !queuedMessage;
+        var needsAnswerPose = !IsMuted && _pose == "NeedsInput" && !speaking && !queuedMessage;
         RestingRightArm.Visibility = needsAnswerPose || queuedMessage ? Visibility.Collapsed : Visibility.Visible;
         RightHand.Visibility = needsAnswerPose || queuedMessage ? Visibility.Collapsed : Visibility.Visible;
         RaisedRightArm.Visibility = needsAnswerPose ? Visibility.Visible : Visibility.Collapsed;
@@ -234,12 +245,13 @@ public partial class CodexRobot : UserControl
             (_pose == "NeedsInput" ? "The agent has an unanswered question and waves until its unread message gets a chat bubble." :
                 "The agent waves its raised hand until its unread message gets a turn in the chat bubble.") : _pose switch
         {
-            "Running" => IsSpeaking ? "The agent is working and showing a message in its chat bubble." : "The robot is typing while its agent works.",
-            "Completed" => IsSpeaking ? "Work completed. The robot is showing its saved message in a chat bubble." :
+            "Running" => speaking ? "The agent is working and showing a message in its chat bubble." : "The robot is typing while its agent works.",
+            "Completed" => speaking ? "Work completed. The robot is showing its saved message in a chat bubble." :
                 completedAwake ? "Work completed. The robot is awake while you hover over it." : "Work completed. The robot is asleep on its keyboard.",
             "Waiting" => "The agent is waiting and is not currently typing.",
-            "NeedsInput" => IsSpeaking ? "The chat has an unanswered question. The robot is showing it in its chat bubble." :
-                "The chat has an unanswered question. The robot excitedly raises one hand for your answer.",
+            "NeedsInput" => speaking ? "The chat has an unanswered question. The robot is showing it in its chat bubble." :
+                IsMuted ? "The chat has an unanswered question. Message animations are muted; inspect the saved message for details." :
+                    "The chat has an unanswered question. The robot excitedly raises one hand for your answer.",
             "Failed" => "The agent reported a failure. Completion is not confirmed.",
             "Unknown" => "The agent's current status is unavailable.",
             _ => "No active work. The robot is ready."
@@ -250,26 +262,29 @@ public partial class CodexRobot : UserControl
     private void RefreshMotion()
     {
         if (!_initialized) return;
+        var speaking = !IsMuted && IsSpeaking;
+        var waitingToSpeak = !IsMuted && IsWaitingToSpeak;
         var shouldAnimate = _observing && IsLoaded && IsVisible && Animate
-            && SystemParameters.ClientAreaAnimation && (IsSpeaking || IsWaitingToSpeak || _pose is "Running" or "Completed" or "NeedsInput")
+            && SystemParameters.ClientAreaAnimation && (speaking || waitingToSpeak || _pose is "Running" or "Completed"
+                || !IsMuted && _pose == "NeedsInput")
             && _window?.WindowState != WindowState.Minimized && IsInsideViewport();
         if (!shouldAnimate) { _sleepEntryPending = false; _wakeEntryPending = false; StopMotion(); return; }
         if (_animations.Count != 0) return;
 
         if (_wakeEntryPending && _completedAwake)
         {
-            if (IsSpeaking) AnimateMouth();
-            else if (IsWaitingToSpeak) AnimateQueuedMessageWave();
+            if (speaking) AnimateMouth();
+            else if (waitingToSpeak) AnimateQueuedMessageWave();
             AnimateWakeEntry();
             return;
         }
-        if (IsSpeaking)
+        if (speaking)
         {
             AnimateMouth();
             AnimateValue(HeadMotion, TranslateTransform.YProperty, 0, -1.2, 0.7);
             AnimateValue(HeadTilt, RotateTransform.AngleProperty, -2, 2, 0.9);
         }
-        else if (IsWaitingToSpeak)
+        else if (waitingToSpeak)
         {
             AnimateQueuedMessageWave();
             AnimateValue(HeadMotion, TranslateTransform.YProperty, 0, -1.4, 0.76);

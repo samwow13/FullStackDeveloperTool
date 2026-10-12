@@ -9,6 +9,34 @@ namespace FullStackLauncher.Services;
 /// </summary>
 public static class DashboardGitComparisonService
 {
+    public static DashboardGitComparison FromCachedState(DashboardGitComparisonScope scope, GitRepositoryState state)
+    {
+        var snapshot = state.Snapshot;
+        var remote = snapshot?.Remotes.SingleOrDefault(item => item.Name == scope.RemoteName && item.UrlCanCopy);
+        var scopeError = state.Error ?? state.SelectionError;
+        if (snapshot is null || !snapshot.IsRepository || snapshot.RepositoryRoot is null
+            || !SameRoot(scope.RepositoryRoot, snapshot.RepositoryRoot))
+            scopeError ??= "The selected repository is unavailable. Force refresh to review its folder.";
+        else if (snapshot.IsDetached || snapshot.Branch != scope.Branch)
+            scopeError ??= "The selected branch changed or has detached HEAD. Refresh the project before continuing.";
+        else if (remote is null || AgentGitChangeStore.ConnectionId(remote) != scope.ConnectionId
+            || state.ActiveRemote?.Name != scope.RemoteName)
+            scopeError ??= "The active Git connection changed or is unavailable. Review its connection in Git.";
+        var power = state.PowerDetails;
+        return new DashboardGitComparison
+        {
+            Scope = scope, Snapshot = snapshot, Comparison = scopeError is null ? state.Comparison : null,
+            UncommittedFiles = snapshot?.Changes.Count ?? 0,
+            ReleaseBranch = power?.ReleaseBranch, SuggestedReleaseBranch = power?.SuggestedReleaseBranch,
+            ReleaseBranchDetectionDetail = state.PowerError ?? power?.ReleaseBranchDetectionDetail,
+            UnavailableReason = scopeError ?? state.ComparisonError ?? state.Comparison?.UnavailableReason,
+            ConflictCheckUnavailableReason = (state.IsRefreshing ? "Git refresh is running. Wait for it to finish before checking conflicts." : null)
+                ?? scopeError ?? state.PowerError
+                ?? (snapshot is null ? "Git status is unavailable. Force refresh before checking conflicts." : ConflictCheckAvailability(snapshot, power)),
+            ReadAt = state.ReadAt
+        };
+    }
+
     public static async Task<DashboardGitComparison> ReadAsync(DashboardGitComparisonScope scope,
         CancellationToken token = default)
     {

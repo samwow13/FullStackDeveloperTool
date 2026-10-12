@@ -4,7 +4,7 @@ namespace FullStackLauncher.Models;
 public sealed class GitCloneReview
 {
     internal GitCloneReview(string folder, GitHostingProvider provider, string cloneUrl, string directoryIdentity,
-        string? branch = null, string? featureBranch = null)
+        string? branch = null, string? featureBranch = null, bool useAzureDevOpsToken = false)
     {
         Folder = folder;
         Provider = provider;
@@ -12,6 +12,7 @@ public sealed class GitCloneReview
         DirectoryIdentity = directoryIdentity;
         Branch = branch;
         FeatureBranch = featureBranch;
+        UseAzureDevOpsToken = useAzureDevOpsToken;
     }
 
     public string Folder { get; }
@@ -19,25 +20,29 @@ public sealed class GitCloneReview
     public string CloneUrl { get; }
     public string? Branch { get; }
     public string? FeatureBranch { get; }
+    public bool UseAzureDevOpsToken { get; }
     internal string DirectoryIdentity { get; }
 }
 
-/// <summary>An existing parent and a new workspace destination, reviewed without creating folders.</summary>
+/// <summary>A new or existing workspace destination, reviewed without creating folders.</summary>
 public sealed class GitWorkspaceCloneReview
 {
     internal GitWorkspaceCloneReview(string parentFolder, string workspaceName, string folder,
-        string parentDirectoryIdentity, IReadOnlyList<GitWorkspaceCloneRepositoryReview> repositories)
+        string parentDirectoryIdentity, IReadOnlyList<GitWorkspaceCloneRepositoryReview> repositories,
+        bool usesExistingWorkspace = false)
     {
         ParentFolder = parentFolder;
         WorkspaceName = workspaceName;
         Folder = folder;
         ParentDirectoryIdentity = parentDirectoryIdentity;
         Repositories = Array.AsReadOnly(repositories.ToArray());
+        UsesExistingWorkspace = usesExistingWorkspace;
     }
 
     public string ParentFolder { get; }
     public string WorkspaceName { get; }
     public string Folder { get; }
+    public bool UsesExistingWorkspace { get; }
     public IReadOnlyList<GitWorkspaceCloneRepositoryReview> Repositories { get; }
     internal string ParentDirectoryIdentity { get; }
 }

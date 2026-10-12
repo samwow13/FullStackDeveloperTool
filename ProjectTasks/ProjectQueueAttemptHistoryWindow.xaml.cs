@@ -3,11 +3,15 @@ using System.ComponentModel;
 using System.IO;
 using System.Runtime.CompilerServices;
 using System.Windows;
+using FullStackLauncher.Services;
 
 namespace FullStackLauncher.ProjectTasks;
 
-public partial class ProjectQueueAttemptHistoryWindow : Window, INotifyPropertyChanged
+public partial class ProjectQueueAttemptHistoryWindow : Window, INotifyPropertyChanged, IDashboardReplacementWindow
 {
+    public bool IsDashboardReplacementReady => !_busy;
+    public bool IsDashboardReplacementClosePending => false;
+
     private readonly ProjectTasksViewModel _sourceModel;
     private readonly ProjectTaskStore _store = new();
     private readonly List<QueueAttemptHistoryRow> _allAttempts = [];
