@@ -40,7 +40,9 @@ public partial class GitWorkspaceWindow : Window, INotifyPropertyChanged, IDashb
 
     public GitWorkspaceWindow(string projectName, IReadOnlyList<GitWorkspaceFolder> folders,
         bool scanChildRepositories = true, string? preferredRepositoryRoot = null,
-        string? projectId = null, ProjectGitService? gitService = null)
+        string? projectId = null, ProjectGitService? gitService = null,
+        Func<GitProjectConnectRequest, Task<IDisposable>>? prepareProjectConnect = null,
+        Func<GitProjectConnectResult, Task>? applyProjectConnect = null)
     {
         ProjectTitle = $"Git · {projectName}";
         _configuredFolders = folders.ToArray();
@@ -48,8 +50,17 @@ public partial class GitWorkspaceWindow : Window, INotifyPropertyChanged, IDashb
         _preferredRepositoryRoot = preferredRepositoryRoot;
         _gitService = gitService ?? ProjectGitService.Shared;
         _projectId = projectId ?? string.Join("|", folders.Select(folder => folder.Directory));
+        _prepareProjectConnect = prepareProjectConnect;
+        _applyProjectConnect = applyProjectConnect;
         Folders = _configuredFolders;
         InitializeComponent();
+        // These controls move between windows; keep their workflow bindings attached.
+        GitDialogPanels.DataContext = this;
+        // Keep access-key label targets when the setup controls move to their host.
+        var setupNames = new NameScope();
+        foreach (var control in new FrameworkElement[] { FolderPicker, RemotePicker, InitialBranch, RemoteUrl, RemoteName, ConnectionPicker })
+            setupNames.RegisterName(control.Name, control);
+        NameScope.SetNameScope(GitDialogPanels, setupNames);
         // Keep the footer reachable on smaller displays; the workspace pages scroll.
         Height = Math.Min(Height, SystemParameters.WorkArea.Height);
         Width = Math.Min(Width, SystemParameters.WorkArea.Width);
@@ -141,9 +152,7 @@ public partial class GitWorkspaceWindow : Window, INotifyPropertyChanged, IDashb
 
     private async void Window_Loaded(object sender, RoutedEventArgs e)
     {
-        _ready = true;
-        _gitService.Changed += SharedGit_Changed;
-        await LoadGitWorkspaceAsync(verifyConnection: false);
+        await InitializeGitDialogAsync();
     }
 
     private async void Folder_Changed(object sender, SelectionChangedEventArgs e)
@@ -183,6 +192,7 @@ public partial class GitWorkspaceWindow : Window, INotifyPropertyChanged, IDashb
             _comparison = null;
             _comparisonError = null;
             Changed();
+            RemotePicker.GetBindingExpression(ItemsControl.ItemsSourceProperty)?.UpdateTarget();
             RemotePicker.SelectedItem = Remotes.FirstOrDefault(remote => remote.Name == selectedRemoteName);
             _preferredRemote = null;
         }
@@ -289,7 +299,7 @@ public partial class GitWorkspaceWindow : Window, INotifyPropertyChanged, IDashb
             var snapshot = state.Snapshot!;
             if (!snapshot.IsRepository && !_remoteDraftDirty && _setupStep != SetupStep.Local) OpenSetup(SetupStep.Choice);
             CheckGitReadFailures();
-            if (snapshot.IsRepository && SelectedRemote == null && !_setupOpen && !HasSyncRecovery)
+            if (snapshot.IsRepository && SelectedRemote == null && _configOpen && !_setupOpen && !HasSyncRecovery)
                 OpenSetup(Remotes.Count > 0 ? SetupStep.Connections : SetupStep.Choice);
             if (!_cacheRefreshFailed) SetStatus($"Git status {state.ReadAt.LocalDateTime:T} · " + (_comparison is { IsLocalComparison: true }
                 ? "line totals use the last local commit." : "remote comparison uses last fetched history."));
@@ -591,7 +601,7 @@ public partial class GitWorkspaceWindow : Window, INotifyPropertyChanged, IDashb
         await ExecuteAsync("Switch branch", token => GitRepositoryService.SwitchBranchAsync(root, name, token));
     }
 
-    private bool Confirm(string title, string text) => IsIdle && MessageBox.Show(this,
+    private bool Confirm(string title, string text) => IsIdle && MessageBox.Show(DialogOwner,
         SensitiveDataProtection.Redact(text), title, MessageBoxButton.OKCancel, MessageBoxImage.Question, MessageBoxResult.Cancel) == MessageBoxResult.OK;
 
     private void Cancel_Click(object sender, RoutedEventArgs e)
@@ -619,7 +629,7 @@ public partial class GitWorkspaceWindow : Window, INotifyPropertyChanged, IDashb
                     // Post the next close so WPF finishes the canceled close first.
                     _ = Dispatcher.BeginInvoke(new Action(() =>
                     {
-                        try { if (!_closed) Close(); }
+                        try { if (!_closed) (sender as Window ?? this).Close(); }
                         finally { _replacementClosePending = false; }
                     }));
                     closePosted = true;
@@ -644,5 +654,5 @@ public partial class GitWorkspaceWindow : Window, INotifyPropertyChanged, IDashb
             : "A Git operation is still running. Wait for it or use Cancel operation before closing.");
     }
 
-    private void Close_Click(object sender, RoutedEventArgs e) { if (IsIdle) Close(); }
+    private void Close_Click(object sender, RoutedEventArgs e) { if (IsIdle) CloseActiveGitDialog(); }
 }

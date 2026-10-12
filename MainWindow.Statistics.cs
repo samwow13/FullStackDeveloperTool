@@ -33,8 +33,9 @@ public partial class MainWindow
         try
         {
             popup?.SetCurrentValue(Popup.IsOpenProperty, false);
-            new GitWorkspaceWindow(project.Name, [new GitWorkspaceFolder(service.Name, service.Directory)], scanChildRepositories: false)
-                { Owner = this }.ShowDialog();
+            var workspace = new GitWorkspaceWindow(project.Name,
+                [new GitWorkspaceFolder(service.Name, service.Directory)], scanChildRepositories: false);
+            await workspace.ShowGitDialogAsync(this);
             await RefreshProjectBranchesAsync();
             await RefreshNextCommitAsync();
             if (!_closing && !_closed && !_closeRequested && ReferenceEquals(SelectedProject, project))

@@ -94,7 +94,7 @@ public partial class GitWorkspaceWindow
     private void BranchHistory_Click(object sender, RoutedEventArgs e)
     {
         if (!CanShowBranchHistory || _selectedBranchComparison is not { Available: true } comparison) return;
-        var history = new GitBranchHistoryWindow(comparison) { Owner = this };
+        var history = new GitBranchHistoryWindow(comparison) { Owner = DialogOwner };
         history.CommandExitUnconfirmed += HoldUnconfirmedBranchCommand;
         history.ShowDialog();
     }

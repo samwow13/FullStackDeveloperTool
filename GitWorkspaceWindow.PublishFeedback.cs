@@ -27,7 +27,7 @@ public partial class GitWorkspaceWindow
         }
         var scope = root + "\0" + AgentGitChangeStore.ConnectionId(remote);
         _postPushLinkDrafts.TryGetValue(scope, out var draft);
-        var dialog = new GitPostPushLinkWindow(root, remote, draft) { Owner = this };
+        var dialog = new GitPostPushLinkWindow(root, remote, draft) { Owner = DialogOwner };
         var accepted = dialog.ShowDialog() == true;
         _postPushLinkDrafts[scope] = dialog.Draft;
         if (!accepted) return;

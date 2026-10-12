@@ -93,7 +93,7 @@ public partial class GitWorkspaceWindow
             return branches;
         }, savedSource ?? _powerDetails?.SuggestedReleaseBranch,
             currentBranch, mode, suggestReleaseBranch: savedSource is null,
-            cachedDefaultBranch: _powerDetails?.CachedRemoteDefaultBranch) { Owner = this };
+            cachedDefaultBranch: _powerDetails?.CachedRemoteDefaultBranch) { Owner = DialogOwner };
         var accepted = picker.ShowDialog() == true;
         if (picker.UnconfirmedCommand is { } pendingCommand)
         {
@@ -132,7 +132,7 @@ public partial class GitWorkspaceWindow
         {
             var messageDraft = ReadScopedCommitDraft(root, snapshot.Branch, remote);
             return new GitCommitWindow(snapshot, remote, _powerDetails?.LastCreatedBranch,
-                destinationBranch, messageDraft, agentSummaries: agentSummaries, freezeDestination: true) { Owner = this };
+                destinationBranch, messageDraft, agentSummaries: agentSummaries, freezeDestination: true) { Owner = DialogOwner };
         });
         if (prompt == null) return;
         var accepted = prompt.ShowDialog() == true;
@@ -170,7 +170,7 @@ public partial class GitWorkspaceWindow
             var messageDraft = ReadScopedCommitDraft(root, snapshot.Branch, remote);
             return new GitCommitWindow(snapshot, remote, _powerDetails!.LastCreatedBranch,
                 destinationBranch, messageDraft, GitCommitMode.FinishSync, $"{pending.Remote}/{pending.SourceBranch}",
-                _powerDetails.RecoveryMessage, agentSummaries, freezeDestination: true) { Owner = this };
+                _powerDetails.RecoveryMessage, agentSummaries, freezeDestination: true) { Owner = DialogOwner };
         });
         if (prompt == null) return;
         var accepted = prompt.ShowDialog() == true;
@@ -284,7 +284,7 @@ public partial class GitWorkspaceWindow
         var details = string.Join("\n\n", new[] { operationResult?.Message, SyncRecoverySummary }.Where(text => !string.IsNullOrWhiteSpace(text)));
         var pending = operationResult?.PendingSync ?? _powerDetails?.PendingSync;
         new GitConflictWindow(root, conflicts, details, pending?.DestinationBranch,
-            pending == null ? null : $"{pending.Remote}/{pending.SourceBranch}", pending?.SourceCommit) { Owner = this }.ShowDialog();
+            pending == null ? null : $"{pending.Remote}/{pending.SourceBranch}", pending?.SourceCommit) { Owner = DialogOwner }.ShowDialog();
     }
     private async void DismissSync_Click(object sender, RoutedEventArgs e)
     {

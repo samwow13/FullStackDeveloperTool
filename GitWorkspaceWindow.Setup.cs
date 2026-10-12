@@ -21,14 +21,16 @@ public partial class GitWorkspaceWindow
     private string _authenticationMessage = "Sign in or check your existing Git connection to continue.";
     private string _completionMessage = "";
 
-    public Visibility SetupVisibility => GitContentAvailable && _setupOpen ? Visibility.Visible : Visibility.Collapsed;
-    public Visibility WorkspaceVisibility => GitContentAvailable && !_setupOpen ? Visibility.Visible : Visibility.Collapsed;
+    public Visibility SetupVisibility => GitContentAvailable && _setupOpen && _setupWindow != null ? Visibility.Visible : Visibility.Collapsed;
+    public Visibility WorkspaceVisibility => GitContentAvailable && (!_setupOpen || _setupWindow != null && IsVisible)
+        ? Visibility.Visible : Visibility.Collapsed;
     public Visibility ConfigFolderVisibility => _configOpen ? Visibility.Visible : Visibility.Collapsed;
     public Visibility ConfigRemoteVisibility => _configOpen && Remotes.Count > 0 ? Visibility.Visible : Visibility.Collapsed;
     public Visibility ChoiceStepVisibility => StepVisibility(SetupStep.Choice);
     public Visibility CloneReviewStepVisibility => StepVisibility(SetupStep.CloneReview);
     public Visibility SetupBackVisibility => CanSetupBack || _busy && _setupStep != SetupStep.Choice ? Visibility.Visible : Visibility.Collapsed;
     public Visibility SetupContinueVisibility => _setupStep is SetupStep.Choice or SetupStep.Provider ? Visibility.Collapsed : Visibility.Visible;
+    public Visibility SetupNavigationVisibility => IsRepository || _setupStep != SetupStep.Choice ? Visibility.Visible : Visibility.Collapsed;
     public Visibility UseLocalVisibility => IsRepository ? Visibility.Visible : Visibility.Collapsed;
     public Visibility CreateOnlineVisibility => _setupRoute == SetupRoute.New ? Visibility.Visible : Visibility.Collapsed;
     private Visibility StepVisibility(SetupStep step) => _setupStep == step ? Visibility.Visible : Visibility.Collapsed;
@@ -170,13 +172,23 @@ public partial class GitWorkspaceWindow
         _setupOpen = true;
         _setupStep = step;
         Changed();
+        ScheduleSetupDialog();
+        FocusSetupStep();
+    }
+
+    internal void FocusSetupStep()
+    {
         Dispatcher.BeginInvoke(new Action(() =>
         {
             if (!_setupOpen || _busy || !GitContentAvailable) return;
             SetupScroll.ScrollToTop();
             if (_setupStep == SetupStep.Destination) RemoteUrl.Focus();
             else if (_setupStep == SetupStep.Local && CanInitialize) InitialBranch.Focus();
-            else if (_setupStep == SetupStep.Choice) ExistingRepositoryChoice.Focus();
+            else if (_setupStep == SetupStep.Choice)
+            {
+                if (IsRepository) ExistingRepositoryChoice.Focus();
+                else ConnectProjectChoice.Focus();
+            }
             else if (_setupStep == SetupStep.Provider) GitHubChoice.Focus();
             else if (_setupStep == SetupStep.Connections) ConnectionPicker.Focus();
             else if (_setupStep == SetupStep.Authentication) SetupSignIn.Focus();
@@ -196,6 +208,7 @@ public partial class GitWorkspaceWindow
         }
         if (HasSyncRecovery) { ShowLocalWorkspace(); return; }
         if (_remoteDraftDirty) { OpenSetup(_setupStep == SetupStep.Local ? SetupStep.Provider : _setupStep); return; }
+        if (!verifyConnection && !_configOpen) { ShowLocalWorkspace(); return; }
         if (SelectedRemote is not { } remote)
         {
             if (Remotes.Count > 0)
@@ -234,9 +247,7 @@ public partial class GitWorkspaceWindow
         OpenSetup(SetupStep.Authentication);
         if (await VerifySetupConnectionAsync(false, reuseStartupCheck: true) && remote.FetchUrl == remote.PushUrl)
         {
-            _setupOpen = false;
-            WorkspaceTabs.SelectedItem = WorkTab;
-            Changed();
+            ShowLocalWorkspace();
         }
     }
 
@@ -484,6 +495,8 @@ public partial class GitWorkspaceWindow
         WorkspaceTabs.SelectedItem = WorkTab;
         SetStatus(_remoteDraftDirty ? "Connection draft kept for this session. Choose Config to continue setup." : "Git workspace ready. Choose Config to manage connections.");
         Changed();
+        _openWorkspaceRequested = true;
+        _setupWindow?.Close();
         ScheduleMissingReleaseBranchPrompt();
     }
 }

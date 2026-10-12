@@ -16,7 +16,7 @@ public partial class GitWorkspaceWindow
             savedSource ?? _powerDetails?.SuggestedReleaseBranch, branch, GitReleaseBranchMode.VerifyLocalMerge,
             suggestReleaseBranch: savedSource is null, cachedDefaultBranch: _powerDetails?.CachedRemoteDefaultBranch,
             compare: (source, token, progress) => CompareLocalMergeFlowAsync(root, remote, branch, source, token, progress),
-            merge: (review, token, progress) => PrepareLocalMergeFlowAsync(root, remote, review, token, progress)) { Owner = this };
+            merge: (review, token, progress) => PrepareLocalMergeFlowAsync(root, remote, review, token, progress)) { Owner = DialogOwner };
         flow.ShowDialog();
         if (flow.UnconfirmedCommand is { } command) HoldUnconfirmedBranchCommand(command);
     }

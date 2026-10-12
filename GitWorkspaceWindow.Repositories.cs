@@ -56,6 +56,9 @@ public partial class GitWorkspaceWindow
             try
             {
                 Changed();
+                // Cached discovery can finish before the first window is loaded.
+                FolderPicker.GetBindingExpression(ItemsControl.ItemsSourceProperty)?.UpdateTarget();
+                RepositoryPicker.GetBindingExpression(ItemsControl.ItemsSourceProperty)?.UpdateTarget();
                 FolderPicker.SelectedItem = _selectingRepository ? null
                     : (preferred ?? RepositoryChoices.FirstOrDefault()) is { } repository
                         ? Folders.FirstOrDefault(folder => string.Equals(folder.Directory, repository.Directory, StringComparison.OrdinalIgnoreCase))

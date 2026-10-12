@@ -219,7 +219,8 @@
                 </Grid>
             </TabItem>
         </TabControl>
-        <Border Grid.Row="2" Style="{StaticResource Card}" Visibility="{Binding SetupVisibility}" Padding="22">
+        <Grid x:Name="GitDialogPanels" Grid.Row="2">
+        <Border Style="{StaticResource Card}" Visibility="{Binding SetupVisibility}" Padding="18" VerticalAlignment="Top">
             <Grid>
                 <Grid.RowDefinitions><RowDefinition Height="*"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
                 <ScrollViewer x:Name="SetupScroll" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled" IsEnabled="{Binding IsIdle}">
@@ -232,14 +233,30 @@
                             </StackPanel>
                             <StackPanel Grid.Column="2" Visibility="{Binding ConfigRemoteVisibility}" MinWidth="180"><Label Content="Active _remote" Target="{Binding ElementName=RemotePicker}" Padding="0,0,0,5"/><ComboBox x:Name="RemotePicker" ItemsSource="{Binding Remotes}" DisplayMemberPath="Name" SelectionChanged="Remote_Changed" IsEnabled="{Binding CanSelectRemote}" AutomationProperties.Name="Active Git remote in Config" ToolTip="Choose the active remote for this workspace. Connection setup drafts must be completed or canceled first."/></StackPanel>
                         </Grid>
-                        <StackPanel Margin="0,0,0,18">
+                        <StackPanel Margin="0,0,0,14">
                             <TextBlock Text="{Binding SetupProgress}" Foreground="{StaticResource AccentBrush}" FontWeight="SemiBold" Margin="0,0,0,5"/>
-                            <TextBlock Text="{Binding SetupTitle}" FontSize="23" FontWeight="SemiBold" TextWrapping="Wrap"/>
+                            <TextBlock Text="{Binding SetupTitle}" FontSize="19" FontWeight="SemiBold" TextWrapping="Wrap"/>
                             <TextBlock Text="{Binding SetupDescription}" Style="{StaticResource Hint}" Margin="0,7,0,0"/>
                         </StackPanel>
-                        <StackPanel Visibility="{Binding ChoiceStepVisibility}" MaxWidth="540" HorizontalAlignment="Left">
-                            <Button x:Name="ExistingRepositoryChoice" Content="Existing online repository" Click="ExistingRepository_Click" HorizontalContentAlignment="Left" Padding="18,16" FontSize="17" Margin="0,0,0,12"/>
-                            <Button Content="New repository" Click="NewRepository_Click" HorizontalContentAlignment="Left" Padding="18,16" FontSize="17"/>
+                        <StackPanel Visibility="{Binding ChoiceStepVisibility}">
+                            <Button x:Name="ConnectProjectChoice" Click="ConnectProject_Click" Visibility="{Binding ConnectProjectVisibility}" IsEnabled="{Binding CanConnectProject}" HorizontalContentAlignment="Stretch" Padding="14,11" Margin="0,0,0,8" AutomationProperties.Name="Connect to existing Git" ToolTip="Connect your current files to an empty repository, or copy this project into a subfolder of an existing repository.">
+                                <Grid><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+                                    <StackPanel><TextBlock Text="Connect to existing Git…" FontSize="14"/><TextBlock Text="Keep your current project files." Style="{StaticResource Hint}" FontWeight="Normal" FontSize="12" Margin="0,3,0,0"/></StackPanel>
+                                    <TextBlock Grid.Column="1" Text="›" FontSize="22" Foreground="{StaticResource MutedBrush}" VerticalAlignment="Center" Margin="14,0,0,0"/>
+                                </Grid>
+                            </Button>
+                            <Button x:Name="ExistingRepositoryChoice" Click="ExistingRepository_Click" HorizontalContentAlignment="Stretch" Padding="14,11" Margin="0,0,0,8" AutomationProperties.Name="{Binding ExistingRepositoryChoiceLabel}">
+                                <Grid><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+                                    <StackPanel><TextBlock Text="{Binding ExistingRepositoryChoiceLabel}" FontSize="14" TextWrapping="Wrap"/><TextBlock Text="{Binding ExistingRepositoryChoiceHint}" Style="{StaticResource Hint}" FontWeight="Normal" FontSize="12" Margin="0,3,0,0"/></StackPanel>
+                                    <TextBlock Grid.Column="1" Text="›" FontSize="22" Foreground="{StaticResource MutedBrush}" VerticalAlignment="Center" Margin="14,0,0,0"/>
+                                </Grid>
+                            </Button>
+                            <Button Click="NewRepository_Click" HorizontalContentAlignment="Stretch" Padding="14,11" AutomationProperties.Name="New repository">
+                                <Grid><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+                                    <StackPanel><TextBlock Text="New repository" FontSize="14"/><TextBlock Text="Start Git here, then choose an online connection." Style="{StaticResource Hint}" FontWeight="Normal" FontSize="12" Margin="0,3,0,0"/></StackPanel>
+                                    <TextBlock Grid.Column="1" Text="›" FontSize="22" Foreground="{StaticResource MutedBrush}" VerticalAlignment="Center" Margin="14,0,0,0"/>
+                                </Grid>
+                            </Button>
                         </StackPanel>
                         <StackPanel Visibility="{Binding LocalStepVisibility}" MaxWidth="540" HorizontalAlignment="Left">
                             <TextBlock Text="{Binding LocalSetupMessage}" TextWrapping="Wrap" Margin="0,0,0,14"/>
@@ -324,7 +341,7 @@
                         </StackPanel>
                     </StackPanel>
                 </ScrollViewer>
-                <Grid Grid.Row="1" Margin="0,18,0,0" IsEnabled="{Binding IsIdle}">
+                <Grid Grid.Row="1" Margin="0,16,0,0" IsEnabled="{Binding IsIdle}" Visibility="{Binding SetupNavigationVisibility}">
                     <Grid.ColumnDefinitions><ColumnDefinition Width="Auto"/><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
                     <Button Content="_Use local workspace" Click="LocalWorkspace_Click" IsEnabled="{Binding IsRepository}" Visibility="{Binding UseLocalVisibility}" Margin="0,0,12,0"/>
                     <Button Grid.Column="2" Content="_Back" Click="SetupBack_Click" IsEnabled="{Binding CanSetupBack}" Visibility="{Binding SetupBackVisibility}" Margin="0,0,8,0"/>
@@ -332,7 +349,7 @@
                 </Grid>
             </Grid>
         </Border>
-        <Border Grid.Row="2" Style="{StaticResource Card}" Padding="20" MaxWidth="460" HorizontalAlignment="Stretch" VerticalAlignment="Center" Visibility="{Binding RepositorySelectionVisibility}">
+        <Border Style="{StaticResource Card}" Padding="20" MaxWidth="460" HorizontalAlignment="Stretch" VerticalAlignment="Center" Visibility="{Binding RepositorySelectionVisibility}">
             <StackPanel>
                 <TextBlock Text="Select which repo" FontWeight="SemiBold" Margin="0,0,0,12"/>
                 <ComboBox x:Name="RepositoryPicker" ItemsSource="{Binding RepositoryChoices}" DisplayMemberPath="Display" SelectionChanged="RepositorySelection_Changed" IsEnabled="{Binding IsIdle}" ToolTip="{Binding SelectedItem.Detail, RelativeSource={RelativeSource Self}}" AutomationProperties.Name="Select which repository">
@@ -342,7 +359,7 @@
                 <Button Content="_Open repo" Click="OpenRepository_Click" IsEnabled="{Binding CanOpenSelectedRepository}" Style="{StaticResource PrimaryButton}" HorizontalAlignment="Right" Margin="0,14,0,0" AutomationProperties.Name="Open selected repository"/>
             </StackPanel>
         </Border>
-        <StackPanel Grid.Row="2" Visibility="{Binding GitLoadingVisibility}" HorizontalAlignment="Center" VerticalAlignment="Center" AutomationProperties.Name="{Binding GitLoadingText}" AutomationProperties.LiveSetting="Polite">
+        <StackPanel Visibility="{Binding GitLoadingVisibility}" HorizontalAlignment="Center" VerticalAlignment="Center" Margin="0,24" AutomationProperties.Name="{Binding GitLoadingText}" AutomationProperties.LiveSetting="Polite">
             <Grid Width="38" Height="38" Margin="0,0,0,14">
                 <Ellipse Stroke="#293B50" StrokeThickness="3"/>
                 <Path Stroke="{StaticResource AccentBrush}" StrokeThickness="3" StrokeStartLineCap="Round" StrokeEndLineCap="Round" Data="M 19,1.5 A 17.5,17.5 0 0 1 36.5,19" RenderTransformOrigin="0.5,0.5">
@@ -357,7 +374,7 @@
             </Grid>
             <TextBlock Text="{Binding GitLoadingText}" Foreground="{StaticResource MutedBrush}" HorizontalAlignment="Center"/>
         </StackPanel>
-        <StackPanel Grid.Row="2" Visibility="{Binding GitFailureVisibility}" HorizontalAlignment="Center" VerticalAlignment="Center" MaxWidth="600">
+        <StackPanel Visibility="{Binding GitFailureVisibility}" HorizontalAlignment="Center" VerticalAlignment="Center" MaxWidth="600" Margin="0,16">
             <TextBlock Text="Couldn't load Git" FontSize="23" FontWeight="SemiBold" TextAlignment="Center"/>
             <TextBlock Text="{Binding GitLoadFailure}" Style="{StaticResource Hint}" TextAlignment="Center" Margin="0,10,0,18"/>
             <Button Content="_Retry" Click="RetryGit_Click" IsEnabled="{Binding CanRetryGit}" Style="{StaticResource PrimaryButton}" HorizontalAlignment="Center" MinWidth="105" AutomationProperties.Name="Retry loading Git"/>
@@ -366,6 +383,7 @@
                 <Button Content="Trust this folder…" Click="TrustFolder_Click" IsEnabled="{Binding CanTrustFolder}" HorizontalAlignment="Center" Margin="0,12,0,0"/>
             </StackPanel>
         </StackPanel>
+        </Grid>
         <Grid Grid.Row="3" Margin="0,12,0,0"><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
             <StackPanel VerticalAlignment="Center" Margin="0,0,12,0">
                 <ScrollViewer VerticalScrollBarVisibility="Auto" MaxHeight="64" Visibility="{Binding GitStatusVisibility}"><TextBlock Text="{Binding StatusText}" TextWrapping="Wrap" Foreground="{StaticResource AccentBrush}" AutomationProperties.LiveSetting="Polite"/></ScrollViewer>

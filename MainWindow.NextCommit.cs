@@ -16,6 +16,7 @@ public partial class MainWindow
     private bool _nextCommitRefreshRequested;
     private bool _updatingNextCommitRepositories;
     private bool _markingNextCommitViewed;
+    private bool _nextCommitHasNoRepository;
     private int _nextCommitProjectGeneration;
     private string _nextCommitMessage = "";
     private string _nextCommitStatus = "Choose a project to preview its next commit.";
@@ -52,7 +53,9 @@ public partial class MainWindow
     public string NextCommitMessage => _nextCommitMessage;
     public CommitMessagePresentation NextCommitPresentation => _nextCommitPresentation;
     public string NextCommitStatus => _nextCommitStatus;
-    public bool HasNextCommitStatusNotice => _nextCommitStatus != NextCommitLiveStatus;
+    public bool HasNoNextCommitRepository => _nextCommitHasNoRepository;
+    public bool HasNextCommitGitContent => !HasNoNextCommitRepository;
+    public bool HasNextCommitStatusNotice => !HasNoNextCommitRepository && _nextCommitStatus != NextCommitLiveStatus;
     public string NextCommitDraftHint => _nextCommitDraftHint;
     public bool HasNextCommitDraftHint => _nextCommitDraftHint.Length > 0;
     public bool NextCommitOverLimit => _nextCommitMessage.Length > GitCommitMessage.MaximumLength;
@@ -109,6 +112,7 @@ public partial class MainWindow
     {
         NextCommitSettingsToggle.IsChecked = false;
         _nextCommitProjectGeneration++;
+        _nextCommitHasNoRepository = false;
         _dashboardGitScopePending = SelectedProject is { IsArchived: false };
         _nextCommitBatches.Clear();
         _nextCommitAcknowledgedIds.Clear();
@@ -173,6 +177,10 @@ public partial class MainWindow
                 result.Batch?.RemoteName ?? result.Repository.Connections.FirstOrDefault(connection => connection.IsActive)?.RemoteName,
                 repositoryNames[result.Repository.RepositoryRoot],
                 _nextCommitBatches[result.Repository.RepositoryId].Batch?.Entries.Count)).ToArray();
+            // Only successful folder inspection can confirm that Git is absent.
+            _nextCommitHasNoRepository = choices.Length == 0 && sharedProject.Error is null
+                && discovery.Warning is null && discovery.Folders.Length > 0
+                && discovery.Folders.All(folder => folder.State == nameof(GitBranchState.NotRepository));
             if (!NextCommitRepositories.SequenceEqual(choices))
             {
                 // Rebuilding picker items may temporarily clear selection. Keep the
@@ -192,9 +200,9 @@ public partial class MainWindow
             _nextCommitStatus = discovery.Warning is not null
                 ? "Some repository folders could not be checked. Open Git."
                 : choices.Length == 0
-                ? discovery.Folders.Any(folder => folder.State != nameof(GitBranchState.NotRepository))
-                    ? "Git information is unavailable. Open Git to review the configured folders."
-                    : "No Git repository in this project's configured folders. Open Git to set one up."
+                ? HasNoNextCommitRepository
+                    ? "No Git repository in this project's configured folders. Open Git to set one up."
+                    : "Git information is unavailable. Open Git to review the configured folders."
                 : NextCommitLiveStatus;
             PresentNextCommit();
         }
@@ -203,6 +211,7 @@ public partial class MainWindow
         {
             if (generation != _nextCommitProjectGeneration || !ReferenceEquals(project, SelectedProject) || _closeRequested || _closing || _closed) return;
             _dashboardGitScopePending = false;
+            _nextCommitHasNoRepository = false;
             _nextCommitBatches.Clear();
             _nextCommitUnviewedCount = 0;
             _nextCommitStatus = "Preview unavailable. Open Git to review the configured folders.";
@@ -257,7 +266,7 @@ public partial class MainWindow
         _nextCommitPresentation = CreateNextCommitPresentation(_nextCommitMessage, displayedBatch, includePlainLines);
         SynchronizeDashboardGitScope();
         UpdateNextCommitReminder();
-        foreach (var name in new[] { nameof(NextCommitMessage), nameof(NextCommitPresentation), nameof(NextCommitStatus), nameof(HasNextCommitStatusNotice), nameof(NextCommitDraftHint), nameof(HasNextCommitDraftHint),
+        foreach (var name in new[] { nameof(NextCommitMessage), nameof(NextCommitPresentation), nameof(NextCommitStatus), nameof(HasNoNextCommitRepository), nameof(HasNextCommitGitContent), nameof(HasNextCommitStatusNotice), nameof(NextCommitDraftHint), nameof(HasNextCommitDraftHint),
             nameof(NextCommitOverLimit), nameof(NextCommitCharacterCount),
             nameof(NextCommitLimitStatus), nameof(GitCommitButtonLabel) }) Changed(name);
     }

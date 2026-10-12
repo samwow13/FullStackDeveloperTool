@@ -18,7 +18,8 @@ public partial class GitWorkspaceWindow
     public bool AnimateGitLoading => IsGitLoading && SystemParameters.ClientAreaAnimation;
     public Visibility GitFailureVisibility => !IsGitLoading && _gitLoadFailed ? Visibility.Visible : Visibility.Collapsed;
     public Visibility GitHeaderActionsVisibility => GitContentAvailable ? Visibility.Visible : Visibility.Collapsed;
-    public Visibility BranchHeaderVisibility => GitContentAvailable && !_setupOpen && IsRepository ? Visibility.Visible : Visibility.Collapsed;
+    public Visibility BranchHeaderVisibility => GitContentAvailable && (!_setupOpen || _setupWindow != null && IsVisible) && IsRepository
+        ? Visibility.Visible : Visibility.Collapsed;
     public Visibility GitStatusVisibility => GitContentAvailable ? Visibility.Visible : Visibility.Collapsed;
     public Visibility GitErrorVisibility => !IsGitLoading && !string.IsNullOrEmpty(_latestErrorDetails) ? Visibility.Visible : Visibility.Collapsed;
     public string GitLoadFailure => _gitLoadFailure;

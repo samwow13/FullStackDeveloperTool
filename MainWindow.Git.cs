@@ -126,22 +126,39 @@ public partial class MainWindow
 
     private async Task OpenGitWorkspaceAsync(string? preferredRepositoryRoot)
     {
-        if (SelectedProjectItem is not { } project || IsEditing || _closeRequested || _closing) return;
+        if (SelectedProjectItem is not { } project || IsEditing || _savingProjectEdits || _closeRequested || _closing) return;
         try
         {
-            var folders = BranchFolders(project)
-                .GroupBy(folder => folder.Directory, StringComparer.OrdinalIgnoreCase)
-                .Select(group => new GitWorkspaceFolder(string.Join(" / ", group.Select(folder => folder.Label)), group.Key))
-                .ToArray();
-            var workspace = new GitWorkspaceWindow(project.Name, folders,
-                preferredRepositoryRoot: preferredRepositoryRoot, projectId: project.Profile.Id,
-                gitService: _projectGitService) { Owner = this };
-            workspace.ShowDialog();
-            await RefreshNextCommitAsync();
-            if (ReferenceEquals(SelectedProjectItem, project) && workspace.SelectedRepositoryRoot is { } root)
-                SelectedNextCommitRepository = NextCommitRepositories.FirstOrDefault(repository =>
-                    string.Equals(repository.RepositoryRoot, root, StringComparison.OrdinalIgnoreCase))
-                    ?? SelectedNextCommitRepository;
+            while (true)
+            {
+                var capturedProject = project;
+                var folders = BranchFolders(project)
+                    .GroupBy(folder => folder.Directory, StringComparer.OrdinalIgnoreCase)
+                    .Select(group => new GitWorkspaceFolder(string.Join(" / ", group.Select(folder => folder.Label)), group.Key))
+                    .ToArray();
+                var workspace = new GitWorkspaceWindow(project.Name, folders,
+                    preferredRepositoryRoot: preferredRepositoryRoot, projectId: project.Profile.Id,
+                    gitService: _projectGitService,
+                    prepareProjectConnect: request => PrepareGitProjectConnectAsync(capturedProject, request),
+                    applyProjectConnect: result => ApplyGitProjectConnectAsync(capturedProject, result)) { Owner = this };
+                await workspace.ShowGitDialogAsync(this);
+                await RefreshNextCommitAsync();
+                if (workspace.ConnectedProject is { } connected &&
+                    !SameGitConnectPath(connected.ProjectFolder, connected.SourceFolder) &&
+                    SelectedProjectItem is { } rebound && rebound.Profile.Id == project.Profile.Id &&
+                    SameGitConnectPath(_store.ResolveRoot(rebound.Profile), connected.ProjectFolder) &&
+                    !_closeRequested && !_closing && !_closed)
+                {
+                    project = rebound;
+                    preferredRepositoryRoot = connected.RepositoryRoot;
+                    continue;
+                }
+                if (ReferenceEquals(SelectedProjectItem, project) && workspace.SelectedRepositoryRoot is { } root)
+                    SelectedNextCommitRepository = NextCommitRepositories.FirstOrDefault(repository =>
+                        string.Equals(repository.RepositoryRoot, root, StringComparison.OrdinalIgnoreCase))
+                        ?? SelectedNextCommitRepository;
+                break;
+            }
         }
         catch (Exception)
         {

@@ -1,0 +1,72 @@
+<Window x:Class="FullStackLauncher.GitProjectConnectWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="Connect to existing Git" Width="740" Height="740" MinWidth="620" MinHeight="480"
+        Background="{StaticResource BackgroundBrush}" Foreground="{StaticResource TextBrush}"
+        FontFamily="Segoe UI" FontSize="13" UseLayoutRounding="True" Icon="/Assets/launcher.ico"
+        WindowStartupLocation="CenterOwner" Closing="Window_Closing">
+    <Window.Resources>
+        <Style TargetType="Label"><Setter Property="Foreground" Value="{StaticResource MutedBrush}"/><Setter Property="Padding" Value="0,12,0,5"/></Style>
+        <Style TargetType="RadioButton"><Setter Property="Foreground" Value="{StaticResource TextBrush}"/></Style>
+        <Style x:Key="Hint" TargetType="TextBlock"><Setter Property="Foreground" Value="{StaticResource MutedBrush}"/><Setter Property="TextWrapping" Value="Wrap"/></Style>
+    </Window.Resources>
+    <Grid Margin="22">
+        <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="*"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
+        <StackPanel Margin="0,0,0,16">
+            <TextBlock Text="Connect to existing Git" FontSize="24" FontWeight="SemiBold"/>
+            <TextBlock Text="{Binding SourceFolder}" Style="{StaticResource Hint}" Margin="0,7,0,0"/>
+        </StackPanel>
+        <ScrollViewer x:Name="ContentScroll" Grid.Row="1" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
+            <Grid Margin="0,0,8,0">
+                <StackPanel Visibility="{Binding FormVisibility}" IsEnabled="{Binding CanEdit}">
+                    <TextBlock Text="Where should this project go?" FontWeight="SemiBold" Margin="0,0,0,10"/>
+                    <RadioButton x:Name="EmptyMode" GroupName="DestinationMode" Content="Use an empty remote — keep this project here" IsChecked="True" Checked="Mode_Changed" Margin="0,0,0,6"/>
+                    <TextBlock Text="Connect the current folder to the new repository URL and choose its first branch." Style="{StaticResource Hint}" Margin="23,0,0,13"/>
+                    <RadioButton x:Name="CopyMode" GroupName="DestinationMode" Content="Add this project to an existing repository" Checked="Mode_Changed"/>
+                    <TextBlock Text="Clone into a new local folder, add this project in a new subfolder, and use the copied project in Launcher." Style="{StaticResource Hint}" Margin="23,6,0,12"/>
+                    <Label Content="_Provider" Target="{Binding ElementName=ProviderPicker}"/>
+                    <ComboBox x:Name="ProviderPicker" SelectedIndex="0" SelectionChanged="Draft_Changed" AutomationProperties.Name="Repository provider">
+                        <ComboBoxItem Content="GitHub"/><ComboBoxItem Content="Azure DevOps"/>
+                    </ComboBox>
+                    <Label Content="Repository clone _URL" Target="{Binding ElementName=CloneUrl}"/>
+                    <TextBox x:Name="CloneUrl" MaxLength="2048" TextChanged="Draft_Changed" HorizontalScrollBarVisibility="Auto" AutomationProperties.Name="Repository clone URL"/>
+                    <TextBlock Text="Paste an HTTPS or SSH clone URL. Git handles sign-in; do not include a password or token." Style="{StaticResource Hint}" FontSize="12" Margin="0,6,0,0"/>
+                    <StackPanel Visibility="{Binding EmptyVisibility}">
+                        <Label Content="First _branch" Target="{Binding ElementName=InitialBranch}"/>
+                        <TextBox x:Name="InitialBranch" Text="main" MaxLength="240" TextChanged="Draft_Changed" AutomationProperties.Name="First branch"/>
+                    </StackPanel>
+                    <StackPanel Visibility="{Binding CopyVisibility}">
+                        <Label Content="New local _clone folder" Target="{Binding ElementName=DestinationFolder}"/>
+                        <DockPanel><Button Content="Browse…" Click="Browse_Click" DockPanel.Dock="Right" Margin="8,0,0,0"/><TextBox x:Name="DestinationFolder" MaxLength="1024" TextChanged="Draft_Changed" HorizontalScrollBarVisibility="Auto" AutomationProperties.Name="New local clone folder"/></DockPanel>
+                        <Label Content="Project _subfolder inside the repository" Target="{Binding ElementName=RepositorySubfolder}"/>
+                        <TextBox x:Name="RepositorySubfolder" MaxLength="512" TextChanged="Draft_Changed" AutomationProperties.Name="Project subfolder inside repository"/>
+                        <TextBlock Text="For example: Tools/MyProject inside Utilities. Choose a new folder; existing files are never replaced." Style="{StaticResource Hint}" FontSize="12" Margin="0,6,0,0"/>
+                        <Label Content="Starting branch (optional)" Target="{Binding ElementName=StartingBranch}"/>
+                        <TextBox x:Name="StartingBranch" MaxLength="240" TextChanged="Draft_Changed" AutomationProperties.Name="Starting branch, blank uses remote default"/>
+                        <TextBlock Text="Leave blank to use the repository's default branch." Style="{StaticResource Hint}" FontSize="12" Margin="0,6,0,0"/>
+                        <Label Content="New working branch (optional)" Target="{Binding ElementName=FeatureBranch}"/>
+                        <TextBox x:Name="FeatureBranch" MaxLength="240" TextChanged="Draft_Changed" AutomationProperties.Name="New working branch"/>
+                    </StackPanel>
+                </StackPanel>
+                <StackPanel Visibility="{Binding ReviewVisibility}">
+                    <TextBlock Text="Review connection" FontSize="19" FontWeight="SemiBold" Margin="0,0,0,12"/>
+                    <TextBox Text="{Binding ReviewText, Mode=OneWay}" IsReadOnly="True" TextWrapping="Wrap" BorderThickness="0" Background="Transparent" AutomationProperties.Name="Reviewed Git connection"/>
+                    <Expander Header="{Binding ExclusionsLabel}" Visibility="{Binding ExclusionsVisibility}" Margin="0,14,0,0">
+                        <TextBox Text="{Binding ExclusionsText, Mode=OneWay}" IsReadOnly="True" TextWrapping="Wrap" MaxHeight="180" VerticalScrollBarVisibility="Auto" Margin="0,8,0,0" AutomationProperties.Name="Files excluded from project copy"/>
+                    </Expander>
+                </StackPanel>
+            </Grid>
+        </ScrollViewer>
+        <StackPanel Grid.Row="2" Margin="0,16,0,0">
+            <ProgressBar Height="3" IsIndeterminate="{Binding IsBusy}" Visibility="{Binding BusyVisibility}" Margin="0,0,0,10"/>
+            <TextBox Text="{Binding Status, Mode=OneWay}" IsReadOnly="True" TextWrapping="Wrap" MaxHeight="120" VerticalScrollBarVisibility="Auto" BorderThickness="0" Background="Transparent" Foreground="{StaticResource AccentBrush}" AutomationProperties.LiveSetting="Polite" Margin="0,0,0,10"/>
+            <WrapPanel HorizontalAlignment="Right">
+                <Button Content="Back" Click="Back_Click" Visibility="{Binding BackVisibility}" IsEnabled="{Binding CanEdit}" Margin="0,0,8,0"/>
+                <Button Content="Cancel operation" Click="Cancel_Click" Visibility="{Binding BusyVisibility}" Margin="0,0,8,0"/>
+                <Button Content="Check Git exit" Click="CheckExit_Click" Visibility="{Binding ExitCheckVisibility}" IsEnabled="{Binding CanCheckExit}" Margin="0,0,8,0"/>
+                <Button Content="{Binding NextLabel}" Click="Next_Click" IsEnabled="{Binding CanContinue}" Visibility="{Binding NextVisibility}" Style="{StaticResource PrimaryButton}" Margin="0,0,8,0"/>
+                <Button Content="{Binding CloseLabel}" Click="Close_Click" IsEnabled="{Binding CanClose}"/>
+            </WrapPanel>
+        </StackPanel>
+    </Grid>
+</Window>
