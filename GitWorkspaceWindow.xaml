@@ -89,6 +89,9 @@
                     <Button Content="Switch branch" Click="SwitchBranch_Click" IsEnabled="{Binding CanSwitchNamedBranch}" Style="{StaticResource Action}" ToolTip="{Binding BranchActionText}"/>
                     <Button Content="Create branch" Click="CreateBranch_Click" IsEnabled="{Binding CanCreateNamedBranch}" Style="{StaticResource Action}" ToolTip="{Binding BranchActionText}"/>
                 </WrapPanel>
+                <TextBlock Text="{Binding ActiveConnectionLabel}" ToolTip="{Binding ActiveConnectionDetail}"
+                           Foreground="{Binding ActiveConnectionColor}" FontSize="12" Margin="0,7,0,0"
+                           TextTrimming="CharacterEllipsis" AutomationProperties.Name="{Binding ActiveConnectionLabel}"/>
                 <TextBlock Text="{Binding OperationLabel}" Foreground="#FFBC8B" TextWrapping="Wrap" Margin="0,6,0,0">
                     <TextBlock.Style><Style TargetType="TextBlock"><Style.Triggers><DataTrigger Binding="{Binding OperationLabel}" Value=""><Setter Property="Visibility" Value="Collapsed"/></DataTrigger></Style.Triggers></Style></TextBlock.Style>
                 </TextBlock>
@@ -228,7 +231,7 @@
                         <Grid Margin="0,0,0,20" Visibility="{Binding ConfigFolderVisibility}"><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="14"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
                             <StackPanel><Label Content="_Repo / folder" Target="{Binding ElementName=FolderPicker}" Padding="0,0,0,5"/>
                                 <ComboBox x:Name="FolderPicker" ItemsSource="{Binding Folders}" DisplayMemberPath="Label" SelectionChanged="Folder_Changed" ToolTip="{Binding SelectedItem.Directory, RelativeSource={RelativeSource Self}}" AutomationProperties.Name="Repository or setup folder in Git Config">
-                                    <ComboBox.ItemContainerStyle><Style TargetType="ComboBoxItem"><Setter Property="ToolTip" Value="{Binding Directory}"/></Style></ComboBox.ItemContainerStyle>
+                                    <ComboBox.ItemContainerStyle><Style TargetType="ComboBoxItem" BasedOn="{StaticResource {x:Type ComboBoxItem}}"><Setter Property="ToolTip" Value="{Binding Directory}"/></Style></ComboBox.ItemContainerStyle>
                                 </ComboBox>
                             </StackPanel>
                             <StackPanel Grid.Column="2" Visibility="{Binding ConfigRemoteVisibility}" MinWidth="180"><Label Content="Active _remote" Target="{Binding ElementName=RemotePicker}" Padding="0,0,0,5"/><ComboBox x:Name="RemotePicker" ItemsSource="{Binding Remotes}" DisplayMemberPath="Name" SelectionChanged="Remote_Changed" IsEnabled="{Binding CanSelectRemote}" AutomationProperties.Name="Active Git remote in Config" ToolTip="Choose the active remote for this workspace. Connection setup drafts must be completed or canceled first."/></StackPanel>
@@ -353,7 +356,7 @@
             <StackPanel>
                 <TextBlock Text="Select which repo" FontWeight="SemiBold" Margin="0,0,0,12"/>
                 <ComboBox x:Name="RepositoryPicker" ItemsSource="{Binding RepositoryChoices}" DisplayMemberPath="Display" SelectionChanged="RepositorySelection_Changed" IsEnabled="{Binding IsIdle}" ToolTip="{Binding SelectedItem.Detail, RelativeSource={RelativeSource Self}}" AutomationProperties.Name="Select which repository">
-                    <ComboBox.ItemContainerStyle><Style TargetType="ComboBoxItem"><Setter Property="ToolTip" Value="{Binding Detail}"/></Style></ComboBox.ItemContainerStyle>
+                    <ComboBox.ItemContainerStyle><Style TargetType="ComboBoxItem" BasedOn="{StaticResource {x:Type ComboBoxItem}}"><Setter Property="ToolTip" Value="{Binding Detail}"/></Style></ComboBox.ItemContainerStyle>
                 </ComboBox>
                 <TextBlock Text="Some folders could not be checked." Style="{StaticResource Hint}" Visibility="{Binding RepositoryDiscoveryWarningVisibility}" ToolTip="{Binding RepositoryDiscoveryWarning}" FontSize="12" Margin="0,8,0,0"/>
                 <Button Content="_Open repo" Click="OpenRepository_Click" IsEnabled="{Binding CanOpenSelectedRepository}" Style="{StaticResource PrimaryButton}" HorizontalAlignment="Right" Margin="0,14,0,0" AutomationProperties.Name="Open selected repository"/>

@@ -123,7 +123,7 @@ public sealed class CodexConnectionViewModel : INotifyPropertyChanged, IDisposab
         _discoveryCancellation = discovery;
         try
         {
-            var models = await new CodexModelCatalog().LoadAsync(discovery.Token);
+            var models = await new CodexModelCatalog().LoadAsync(Folder, discovery.Token);
             Models.Clear();
             foreach (var model in models) Models.Add(model);
             // Preserve an explicit choice on refresh, otherwise use the advertised default.

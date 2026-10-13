@@ -48,6 +48,7 @@ public partial class NewProjectWindow : Window, IDashboardReplacementWindow
     public NewProjectWindow(string settingsDirectory, IReadOnlyList<ProjectProfile> savedProjects,
         string? existingWorkspaceFolder = null)
     {
+        FullStackLauncher.Services.WindowTheme.Attach(this);
         InitializeComponent();
         MaxHeight = Math.Max(MinHeight, SystemParameters.WorkArea.Height - 32);
         _settingsDirectory = Path.GetFullPath(settingsDirectory);

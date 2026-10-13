@@ -20,6 +20,7 @@ public partial class GitBranchHistoryWindow : Window, INotifyPropertyChanged, ID
 
     public GitBranchHistoryWindow(GitBranchComparison comparison)
     {
+        FullStackLauncher.Services.WindowTheme.Attach(this);
         _comparison = comparison;
         InitializeComponent();
         MembershipColumn.Visibility = comparison.SelectedBranchOnly ? Visibility.Collapsed : Visibility.Visible;

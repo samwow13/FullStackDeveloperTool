@@ -33,6 +33,8 @@
 **/*.codex-agent-prompts.json*
 **/codex-agent-chats/
 **/*.codex-agent-chats/
+**/codex-agent-waiting/
+**/*.codex-agent-waiting/
 **/codex-agent-keep-awake/
 **/*.codex-agent-keep-awake/
 **/project-tasks.json*

@@ -62,7 +62,7 @@ public static class PostPushLink
             if (!target.IsSsh)
             {
                 var uri = new Uri(target.CloneUrl);
-                if (uri.Host.EndsWith(".visualstudio.com", StringComparison.OrdinalIgnoreCase)) return Validate(target.CloneUrl);
+                if (!target.IsHosted || uri.Host.EndsWith(".visualstudio.com", StringComparison.OrdinalIgnoreCase)) return Validate(target.CloneUrl);
                 var parts = uri.AbsolutePath.Trim('/').Split('/');
                 return Validate($"https://{target.Organization}.visualstudio.com/{parts[1]}/_git/{parts[3]}");
             }

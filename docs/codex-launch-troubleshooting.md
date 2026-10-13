@@ -8,7 +8,19 @@ Older Launcher diagnostics replace an unclassified RPC error with advice to open
 
 The reported work-machine failure was not reproduced on this machine. Its installed `codex-cli 0.162.0-alpha.2` accepts the project-scoped configuration lookup with both stable and experimental initialization. This does not establish compatibility or configuration health on the work machine.
 
-Possible machine differences include an older native executable found first on `PATH`, different user/project/managed configuration, and an already-saved access preference on the working machine that bypasses default discovery. These are investigation leads, not confirmed causes. Launcher honors `PATH` ordering for native executables and recognized official npm installations, then checks the desktop native installation. It resolves npm's bundled native executable without parsing or executing the shell shim.
+Possible machine differences include an older native executable on `PATH`, different user/project/managed configuration, and an already-saved access preference on the working machine that bypasses default discovery. These are investigation leads, not confirmed causes. Launcher prefers the runnable native CLI extracted by desktop Codex before `PATH` and recognized official npm installations. It resolves npm's bundled native executable without parsing or executing the shell shim.
+
+## Older models in the picker
+
+The picker requests `model/list` from the selected native Codex installation; it does not match a Codex release number or maintain a model-name whitelist. An older standalone CLI can return an older catalog even when the desktop app offers newer models. Discovery prefers the native runtime launched by the official desktop app, then its extracted native CLI locations, before the existing PATH/npm fallback. Executable discovery and startup run off the WPF dispatcher.
+
+Do not launch the packaged `WindowsApps\...\app\resources\codex.exe` directly. On this machine it is readable and byte-identical to the extracted CLI, but starting it outside the package fails with Windows error 5. Codex's running native runtime under `%LOCALAPPDATA%\OpenAI\Codex\bin` starts normally. The corrected resolver uses the runnable runtime without copying packaged binaries, changing permissions, elevating, or altering Codex configuration.
+
+On October 13, 2026, a manual read-only call through the rebuilt Launcher's production executable resolver, access lookup, and model catalog selected the desktop's extracted native CLI, loaded Full Access, and returned seven visible models including `gpt-6.1-sol`, `gpt-6-astra`, and `gpt-6-sol`. This exercised the startup code that failed before discovery, without creating a thread or submitting a prompt. Native dropdown interaction and the work-machine catalog remain unverified; automated tests remain deferred.
+
+Start Agent discovers models in its project folder. Notes & queue and the connection window use the saved assigned folder. This keeps ordinary picker discovery aligned with the project configuration used when submitting work. The shared Notes & queue catalog still uses the assigned folder when Automatic Loop Mode selects a different subfolder; the actual loop folder's model and effort are revalidated before dispatch.
+
+Refresh reads Codex's returned picker-visible models, wire names, defaults, and supported thinking levels without hardcoding model generations. Saved selections remain intact when a model becomes unavailable. The list depends on the selected Codex client, account, provider, and its catalog/cache; discovery alone does not prove a successful model turn or work-machine access. Launcher does not inspect credential files, alter Codex configuration, or connect to the existing desktop daemon. See the [official model discovery protocol](https://learn.chatgpt.com/docs/app-server#list-models-modellist).
 
 ## CLI compatibility
 

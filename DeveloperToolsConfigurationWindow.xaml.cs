@@ -27,6 +27,7 @@ public partial class DeveloperToolsConfigurationWindow : Window
 
     public DeveloperToolsConfigurationWindow(IEnumerable<DeveloperTool> tools, string settingsDirectory, IReadOnlyList<DeveloperTool>? savedTools = null)
     {
+        FullStackLauncher.Services.WindowTheme.Attach(this);
         InitializeComponent();
         _settingsDirectory = Path.GetFullPath(settingsDirectory);
         Result = tools.Select(Clone).ToList();
@@ -225,6 +226,7 @@ public partial class DeveloperToolsConfigurationWindow : Window
             MaxHeight = SystemParameters.WorkArea.Height, WindowStartupLocation = WindowStartupLocation.CenterOwner,
             ShowInTaskbar = false, Background = (Brush)FindResource("BackgroundBrush"), Foreground = (Brush)FindResource("TextBrush")
         };
+        FullStackLauncher.Services.WindowTheme.Attach(dialog);
         var grid = new Grid { Margin = new Thickness(20) };
         grid.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
         grid.RowDefinitions.Add(new RowDefinition { Height = new GridLength(1, GridUnitType.Star) });

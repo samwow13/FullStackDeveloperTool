@@ -13,19 +13,20 @@ public partial class MainWindow
     private async Task<object> RegisterAgentProjectAsync(AgentBridgeRequest request, CancellationToken token)
     {
         var project = RequireProject(request.ProjectId);
+        string? chatId = null;
         if (request.ChatId is { } suppliedChatId)
         {
             var owner = (request.Owner ?? "").Trim();
             if (owner.Length > 80 || owner.Any(char.IsControl) || SensitiveDataProtection.ContainsLiteralCredential(owner))
                 throw new ArgumentException("Owner or purpose must be short text without controls or credentials.");
             if (owner.Length == 0) throw new ArgumentException("Give this agent session a short owner label.");
-            var chatId = CodexActivityProjectStore.CanonicalChatId(suppliedChatId);
+            chatId = CodexActivityProjectStore.CanonicalChatId(suppliedChatId);
             await Task.Run(() => _agentChatProjects.Save(chatId, project.Id, token), token);
             token.ThrowIfCancellationRequested();
             RequireProject(project.Id);
         }
         // Display ownership is durable; receiving replies still requires explicit inbox binding.
-        return _agentCoordination.Register(project.Id, request.Owner ?? "");
+        return _agentCoordination.Register(project.Id, request.Owner ?? "", chatId);
     }
 
     private async Task<object> BindAgentReplyInboxAsync(AgentBridgeRequest request, CancellationToken token)

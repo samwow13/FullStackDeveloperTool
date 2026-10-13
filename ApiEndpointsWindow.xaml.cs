@@ -26,6 +26,7 @@ public partial class ApiEndpointsWindow : Window
 
     public ApiEndpointsWindow(string projectName, string serviceName, string workingDirectory, string? sourceDirectory = null)
     {
+        FullStackLauncher.Services.WindowTheme.Attach(this);
         WorkingDirectory = workingDirectory;
         _sourceDirectory = sourceDirectory;
         InitializeComponent();

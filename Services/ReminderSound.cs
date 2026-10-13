@@ -1,48 +1,10 @@
 using System.IO;
-using System.Media;
 
 namespace FullStackLauncher.Services;
 
-/// <summary>A dashboard-owned chime, initialized only when playback is explicitly requested.</summary>
-internal sealed class ReminderSound : IDisposable
+/// <summary>Creates the completion notification chime for the independent Codex monitor.</summary>
+internal static class ReminderSound
 {
-    private MemoryStream? _stream;
-    private SoundPlayer? _player;
-    private bool _disposed;
-
-    public bool Play()
-    {
-        if (_disposed) return false;
-        try
-        {
-            _stream ??= new MemoryStream(CreateChime());
-            _player ??= new SoundPlayer(_stream);
-            _player.Play();
-            return true;
-        }
-        catch { return false; }
-    }
-
-    public void Stop()
-    {
-        try { _player?.Stop(); }
-        catch { }
-    }
-
-    public void Dispose()
-    {
-        if (_disposed) return;
-        _disposed = true;
-        Stop();
-        try { _player?.Dispose(); }
-        finally
-        {
-            _player = null;
-            _stream?.Dispose();
-            _stream = null;
-        }
-    }
-
     public static byte[] CreateChime()
     {
         const int rate = 22050;

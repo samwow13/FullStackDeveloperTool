@@ -42,7 +42,7 @@ public partial class MainWindow
                 continue;
             }
 
-            if (windows.All(IsReplacementWindowReady) && !_checkingStartupServices && !_savingProjectEdits &&
+            if (windows.All(IsReplacementWindowReady) && !_releasingWaitingAgents && !_checkingStartupServices && !_savingProjectEdits &&
                 !_addingProjectService && !_batchBusy && !_forceStopBatchBusy && !_resettingCodex && !_restartingMonitor &&
                 !_runners.Values.SelectMany(project => project).Any(service => service.IsBusy || service.IsStopping))
                 return true;

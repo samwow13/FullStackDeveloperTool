@@ -21,6 +21,9 @@ public partial class CodexStartAgentWindow
     {
         public string Id => Attachment.Id;
         public string Caption => Attachment.Caption;
+        public string ContextSummary => Attachment.BrowserContext is { } context
+            ? context.IncludePageContext ? "Screenshot + page context" : "Screenshot · source excluded"
+            : string.IsNullOrWhiteSpace(Attachment.Caption) ? "Image" : Attachment.Caption;
     }
 
     private void InitializeMessageImages(IReadOnlyList<CodexAgentChatImage>? images)
@@ -176,49 +179,11 @@ public partial class CodexStartAgentWindow
         return source;
     }
 
-    private static CodexAgentChatImage EncodeMessageImage(BitmapSource source)
-    {
-        var scale = Math.Min(1.0, 2560.0 / Math.Max(source.PixelWidth, source.PixelHeight));
-        if (scale < 1)
-        {
-            source = new TransformedBitmap(source, new ScaleTransform(scale, scale));
-            source.Freeze();
-        }
-        using var output = new MemoryStream();
-        var png = new PngBitmapEncoder();
-        png.Frames.Add(BitmapFrame.Create(source));
-        png.Save(output);
-        var mimeType = "image/png";
-        if (output.Length > CodexAgentChatImage.MaximumBytes)
-        {
-            output.SetLength(0);
-            output.Position = 0;
-            var jpeg = new JpegBitmapEncoder { QualityLevel = 90 };
-            jpeg.Frames.Add(BitmapFrame.Create(source));
-            jpeg.Save(output);
-            mimeType = "image/jpeg";
-        }
-        if (output.Length == 0 || output.Length > CodexAgentChatImage.MaximumBytes)
-            throw new ArgumentException("Clipboard image exceeds the attachment limit.");
-        return new CodexAgentChatImage
-        {
-            Caption = "Pasted image", MimeType = mimeType, DataBase64 = Convert.ToBase64String(output.ToArray())
-        };
-    }
+    private static CodexAgentChatImage EncodeMessageImage(BitmapSource source) =>
+        CodexAgentImageStaging.EncodeBitmap(source, "Pasted image");
 
-    private static BitmapSource MakePreview(CodexAgentChatImage image)
-    {
-        using var input = new MemoryStream(Convert.FromBase64String(image.DataBase64), writable: false);
-        var preview = new BitmapImage();
-        preview.BeginInit();
-        preview.CacheOption = BitmapCacheOption.OnLoad;
-        preview.CreateOptions = BitmapCreateOptions.IgnoreColorProfile;
-        preview.DecodePixelWidth = 192;
-        preview.StreamSource = input;
-        preview.EndInit();
-        preview.Freeze();
-        return preview;
-    }
+    private static BitmapSource MakePreview(CodexAgentChatImage image) =>
+        CodexAgentImageStaging.CreatePreview(image);
 
     private void RemoveMessageImage_Click(object sender, RoutedEventArgs e)
     {
@@ -228,5 +193,29 @@ public partial class CodexStartAgentWindow
         _messageImages.Remove(image);
         UpdateMessageImages();
         PromptBox.Focus();
+    }
+
+    private void ReviewMessageImage_Click(object sender, RoutedEventArgs e)
+    {
+        if (_closed || IsSubmitting || _receivingContextGathererDraft || _pastingImage ||
+            sender is not Button { Tag: string id }) return;
+        var item = _messageImages.FirstOrDefault(image => image.Id == id);
+        if (item is null) return;
+        try
+        {
+            var review = new AgentImageReviewWindow(item.Attachment, CanPasteMessageImage) { Owner = this };
+            if (review.ShowDialog() != true || !CanPasteMessageImage || item.Attachment.BrowserContext is not { } context) return;
+            var index = _messageImages.IndexOf(item);
+            if (index < 0 || context.IncludePageContext == review.IncludePageContext) return;
+            _messageImages[index] = item with
+            {
+                Attachment = item.Attachment with { BrowserContext = context with { IncludePageContext = review.IncludePageContext } }
+            };
+            UpdateMessageImages();
+        }
+        catch (Exception)
+        {
+            ShowStatus("The image could not open. Your message and attachments are kept.", error: true);
+        }
     }
 }

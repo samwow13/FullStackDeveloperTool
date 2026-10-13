@@ -15,10 +15,21 @@ public sealed class CodexAgentChatClient
     {
         cancellationToken.ThrowIfCancellationRequested();
         var receipt = await Task.Run(() => _store.Prepare(request), cancellationToken).ConfigureAwait(false);
+        return await StartPreparedAsync(receipt.AttemptId, cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>Releases one prepared identity once. Repeated calls only inspect its receipt.</summary>
+    public async Task<CodexAgentChatReceipt> StartPreparedAsync(string attemptId,
+        CancellationToken cancellationToken = default)
+    {
+        var receipt = _store.Read(attemptId);
         // Once preparation succeeds, always return its identity even if launch or
         // observation fails. The caller must not lose an uncertain submission.
         try
         {
+            cancellationToken.ThrowIfCancellationRequested();
+            if (!await Task.Run(() => _store.RecordDispatchIntent(attemptId), cancellationToken).ConfigureAwait(false))
+                return ReadReceipt(attemptId);
             var args = new List<string> { "--codex-agent-chat", receipt.AttemptId };
             if (CodexAgentStorage.SettingsOverride() is { } settings)
                 args.AddRange(["--settings", settings]);

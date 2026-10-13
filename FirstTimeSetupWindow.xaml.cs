@@ -16,6 +16,7 @@ public partial class FirstTimeSetupWindow : Window, IDashboardReplacementWindow
 
     internal FirstTimeSetupWindow(FirstTimeSetupContent content)
     {
+        FullStackLauncher.Services.WindowTheme.Attach(this);
         _content = content;
         InitializeComponent();
         Height = Math.Min(Height, SystemParameters.WorkArea.Height);

@@ -9,6 +9,7 @@ public partial class GitSetupWindow : Window, IDashboardReplacementWindow
 
     internal GitSetupWindow(GitWorkspaceWindow workflow, FrameworkElement content)
     {
+        FullStackLauncher.Services.WindowTheme.Attach(this);
         _workflow = workflow;
         InitializeComponent();
         Resources.MergedDictionaries.Add(workflow.Resources);

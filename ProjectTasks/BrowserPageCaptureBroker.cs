@@ -30,7 +30,7 @@ internal sealed record BrowserLoginFillResult(bool Filled, string Status);
 /// Receives live page source from the separately installed browser extension.
 /// The extension proves it knows this Windows user's pairing code before reading a page.
 /// </summary>
-internal static class BrowserPageCaptureBroker
+internal static partial class BrowserPageCaptureBroker
 {
     private const int Port = 47873;
     private const int MaximumHtmlChars = 200_000;
@@ -527,6 +527,13 @@ internal static class BrowserPageCaptureBroker
                 lock (Gate) { Connections.Add(connection); _connectionRevision++; _siteOpenCancellation?.Cancel(); }
                 try
                 {
+                    await connection.SendAsync(new { type = "authenticated" }, handshakeTimeout.Token);
+                    lock (Gate)
+                    {
+                        connection.MarkAuthenticated();
+                        _connectionRevision++;
+                        _siteOpenCancellation?.Cancel();
+                    }
                     while (socket.State == WebSocketState.Open)
                     {
                         using var message = await ReceiveJsonAsync(socket, CancellationToken.None);
@@ -596,19 +603,18 @@ internal static class BrowserPageCaptureBroker
     {
         using var output = new MemoryStream();
         var buffer = new byte[16_384];
-        while (output.Length <= 2_000_000)
+        while (true)
         {
             var received = await socket.ReceiveAsync(new ArraySegment<byte>(buffer), cancellationToken);
             if (received.MessageType == WebSocketMessageType.Close) return null;
             if (received.MessageType != WebSocketMessageType.Text) return null;
+            if (output.Length + received.Count > 2_000_000) return null;
             output.Write(buffer, 0, received.Count);
             if (received.EndOfMessage)
             {
-                if (output.Length > 2_000_000) return null;
                 return JsonDocument.Parse(output.ToArray(), new JsonDocumentOptions { MaxDepth = 12 });
             }
         }
-        return null;
     }
 
     private static async Task SendJsonAsync(WebSocket socket, object value, CancellationToken cancellationToken)
@@ -649,9 +655,11 @@ internal static class BrowserPageCaptureBroker
     private sealed record SiteResponse(string State, int WindowCount, long Revision);
     private sealed record LoginResponse(string State);
 
-    private sealed class BrowserConnection(string browser, WebSocket socket, bool supportsSiteOpening, bool supportsLoginFilling)
+    private sealed class BrowserConnection(string browser, WebSocket socket, bool supportsSiteOpening,
+        bool supportsLoginFilling)
     {
         private readonly SemaphoreSlim _sendGate = new(1, 1);
+        private int _authenticated;
         private readonly object _siteGate = new();
         private string? _requestId;
         private string? _expectedTitle;
@@ -665,7 +673,8 @@ internal static class BrowserPageCaptureBroker
         private TaskCompletionSource<LoginResponse>? _loginPending;
 
         public string Browser { get; } = browser;
-        public bool IsOpen => socket.State == WebSocketState.Open;
+        public bool IsOpen => Volatile.Read(ref _authenticated) == 1 && socket.State == WebSocketState.Open;
+        public void MarkAuthenticated() => Volatile.Write(ref _authenticated, 1);
         public bool SupportsSiteOpening { get; } = supportsSiteOpening;
         public bool SupportsLoginFilling { get; } = supportsLoginFilling;
         public long SiteRevision => Interlocked.Read(ref _siteRevision);

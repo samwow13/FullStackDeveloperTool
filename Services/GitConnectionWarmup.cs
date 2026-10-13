@@ -74,18 +74,18 @@ public static class GitConnectionWarmup
         }
     }
 
-    internal static void InvalidateAzureOrganization(string organization)
+    internal static void InvalidateAzureTokenScope(string scope)
     {
         static bool Matches(ConnectionKey key, string expected)
         {
             if (key.Provider != GitHostingProvider.AzureDevOps) return false;
-            try { return GitConnectionService.ParseTarget(key.Provider, key.Url).Organization.Equals(expected, StringComparison.OrdinalIgnoreCase); }
+            try { return AzureDevOpsImportService.ParseProjectUrl(key.Url).TokenScope.Equals(expected, StringComparison.Ordinal); }
             catch (InvalidOperationException) { return false; }
         }
         lock (Sync)
         {
-            foreach (var key in Entries.Keys.Where(key => Matches(key, organization)).ToArray()) RemoveEntry(key);
-            foreach (var key in ReadyForSession.Keys.Where(key => Matches(key, organization)).ToArray()) ReadyForSession.Remove(key);
+            foreach (var key in Entries.Keys.Where(key => Matches(key, scope)).ToArray()) RemoveEntry(key);
+            foreach (var key in ReadyForSession.Keys.Where(key => Matches(key, scope)).ToArray()) ReadyForSession.Remove(key);
         }
     }
 

@@ -13,6 +13,7 @@ public partial class ProjectTasksWindow : Window
 
     public ProjectTasksWindow(Func<string, IReadOnlyList<ProjectApplicationState>>? applicationStates = null)
     {
+        FullStackLauncher.Services.WindowTheme.Attach(this);
         _model = new ProjectTasksViewModel(applicationStates);
         InitializeComponent();
         DataContext = _model;

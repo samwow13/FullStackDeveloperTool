@@ -23,6 +23,7 @@ public partial class ProjectTaskChatWindow : Window, INotifyPropertyChanged
 
     public ProjectTaskChatWindow(ProjectTasksViewModel sourceModel, string attemptId)
     {
+        FullStackLauncher.Services.WindowTheme.Attach(this);
         ArgumentNullException.ThrowIfNull(sourceModel);
         if (string.IsNullOrWhiteSpace(attemptId))
             throw new ArgumentException("A queue attempt ID is required.", nameof(attemptId));

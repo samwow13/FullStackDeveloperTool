@@ -15,6 +15,7 @@ public partial class ProjectTaskHistoryWindow : Window, INotifyPropertyChanged
 
     public ProjectTaskHistoryWindow(ProjectTasksViewModel sourceModel)
     {
+        FullStackLauncher.Services.WindowTheme.Attach(this);
         _sourceModel = sourceModel ?? throw new ArgumentNullException(nameof(sourceModel));
         if (string.IsNullOrWhiteSpace(_sourceModel.ProjectId))
             throw new InvalidOperationException("Select a project to view its task history.");

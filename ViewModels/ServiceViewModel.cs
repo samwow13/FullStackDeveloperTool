@@ -163,7 +163,7 @@ public sealed partial class ServiceViewModel(ServiceRunner runner) : ObservableO
         Profile.Kind.Equals(".NET", StringComparison.OrdinalIgnoreCase) ||
         Profile.Kind.Equals("API", StringComparison.OrdinalIgnoreCase));
     public bool IsApiService => IsCommandApi || ShowApiDatabaseLabel;
-    public bool ShowFunctionsMenu => IsApiService || IsFrontendService;
+    public bool ShowFunctionsMenu => IsApiService || IsFrontendService || IsConsoleApp;
     private string? DiscoveredDatabaseName => HasCurrentApiDatabaseDiscovery
         ? _discoveredApiDatabases.OrderBy(database => ApiDatabaseIdentifier.ConnectionKeyPriority(database.Key))
             .Select(database => database.Name).FirstOrDefault(name => name is not null) : null;

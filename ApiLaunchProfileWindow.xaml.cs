@@ -33,6 +33,7 @@ public partial class ApiLaunchProfileWindow : Window, IDashboardReplacementWindo
     internal ApiLaunchProfileWindow(string serviceName, ServiceProfile profile, string directory,
         Func<ApiLaunchProfileDraft, Task> save)
     {
+        FullStackLauncher.Services.WindowTheme.Attach(this);
         _profile = JsonSerializer.Deserialize<ServiceProfile>(JsonSerializer.Serialize(profile))!;
         _directory = directory;
         _save = save;

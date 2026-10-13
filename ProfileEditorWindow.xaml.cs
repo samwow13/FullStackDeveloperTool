@@ -35,6 +35,7 @@ public partial class ProfileEditorWindow : Window
     public ProfileEditorWindow(ProjectProfile profile, string settingsDirectory,
         IReadOnlyList<ProjectProfile>? savedProjects = null, bool isSetupReview = false)
     {
+        FullStackLauncher.Services.WindowTheme.Attach(this);
         InitializeComponent();
         _settingsDirectory = Path.GetFullPath(settingsDirectory);
         _savedProjects = savedProjects ?? [];

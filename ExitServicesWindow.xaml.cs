@@ -1,6 +1,4 @@
 using System.Windows;
-using System.Runtime.InteropServices;
-using System.Windows.Interop;
 
 namespace FullStackLauncher;
 
@@ -15,6 +13,7 @@ public partial class ExitServicesWindow : Window
 {
     public ExitServicesWindow(IReadOnlyList<string> runningServices)
     {
+        FullStackLauncher.Services.WindowTheme.Attach(this);
         ArgumentNullException.ThrowIfNull(runningServices);
         InitializeComponent();
         MinHeight = Math.Min(MinHeight, SystemParameters.WorkArea.Height);
@@ -28,11 +27,6 @@ public partial class ExitServicesWindow : Window
             ? "1 active app"
             : $"{services.Length} active apps";
         Loaded += (_, _) => CancelButton.Focus();
-        SourceInitialized += (_, _) =>
-        {
-            var enabled = 1;
-            DwmSetWindowAttribute(new WindowInteropHelper(this).Handle, 20, ref enabled, sizeof(int));
-        };
     }
 
     public ExitServicesChoice Choice { get; private set; } = ExitServicesChoice.Cancel;
@@ -54,7 +48,4 @@ public partial class ExitServicesWindow : Window
         Choice = ExitServicesChoice.Cancel;
         DialogResult = false;
     }
-
-    [DllImport("dwmapi.dll")]
-    private static extern int DwmSetWindowAttribute(IntPtr window, int attribute, ref int value, int size);
 }

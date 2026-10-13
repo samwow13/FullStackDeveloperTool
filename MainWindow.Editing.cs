@@ -198,6 +198,8 @@ public partial class MainWindow
             }
             var proxyChanges = AngularDevProxyConfiguration.Prepare(selected, candidate, _store);
             await RequireStoppedProxyFileServicesAsync(proxyChanges, candidate);
+            // A scheduled shutoff may save the power preference during inspection.
+            candidateSettings.LongRunningTaskEnabled = _settings.LongRunningTaskEnabled;
             proxyChanges.SaveWithSettings(() => _store.Save(candidateSettings));
 
             // Preserve original profiles and runners: they own live processes, logs, notes and database state.

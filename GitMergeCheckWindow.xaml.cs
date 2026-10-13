@@ -12,6 +12,7 @@ public partial class GitMergeCheckWindow : Window
 
     public GitMergeCheckWindow(string root, GitMergeCheckResult result, bool reviewLocalMerge = false)
     {
+        FullStackLauncher.Services.WindowTheme.Attach(this);
         _root = root;
         InitializeComponent();
         Height = Math.Min(Height, SystemParameters.WorkArea.Height);

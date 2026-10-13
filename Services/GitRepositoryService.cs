@@ -14,6 +14,7 @@ namespace FullStackLauncher.Services;
 public static partial class GitRepositoryService
 {
     private const int OutputLimit = 8 * 1024 * 1024;
+    private static readonly TimeSpan StagingTimeout = TimeSpan.FromMinutes(10);
     private static readonly ConcurrentDictionary<string, SemaphoreSlim> RepositoryGates = new(StringComparer.OrdinalIgnoreCase);
     private static readonly AsyncLocal<GitRepositorySnapshot?> ExpectedSnapshot = new();
     private static readonly Regex RemoteNamePattern = new("^[A-Za-z0-9][A-Za-z0-9._-]{0,100}$", RegexOptions.CultureInvariant);
@@ -141,7 +142,13 @@ public static partial class GitRepositoryService
                 if (existing.ExitCode == 0 || metadata.State != GitBranchState.NotRepository)
                     throw new InvalidOperationException("This folder is already inside a repository, or its Git metadata cannot be verified. Refresh and select the existing repository.");
                 var result = await GitAsync(fullFolder, ["init", "--initial-branch=" + branch, "--", fullFolder], token).ConfigureAwait(false);
-                return Result(result, "Repository initialized. Review files before staging and creating the first commit.");
+                EnsureSuccess(result);
+                try { WriteConnectExclusions(fullFolder); }
+                catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or InvalidOperationException or DecoderFallbackException)
+                {
+                    throw new InvalidOperationException("Repository initialized, but default local-file exclusions could not be added. Review .git/info/exclude and .gitignore before creating the first commit. No files were staged, committed, or pushed.", exception);
+                }
+                return Result(result, "Repository initialized with default build and local-file exclusions in .git/info/exclude. Existing .gitignore rules retain their normal precedence. Review files before staging and creating the first commit.");
             }
             finally { gate.Release(); }
         }, token);
@@ -316,7 +323,7 @@ public static partial class GitRepositoryService
             await RequireNoPendingSyncAsync(root, token).ConfigureAwait(false);
             RequireNoOperation(snapshot);
             var selected = ValidatePaths(root, paths, snapshot, staged: false);
-            return Result(await GitAsync(root, ["--literal-pathspecs", "add", "--", .. selected], token).ConfigureAwait(false), "Selected paths staged. Review the staged diff before committing.");
+            return Result(await GitAsync(root, ["--literal-pathspecs", "add", "--", .. selected], token, commandTimeout: StagingTimeout).ConfigureAwait(false), "Selected paths staged. Review the staged diff before committing.");
         });
 
     public static Task<string> UnstageAsync(string root, IReadOnlyList<string> paths, CancellationToken token = default) =>
@@ -734,12 +741,23 @@ public static partial class GitRepositoryService
         {
             if (uri.UserInfo.Length != 0)
             {
-                // Azure's ordinary clone URL contains an organization username, not a secret.
-                // Accept only that exact known username, and never return it to display/copy.
+                // Azure clone URLs can contain a routing username. Strip it before display/copy
+                // and keep passwords, tokens in query parameters and ambiguous targets rejected.
                 var organizationName = uri.Host.Equals("dev.azure.com", StringComparison.OrdinalIgnoreCase)
                     ? uri.AbsolutePath.Split('/', StringSplitOptions.RemoveEmptyEntries).FirstOrDefault()
                     : Regex.IsMatch(uri.Host, "^[A-Za-z0-9][A-Za-z0-9-]*\\.visualstudio\\.com$", RegexOptions.IgnoreCase) ? uri.Host.Split('.')[0] : null;
-                if (organizationName is null || uri.UserInfo.Contains(':') || uri.UserInfo.Contains('%') || !uri.UserInfo.Equals(organizationName, StringComparison.OrdinalIgnoreCase)
+                var serverClone = false;
+                if (organizationName is null && !uri.UserInfo.Contains(':') && !uri.UserInfo.Contains('%'))
+                {
+                    var parts = uri.AbsolutePath.Trim('/').Split('/');
+                    if (parts.Length >= 3 && parts[^2] == "_git")
+                    {
+                        try { serverClone = !AzureDevOpsImportService.ParseProjectUrl(url).IsHosted; }
+                        catch (InvalidOperationException) { }
+                    }
+                }
+                if (uri.UserInfo.Contains(':') || uri.UserInfo.Contains('%') ||
+                    (!serverClone && (organizationName is null || !uri.UserInfo.Equals(organizationName, StringComparison.OrdinalIgnoreCase)))
                     || !uri.AbsolutePath.Contains("/_git/", StringComparison.Ordinal))
                     throw new InvalidOperationException("Remove the username, password, token and query parameters from the HTTPS clone URL. Git will use your command-line credentials.");
                 url = new UriBuilder(uri) { UserName = "", Password = "" }.Uri.AbsoluteUri;
@@ -787,10 +805,14 @@ public static partial class GitRepositoryService
     }
 
     internal static async Task<CommandResult> GitAsync(string folder, IReadOnlyList<string> arguments, CancellationToken token, bool network = false,
-        bool interactive = false, string? standardInput = null, bool strictSsh = false, string? azureDevOpsTokenUrl = null)
+        bool interactive = false, string? standardInput = null, bool strictSsh = false, string? azureDevOpsTokenUrl = null,
+        TimeSpan? commandTimeout = null)
     {
         var tokenCredential = network
             ? await AzureDevOpsTokenGitAuthentication.PrepareAsync(folder, arguments, azureDevOpsTokenUrl, token).ConfigureAwait(false)
+            : null;
+        var serverTarget = network && tokenCredential is null
+            ? await ReadAzureServerNetworkTargetAsync(folder, arguments, token).ConfigureAwait(false)
             : null;
         var args = new List<string>
         {
@@ -799,6 +821,12 @@ public static partial class GitRepositoryService
             "-c", "credential.https://dev.azure.com.useHttpPath=true",
             "-c", "credential.trace=false", "-c", "credential.traceSecrets=false", "-c", "credential.traceMsAuth=false"
         };
+        if (serverTarget is not null)
+            args.AddRange(["-c", "credential." + serverTarget.CloneUrl + ".provider=generic",
+                "-c", "credential." + serverTarget.CloneUrl + ".useHttpPath=true",
+                "-c", "http." + serverTarget.CloneUrl + ".emptyAuth=true",
+                "-c", "http." + serverTarget.CloneUrl + ".sslVerify=true",
+                "-c", "http.followRedirects=false", "-c", "http." + serverTarget.CloneUrl + ".followRedirects=false"]);
         if (tokenCredential is not null)
         {
             interactive = false;
@@ -811,8 +839,39 @@ public static partial class GitRepositoryService
         }
         if (!interactive) args.AddRange(["-c", "core.askPass="]);
         args.AddRange(arguments);
-        return await RunAsync("git.exe", args, folder, token, network ? TimeSpan.FromMinutes(3) : TimeSpan.FromSeconds(45),
+        return await RunAsync("git.exe", args, folder, token, commandTimeout ?? (network ? TimeSpan.FromMinutes(3) : TimeSpan.FromSeconds(45)),
             interactive: interactive, standardInput: standardInput, strictSsh: strictSsh, tokenCredential: tokenCredential).ConfigureAwait(false);
+    }
+
+    private static async Task<GitConnectionTarget?> ReadAzureServerNetworkTargetAsync(string folder,
+        IReadOnlyList<string> arguments, CancellationToken token)
+    {
+        string? verb = null;
+        for (var index = 0; index < arguments.Count; index++)
+        {
+            var argument = arguments[index];
+            if (argument is "-c" or "--config-env") { index++; continue; }
+            if (argument.StartsWith('-')) continue;
+            verb = argument is "clone" or "fetch" or "pull" or "push" or "ls-remote" ? argument : null;
+            break;
+        }
+        if (verb is null) return null;
+        var separator = arguments.ToList().IndexOf("--");
+        if (separator < 0 || separator + 1 >= arguments.Count) return null;
+        var operand = arguments[separator + 1];
+        var url = IsValidRemoteName(operand)
+            ? await RequireSingleRemoteAsync(folder, operand, verb == "push", token).ConfigureAwait(false)
+            : operand;
+        GitConnectionTarget target;
+        try { target = GitConnectionService.ParseTarget(GitHostingProvider.AzureDevOps, url); }
+        catch (InvalidOperationException) { return null; }
+        if (target.IsHosted || target.IsSsh) return null;
+        // Keep Windows authentication and GCM options bound to the reviewed HTTPS origin/path.
+        // Do not send an authenticated request through a substituted URL or redirect.
+        var resolved = await GitAsync(folder, ["ls-remote", "--get-url", "--", target.CloneUrl], token).ConfigureAwait(false);
+        if (resolved.ExitCode != 0 || resolved.Output.TrimEnd('\r', '\n') != target.CloneUrl)
+            throw new InvalidOperationException("Git rewrites this Azure DevOps Server clone URL. Review the remote and URL rewrite rules before connecting; Windows authentication was not sent.");
+        return target;
     }
 
     private static async Task<CommandResult> RunAsync(string executable, IReadOnlyList<string> arguments, string folder, CancellationToken token, TimeSpan timeout,

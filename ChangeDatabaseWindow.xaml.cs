@@ -34,6 +34,7 @@ public partial class ChangeDatabaseWindow : Window, IDashboardReplacementWindow
         Func<ApiDatabaseConfiguration, string, string, Task<bool>> saveAndRestart,
         Action<ApiDatabaseConfiguration>? configurationDiscovered = null)
     {
+        FullStackLauncher.Services.WindowTheme.Attach(this);
         InitializeComponent();
         _profile = profile;
         _directory = directory;

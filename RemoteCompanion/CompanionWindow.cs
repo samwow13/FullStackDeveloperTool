@@ -120,8 +120,8 @@ internal sealed class CompanionWindow : Window
             var handle = new System.Windows.Interop.WindowInteropHelper(this).Handle;
             if (DwmSetWindowAttribute(handle, 20, ref enabled, sizeof(int)) != 0)
                 DwmSetWindowAttribute(handle, 19, ref enabled, sizeof(int));
-            var caption = 0x00161810;
-            var text = 0x00EFF3E8;
+            var caption = 0x00000000;
+            var text = 0x00FFFFFF;
             DwmSetWindowAttribute(handle, 35, ref caption, sizeof(int));
             DwmSetWindowAttribute(handle, 36, ref text, sizeof(int));
         };

@@ -19,6 +19,7 @@ public partial class InstalledDesktopAppsWindow : Window
 
     public InstalledDesktopAppsWindow()
     {
+        FullStackLauncher.Services.WindowTheme.Attach(this);
         InitializeComponent();
         _initialized = true;
         var area = SystemParameters.WorkArea;

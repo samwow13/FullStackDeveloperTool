@@ -11,6 +11,7 @@ public partial class MainWindow
     private Task? _gitWarmupTask;
     private bool _projectGitForceRefreshing;
     private bool _projectGitNotificationPending;
+    private bool _projectGitNotificationRequested;
 
     public bool CanForceProjectGitRefresh => !_projectGitForceRefreshing && SelectedProject is not null
         && !IsEditing && !_closeRequested && !_closing && !_closed;
@@ -47,15 +48,23 @@ public partial class MainWindow
                 (e.ProjectId is null || watch.Project.Id == e.ProjectId)
                 && (e.RepositoryRoot is null || string.Equals(watch.Scope.RepositoryRoot, e.RepositoryRoot, StringComparison.OrdinalIgnoreCase))))
                 watch.NextLocalRead = DateTimeOffset.MinValue;
-            if (_projectGitNotificationPending) return;
-            _projectGitNotificationPending = true;
             _ = PresentSharedProjectGitAsync();
         });
     }
 
     private async Task PresentSharedProjectGitAsync()
     {
-        try { await Task.WhenAll(RefreshProjectBranchesAsync(), RefreshNextCommitAsync(), PollDashboardGitAsync()); }
+        if (_projectGitNotificationPending) { _projectGitNotificationRequested = true; return; }
+        _projectGitNotificationPending = true;
+        try
+        {
+            do
+            {
+                _projectGitNotificationRequested = false;
+                await Task.WhenAll(RefreshProjectBranchesAsync(), RefreshNextCommitAsync(force: true), PollDashboardGitAsync());
+            }
+            while (_projectGitNotificationRequested && !_closeRequested && !_closing && !_closed);
+        }
         finally { _projectGitNotificationPending = false; }
     }
 

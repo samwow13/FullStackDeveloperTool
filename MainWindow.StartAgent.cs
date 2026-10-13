@@ -11,7 +11,7 @@ public partial class MainWindow
     private CodexStartAgentWindow? _startAgentWindow;
 
     public bool CanStartAgent => SelectedProject is not null && !_closed && !_closing && !_closeRequested &&
-        !_savingProjectEdits && _startAgentWindow is null;
+        !_savingProjectEdits && !_releasingWaitingAgents && _startAgentWindow is null;
 
     private bool HasStartAgentDrafts => _startAgentWindow is not null ||
         _startAgentDrafts.Values.Any(draft => !string.IsNullOrWhiteSpace(draft.Text) || draft.Images.Count > 0);
@@ -27,9 +27,12 @@ public partial class MainWindow
             window = new CodexStartAgentWindow(project.Id, project.Name, _store.ResolveRoot(project),
                 draft?.Text ?? "", draft?.PendingAttemptId, draft?.Images, draft?.KeepAwake ?? false) { Owner = this };
             _startAgentWindow = window;
+            window.WaitingSaved += StartAgentWaitingSaved;
             Changed(nameof(CanStartAgent));
             window.ShowDialog();
-            if (window.SentSuccessfully)
+            if (window.WaitingSavedCount > 0)
+                Notice = $"Saved {window.WaitingSavedCount} waiting prompt(s). Choose Go when ready.";
+            else if (window.SentSuccessfully)
                 Notice = $"New Codex chat started for {project.Name}.";
         }
         catch (Exception ex)
@@ -41,6 +44,7 @@ public partial class MainWindow
         {
             if (window is not null)
             {
+                window.WaitingSaved -= StartAgentWaitingSaved;
                 if (!string.IsNullOrEmpty(window.Draft) || window.UnsentDraftImages.Count > 0 || window.RecoveryAttemptId is not null ||
                     (window.DraftKeepAwake && !window.SentSuccessfully))
                     _startAgentDrafts[project.Id] = new(window.Draft, window.RecoveryAttemptId, window.UnsentDraftImages, window.DraftKeepAwake);
@@ -48,11 +52,18 @@ public partial class MainWindow
             }
             _startAgentWindow = null;
             Changed(nameof(CanStartAgent));
+            UpdateWaitingAgentActions();
+            _ = RefreshWaitingAgentsAsync();
         }
     }
 
     private bool PrepareStartAgentDraftsForClose()
     {
+        if (_releasingWaitingAgents)
+        {
+            Notice = "Waiting prompts are starting. Close Launcher after submission checks finish.";
+            return false;
+        }
         if (_startAgentWindow is not null) return false;
         var count = _startAgentDrafts.Values.Count(draft => !string.IsNullOrWhiteSpace(draft.Text) || draft.Images.Count > 0);
         if (count == 0) return true;

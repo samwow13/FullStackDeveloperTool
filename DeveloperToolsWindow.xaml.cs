@@ -15,6 +15,7 @@ public partial class DeveloperToolsWindow : Window
 
     public DeveloperToolsWindow(IEnumerable<DeveloperTool> tools, string settingsDirectory)
     {
+        FullStackLauncher.Services.WindowTheme.Attach(this);
         InitializeComponent();
         _settingsDirectory = Path.GetFullPath(settingsDirectory);
         Result = tools.Select(Clone).ToList();

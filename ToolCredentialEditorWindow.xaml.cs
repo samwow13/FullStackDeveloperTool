@@ -21,6 +21,7 @@ public partial class ToolCredentialEditorWindow : Window, IDashboardReplacementW
     public ToolCredentialEditorWindow(ToolCredentialProfile? profile = null,
         string? preferredKind = null, string? websiteOrigin = null)
     {
+        FullStackLauncher.Services.WindowTheme.Attach(this);
         _profile = profile;
         InitializeComponent();
         Title = profile is null ? "Add login profile" : "Edit login profile";

@@ -3,29 +3,61 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>FullStack Launcher Page Context</title>
+  <meta name="color-scheme" content="dark">
+  <title>Connect browser · FullStack Launcher</title>
   <style>
-    body { max-width: 42rem; margin: 2rem auto; padding: 0 1rem; font: 15px/1.5 system-ui, sans-serif; color: #e9f1f8; background: #141d29; }
-    h1 { font-size: 1.4rem; margin-bottom: .5rem; }
-    p { color: #c1d0dc; }
-    label { display: block; font-weight: 600; margin: 1.3rem 0 .35rem; }
-    input { box-sizing: border-box; width: 100%; padding: .7rem; border-radius: .4rem; border: 1px solid #8294a3; color: #fff; background: #243448; font: inherit; }
-    button { padding: .6rem .9rem; margin: .9rem .45rem 0 0; border: 0; border-radius: .4rem; color: #fff; background: #286f64; font: inherit; cursor: pointer; }
-    button.secondary { background: #3a4c63; }
-    button:focus-visible, input:focus-visible { outline: 3px solid #79d5c5; outline-offset: 2px; }
-    #status { min-height: 1.6rem; }
+    * { box-sizing: border-box; }
+    body { max-width: 34rem; margin: 3rem auto; padding: 0 1.25rem; font: 14px/1.5 "Segoe UI", system-ui, sans-serif; color: #edf4fc; background: #101721; }
+    .brand { color: #72e5cb; font-size: .8rem; letter-spacing: .08em; font-weight: 700; }
+    h1 { font-size: 1.65rem; margin: .4rem 0 .5rem; line-height: 1.25; }
+    p { color: #b9cbdb; margin: .5rem 0 1.25rem; }
+    .connection { background: #182533; border: 1px solid #334b60; border-radius: 12px; padding: 14px 16px; margin: 1.25rem 0; }
+    .connection strong { display: flex; gap: 9px; align-items: center; color: #eaf3fc; }
+    .dot { width: 8px; height: 8px; border-radius: 50%; background: #91a7bd; flex-shrink: 0; }
+    .connection[data-state="connected"] .dot { background: #72e5cb; }
+    .connection[data-state="connecting"] .dot { background: #ecc57c; }
+    .connection p { font-size: .85rem; margin: .3rem 0 0 17px; }
+    label { display: block; font-weight: 600; margin: 1rem 0 .4rem; }
+    input { width: 100%; padding: .75rem; border-radius: 8px; border: 1px solid #50677e; color: #f5f9ff; background: #182635; font: inherit; }
+    input::placeholder { color: #91a9bf; opacity: 1; }
+    .hint { font-size: .8rem; margin: .45rem 0 .75rem; }
+    .actions { display: flex; gap: .65rem; flex-wrap: wrap; }
+    button { padding: .65rem 1rem; border: 1px solid #6edbc3; border-radius: 8px; color: #092e28; background: #72e5cb; font: 600 .875rem "Segoe UI", system-ui, sans-serif; cursor: pointer; }
+    button.secondary { color: #e4effa; border-color: #425c74; background: #213348; }
+    button:hover { filter: brightness(1.08); }
+    button:disabled { cursor: default; opacity: .55; }
+    button:focus-visible, input:focus-visible, summary:focus-visible { outline: 2px solid #72e5cb; outline-offset: 3px; }
+    #status { min-height: 1.5rem; margin: .8rem 0; font-size: .85rem; }
+    #status[data-error="true"] { color: #ffb5b5; }
+    details { border-top: 1px solid #2d4155; margin-top: 1.5rem; padding-top: 1rem; }
+    summary { cursor: pointer; color: #c0d3e5; font-size: .85rem; }
+    details p { font-size: .85rem; margin: .75rem 0; }
+    [hidden] { display: none !important; }
   </style>
 </head>
 <body>
-  <h1>FullStack Launcher Page Context</h1>
-  <p>Paste pairing code from Notes &amp; queue. This extension reads a tab only when Snip requests it. Captured source stays in your local note until you choose to include it in a prompt.</p>
+  <div class="brand">FULLSTACK LAUNCHER</div>
+  <h1>Connect this browser</h1>
+  <p>Pair once for browser source capture, frontend links, and saved login filling.</p>
+  <section id="connection" class="connection" data-state="checking" aria-live="polite" aria-atomic="true">
+    <strong><span class="dot" aria-hidden="true"></span><span id="connectionTitle">Checking connection…</span></strong>
+    <p id="connectionDetail">Reading this browser's pairing status.</p>
+  </section>
   <form id="pairingForm">
     <label for="pairingCode">Pairing code</label>
-    <input id="pairingCode" type="password" inputmode="text" autocomplete="off" spellcheck="false" placeholder="64 hexadecimal characters" aria-describedby="status">
-    <button type="submit">Save pairing</button>
-    <button id="forget" class="secondary" type="button">Forget pairing</button>
+    <input id="pairingCode" type="password" inputmode="text" autocomplete="off" spellcheck="false" maxlength="80" placeholder="Paste code from the launcher" aria-describedby="pairingHint status">
+    <p id="pairingHint" class="hint">Open Browser source setup in the note editor or Browser setup in a website shortcut, then copy the pairing code.</p>
+    <div class="actions">
+      <button id="save" type="submit">Save &amp; connect</button>
+      <button id="reconnect" class="secondary" type="button" hidden>Try connection</button>
+    </div>
   </form>
   <p id="status" role="status" aria-live="polite"></p>
+  <details>
+    <summary>Manage pairing</summary>
+    <p>Keep FullStack Launcher open. Pair Chrome and Edge separately if you use both. Forgetting pairing disconnects this browser only.</p>
+    <button id="forget" class="secondary" type="button">Forget pairing</button>
+  </details>
   <script src="options.js"></script>
 </body>
 </html>

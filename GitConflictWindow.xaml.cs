@@ -10,6 +10,7 @@ public partial class GitConflictWindow : Window
     public GitConflictWindow(string root, IReadOnlyList<string> paths, string recovery,
         string? currentBranch = null, string? sourceBranch = null, string? sourceCommit = null)
     {
+        FullStackLauncher.Services.WindowTheme.Attach(this);
         _root = root;
         InitializeComponent();
         Height = Math.Min(Height, SystemParameters.WorkArea.Height);

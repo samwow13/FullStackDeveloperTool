@@ -2,14 +2,12 @@ using System.Collections.ObjectModel;
 using System.ComponentModel;
 using System.Diagnostics;
 using System.IO;
-using System.Runtime.InteropServices;
 using System.Text.Json;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Controls.Primitives;
 using System.Windows.Data;
 using System.Windows.Input;
-using System.Windows.Interop;
 using System.Windows.Threading;
 using FullStackLauncher.Models;
 using FullStackLauncher.Services;
@@ -96,6 +94,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
 
     public MainWindow()
     {
+        FullStackLauncher.Services.WindowTheme.Attach(this);
         _settings = _store.Load();
         foreach (var project in _settings.Projects)
         {
@@ -119,8 +118,8 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         ApplyLayout();
         DataContext = this;
         InitializeQueueActivity();
+        InitializeWaitingAgents();
         InitializeLongRunningTaskMode();
-        InitializeNextCommitReminder();
         InitializeDashboardGitComparison();
         InitializeProjectGitService();
         InitializeCodexAccountUsage();
@@ -134,11 +133,6 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         Closed += (_, _) => _flutterDatabaseLifetime.Cancel();
         Closed += (_, _) => _developerToolLifetime.Cancel();
         InitializeFrontendBrowserAccess();
-        SourceInitialized += (_, _) =>
-        {
-            var enabled = 1;
-            DwmSetWindowAttribute(new WindowInteropHelper(this).Handle, 20, ref enabled, sizeof(int));
-        };
     }
 
     private async void Window_Loaded(object sender, RoutedEventArgs e)
@@ -747,6 +741,8 @@ public partial class MainWindow : Window, INotifyPropertyChanged
             candidateSettings.Projects[index] = result;
             var proxyChanges = AngularDevProxyConfiguration.Prepare(selected, result, _store);
             await RequireStoppedProxyFileServicesAsync(proxyChanges, result);
+            // A scheduled shutoff may save the power preference during inspection.
+            candidateSettings.LongRunningTaskEnabled = _settings.LongRunningTaskEnabled;
             proxyChanges.SaveWithSettings(() => _store.Save(candidateSettings));
             settingsSaved = true;
 
@@ -879,7 +875,4 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         // Keep keyboard focus on a visible control that can immediately reopen the section.
         SectionsMenuToggle.Focus();
     }
-
-    [DllImport("dwmapi.dll")]
-    private static extern int DwmSetWindowAttribute(IntPtr hwnd, int attribute, ref int value, int size);
 }

@@ -38,6 +38,7 @@ public partial class ApiServiceWindow : Window, IDashboardReplacementWindow
         IReadOnlyList<ProjectProfile>? savedProjects = null, Action<ServiceProfile>? save = null,
         ServiceCommandDetection? detection = null, string? workingDirectory = null)
     {
+        FullStackLauncher.Services.WindowTheme.Attach(this);
         InitializeComponent();
         _project = project;
         _settingsDirectory = Path.GetFullPath(settingsDirectory);

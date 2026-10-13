@@ -55,9 +55,14 @@ internal sealed class CodexAppServerConnection : IAsyncDisposable
         CodexAppServerConnection? connection = null;
         try
         {
-            process.StartInfo = CreateStartInfo(CodexNativeExecutable.Find(), folder);
-            if (!process.Start())
-                throw new InvalidOperationException(UnavailableMessage);
+            await Task.Run(() =>
+            {
+                var executable = CodexNativeExecutable.Find();
+                token.ThrowIfCancellationRequested();
+                process.StartInfo = CreateStartInfo(executable, folder);
+                if (!process.Start())
+                    throw new InvalidOperationException(UnavailableMessage);
+            }, token).ConfigureAwait(false);
             connection = new CodexAppServerConnection(process, includeImagePayloads);
             var parameters = new Dictionary<string, object>
             {

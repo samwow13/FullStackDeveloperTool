@@ -18,6 +18,7 @@ public partial class GitWorkspaceWindow : Window, INotifyPropertyChanged, IDashb
     public bool IsDashboardReplacementClosePending => _replacementClosePending;
 
     private GitRepositorySnapshot? _snapshot;
+    private GitActiveConnectionInfo? _activeConnection;
     private CancellationTokenSource? _operation;
     private bool _ready;
     private bool _busy;
@@ -44,6 +45,7 @@ public partial class GitWorkspaceWindow : Window, INotifyPropertyChanged, IDashb
         Func<GitProjectConnectRequest, Task<IDisposable>>? prepareProjectConnect = null,
         Func<GitProjectConnectResult, Task>? applyProjectConnect = null)
     {
+        FullStackLauncher.Services.WindowTheme.Attach(this);
         ProjectTitle = $"Git · {projectName}";
         _configuredFolders = folders.ToArray();
         _scanProjectRootChildren = scanChildRepositories;
@@ -110,6 +112,9 @@ public partial class GitWorkspaceWindow : Window, INotifyPropertyChanged, IDashb
     public string RemoteSummary => SelectedRemote is { } remote
         ? remote.FetchUrl == remote.PushUrl ? remote.FetchUrl : $"Fetch: {remote.FetchUrl}\nPush: {remote.PushUrl}"
         : "Choose Config to connect a repository.";
+    public string ActiveConnectionLabel => "Active: " + (_activeConnection?.Label ?? "Reading connection…");
+    public string ActiveConnectionColor => _activeConnection?.Foreground ?? "#B8C6D9";
+    public string ActiveConnectionDetail => _activeConnection?.Detail ?? "Reading the selected repository's active Git connection.";
     public string CommitAvailabilityText => !IsRepository ? "Initialize or select a repository to begin."
         : _sharedRefreshing ? "Background Git refresh is running. Wait for it to finish before committing."
         : _cacheRefreshFailed ? "Force refresh to confirm current Git state before committing."
@@ -164,6 +169,7 @@ public partial class GitWorkspaceWindow : Window, INotifyPropertyChanged, IDashb
         if (_displayedFolder != null) _drafts[_displayedFolder] = CaptureDraft();
         _displayedFolder = SelectedFolder?.Directory;
         _snapshot = null;
+        _activeConnection = null;
         _cacheRefreshFailed = false;
         _sharedRefreshing = false;
         _preferredRemote = null;
@@ -205,6 +211,7 @@ public partial class GitWorkspaceWindow : Window, INotifyPropertyChanged, IDashb
 
     private void ApplyRepositoryState(GitRepositoryState state)
     {
+        _activeConnection = state.ActiveConnection;
         if (state.Snapshot is not { } snapshot)
             throw state.Failure ?? new InvalidOperationException(state.Error ?? "Git status is unavailable. Force refresh to retry.");
         if (state.Failure is GitCommandExitUnconfirmedException unconfirmed) throw unconfirmed;
@@ -245,6 +252,7 @@ public partial class GitWorkspaceWindow : Window, INotifyPropertyChanged, IDashb
             }
             catch (Exception exception)
             {
+                _activeConnection = new();
                 if (exception is GitCommandExitUnconfirmedException command) HoldUnconfirmedBranchCommand(command);
                 else { _cacheRefreshFailed = true; ReportError(SafeError(exception)); Changed(); }
             }
@@ -258,6 +266,7 @@ public partial class GitWorkspaceWindow : Window, INotifyPropertyChanged, IDashb
         try { ApplyRepositoryState(await _gitService.GetRepositoryAsync(folder.Directory, SelectedRemote?.Name ?? "")); }
         catch (Exception exception)
         {
+            _activeConnection = new();
             if (exception is GitCommandExitUnconfirmedException command) HoldUnconfirmedBranchCommand(command);
             else { _cacheRefreshFailed = true; ReportError(SafeError(exception)); Changed(); }
         }
@@ -306,6 +315,7 @@ public partial class GitWorkspaceWindow : Window, INotifyPropertyChanged, IDashb
         }
         catch (Exception ex)
         {
+            _activeConnection = new();
             if (ex is GitCommandExitUnconfirmedException unconfirmed) _unconfirmedGitCommand = unconfirmed;
             _cacheRefreshFailed = true;
             _trustRoot = (ex as GitRepositoryTrustException)?.RepositoryRoot;
@@ -377,7 +387,10 @@ public partial class GitWorkspaceWindow : Window, INotifyPropertyChanged, IDashb
         }
         catch (Exception ex)
         {
-            if (ex is GitCommandExitUnconfirmedException unconfirmed)
+            var commandFailure = ex;
+            while (commandFailure is not GitCommandExitUnconfirmedException && commandFailure.InnerException is { } inner)
+                commandFailure = inner;
+            if (commandFailure is GitCommandExitUnconfirmedException unconfirmed)
             {
                 _unconfirmedGitCommand = unconfirmed;
                 FailGitLoad("Git may still be running. Wait, then Retry to check again.");
@@ -459,6 +472,7 @@ public partial class GitWorkspaceWindow : Window, INotifyPropertyChanged, IDashb
     private async void Remote_Changed(object sender, SelectionChangedEventArgs e)
     {
         if (_applyingSnapshot || !IsIdle) return;
+        _activeConnection = null;
         ResetBranchInspection();
         UpdateBranchView();
         var keepConfigOpen = _configOpen;

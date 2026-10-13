@@ -42,6 +42,7 @@ public partial class GitCommitWindow : Window, IDashboardReplacementWindow
         GitCommitMode mode = GitCommitMode.CommitAndPush, string? sourceLabel = null, string? recoveryNote = null,
         AgentGitSummaryBatch? agentSummaries = null, bool freezeDestination = false)
     {
+        FullStackLauncher.Services.WindowTheme.Attach(this);
         _snapshot = snapshot;
         _remote = remote;
         _mode = mode;

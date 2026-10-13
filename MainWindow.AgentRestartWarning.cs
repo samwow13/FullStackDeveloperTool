@@ -20,7 +20,7 @@ public partial class MainWindow
     private void ShowAgentRestartWarning() => ShowAgentNotice(AgentBridgeCoordination.AgentRestartMessage,
         "Dismiss restart warning");
 
-    private void ShowAgentGitUpdateNotice() => ShowAgentNotice("Agent updated commit message",
+    private void ShowAgentGitUpdateNotice(string workTitle) => ShowAgentNotice($"{workTitle} updated commit message",
         "Dismiss commit message update");
 
     private void ShowAgentNotice(string message, string dismissLabel)
@@ -51,6 +51,7 @@ public partial class MainWindow
                 Foreground = warningBrush,
                 FontSize = 14,
                 FontWeight = FontWeights.SemiBold,
+                TextWrapping = TextWrapping.Wrap,
                 VerticalAlignment = VerticalAlignment.Center
             };
             content.Children.Add(noticeText);
@@ -58,8 +59,9 @@ public partial class MainWindow
             var warning = new Window
             {
                 Title = message,
-                Width = 330,
-                Height = 68,
+                Width = Math.Min(330, workArea.Width),
+                MinHeight = 68,
+                SizeToContent = SizeToContent.Height,
                 Left = Math.Max(workArea.Left, workArea.Right - 346),
                 Top = Math.Max(workArea.Top, workArea.Bottom - 84),
                 WindowStartupLocation = WindowStartupLocation.Manual,
@@ -79,6 +81,12 @@ public partial class MainWindow
             };
             // An owned window would disappear with a minimized dashboard. Close this
             // independent, nonmodal warning explicitly when the dashboard closes.
+            warning.SizeChanged += (_, _) =>
+            {
+                var area = SystemParameters.WorkArea;
+                warning.Left = Math.Max(area.Left, area.Right - warning.ActualWidth - 16);
+                warning.Top = Math.Max(area.Top, area.Bottom - warning.ActualHeight - 16);
+            };
             warning.Closed += (_, _) =>
             {
                 _agentRestartWarningTimer.Stop();

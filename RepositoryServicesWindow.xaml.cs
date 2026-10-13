@@ -8,6 +8,7 @@ public partial class RepositoryServicesWindow : Window
 
     public RepositoryServicesWindow(string projectName, IReadOnlyList<string> repositories)
     {
+        FullStackLauncher.Services.WindowTheme.Attach(this);
         InitializeComponent();
         Width = Math.Min(Width, SystemParameters.WorkArea.Width);
         MaxHeight = SystemParameters.WorkArea.Height;

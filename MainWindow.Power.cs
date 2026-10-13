@@ -8,6 +8,7 @@ namespace FullStackLauncher;
 public partial class MainWindow
 {
     private LongRunningTaskMode? _longRunningTaskMode;
+    private LongRunningTaskAutoOffSchedule? _longRunningTaskAutoOffSchedule;
     private QueueDashboardPermit? _queueDashboardPermit;
     public bool LongRunningTaskEnabled => _longRunningTaskMode?.IsEnabled == true;
     public string LongRunningTaskDescription =>
@@ -23,13 +24,17 @@ public partial class MainWindow
         _longRunningTaskMode.StatusChanged += () => Changed(nameof(LongRunningTaskDescription));
         Closed += (_, _) =>
         {
+            _longRunningTaskAutoOffSchedule?.Dispose();
             try { _queueDashboardPermit.Dispose(); }
             finally { _longRunningTaskMode.Dispose(); }
         };
-        if (!_settings.LongRunningTaskEnabled) return;
-        try { SetLongRunningTaskEnabled(true); }
-        catch (InvalidOperationException ex) { Notice = ex.Message; }
-        Changed(nameof(LongRunningTaskEnabled));
+        if (_settings.LongRunningTaskEnabled)
+        {
+            try { SetLongRunningTaskEnabled(true); }
+            catch (InvalidOperationException ex) { Notice = ex.Message; }
+            Changed(nameof(LongRunningTaskEnabled));
+        }
+        _longRunningTaskAutoOffSchedule = new LongRunningTaskAutoOffSchedule(Dispatcher, AutoTurnOffLongRunningTask);
     }
 
     private void LongRunningTask_Click(object sender, RoutedEventArgs e)
@@ -39,7 +44,18 @@ public partial class MainWindow
             Changed(nameof(LongRunningTaskEnabled));
             return;
         }
-        var enabled = !LongRunningTaskEnabled;
+        ChangeLongRunningTaskEnabled(!LongRunningTaskEnabled, showNotice: true);
+    }
+
+    private bool AutoTurnOffLongRunningTask()
+    {
+        if (_closed || _longRunningTaskMode is null || !LongRunningTaskEnabled) return true;
+        ChangeLongRunningTaskEnabled(false, showNotice: false);
+        return !LongRunningTaskEnabled;
+    }
+
+    private void ChangeLongRunningTaskEnabled(bool enabled, bool showNotice)
+    {
         try
         {
             SetLongRunningTaskEnabled(enabled);
@@ -50,9 +66,12 @@ public partial class MainWindow
                 candidate.LongRunningTaskEnabled = enabled;
                 _store.Save(candidate);
                 _settings.LongRunningTaskEnabled = enabled;
-                Notice = enabled
-                    ? "Long Running Task is on. Enabled queues can start tasks while this dashboard stays open."
-                    : "Long Running Task is off. Later queued tasks wait; started tasks continue.";
+                if (showNotice)
+                    Notice = enabled
+                        ? "Long Running Task is on. Enabled queues can start tasks while this dashboard stays open."
+                        : "Long Running Task is off. Later queued tasks wait; started tasks continue.";
+                else if (Notice.StartsWith("Long Running Task is ", StringComparison.Ordinal))
+                    Notice = "";
             }
             catch (Exception)
             {

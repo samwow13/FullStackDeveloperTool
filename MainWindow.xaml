@@ -682,10 +682,8 @@
                                             AutomationProperties.HelpText="Discover LAN computers, pair a companion, or open Windows remote tools."/>
                                     <Border Height="1" Background="{StaticResource BorderBrush}" Margin="10,6,10,8"/>
                                     <CheckBox Content="Long Running Task" IsChecked="{Binding LongRunningTaskEnabled, Mode=OneWay}" Click="LongRunningTask_Click"
-                                              Style="{StaticResource SectionMenuSwitch}" ToolTipService.ShowDuration="30000"
-                                              AutomationProperties.Name="Long Running Task" AutomationProperties.HelpText="{Binding LongRunningTaskDescription}">
-                                        <CheckBox.ToolTip><ToolTip MaxWidth="440"><TextBlock Text="{Binding LongRunningTaskDescription}" TextWrapping="Wrap" Foreground="{StaticResource TextBrush}"/></ToolTip></CheckBox.ToolTip>
-                                    </CheckBox>
+                                              Style="{StaticResource SectionMenuSwitch}"
+                                              AutomationProperties.Name="Long Running Task" AutomationProperties.HelpText="{Binding LongRunningTaskDescription}"/>
                                 </StackPanel>
                             </Border>
                         </Popup>
@@ -871,6 +869,7 @@
                                                                             <Condition Binding="{Binding ShowClean}" Value="False"/>
                                                                             <Condition Binding="{Binding ShowSetup}" Value="False"/>
                                                                             <Condition Binding="{Binding IsFrontendService}" Value="False"/>
+                                                                            <Condition Binding="{Binding IsConsoleApp}" Value="False"/>
                                                                         </MultiDataTrigger.Conditions>
                                                                         <Setter Property="Visibility" Value="Collapsed"/>
                                                                     </MultiDataTrigger>
@@ -890,6 +889,16 @@
                                                                             Tag="{Binding ElementName=ApiSettingsPopup}" Click="CloseServiceMenu_Click" AutomationProperties.Name="Close service settings"/>
                                                                     <TextBlock Text="Service settings" Foreground="{StaticResource TextBrush}" FontWeight="SemiBold" VerticalAlignment="Center"/>
                                                                 </DockPanel>
+                                                                <StackPanel Visibility="{Binding IsConsoleApp, Converter={StaticResource BoolToVisibility}}" Margin="0,0,0,6">
+                                                                    <TextBlock Text="Type" Foreground="{StaticResource MutedBrush}" FontSize="11"/>
+                                                                    <TextBlock Text="{Binding ServiceTypeLabel}" TextWrapping="Wrap" Margin="0,2,0,8"/>
+                                                                    <TextBlock Text="Command" Foreground="{StaticResource MutedBrush}" FontSize="11"/>
+                                                                    <TextBox Text="{Binding Command, Mode=OneWay}" IsReadOnly="True" TextWrapping="Wrap" MaxHeight="120" VerticalScrollBarVisibility="Auto"
+                                                                             Margin="0,2,0,8" AutomationProperties.Name="Configured console command"/>
+                                                                    <TextBlock Text="Folder" Foreground="{StaticResource MutedBrush}" FontSize="11"/>
+                                                                    <TextBox Text="{Binding Directory, Mode=OneWay}" IsReadOnly="True" TextWrapping="Wrap" MaxHeight="80" VerticalScrollBarVisibility="Auto"
+                                                                             Margin="0,2,0,0" AutomationProperties.Name="Console working folder"/>
+                                                                </StackPanel>
                                                                 <StackPanel Visibility="{Binding HasApiConfiguration, Converter={StaticResource BoolToVisibility}}" Margin="0,0,0,6">
                                                                 <TextBlock Text="{Binding ConfigurationStatus}" Foreground="{Binding ConfigurationColor}" TextWrapping="Wrap" FontSize="11" Margin="0,0,0,10"/>
                                                                 <Button Content="Launch profile…" Click="ApiSettingsLaunchProfile_Click" IsEnabled="{Binding CanConfigureApi}"
@@ -1189,13 +1198,28 @@
                     </Grid>
                 </Border>
             </Grid>
-            <controls:CodexActivityStrip x:Name="CodexCrewPanel" Grid.Row="4" Margin="0,14,0,0" VisibleAgents="{Binding CodexCrewVisibleAgents, Mode=TwoWay}"
+            <StackPanel Grid.Row="4">
+                <Border Margin="0,14,0,0" Padding="10,8" Background="{StaticResource SurfaceBrush}"
+                        BorderBrush="{StaticResource BorderBrush}" BorderThickness="1" CornerRadius="7"
+                        Visibility="{Binding HasWaitingAgentItems, Converter={StaticResource BoolToVisibility}}">
+                    <DockPanel LastChildFill="True">
+                        <Button DockPanel.Dock="Right" Content="{Binding WaitingAgentGoLabel}" Click="GoWaitingAgents_Click"
+                                IsEnabled="{Binding CanReleaseWaitingAgents}" Padding="14,6" Margin="8,0,0,0"
+                                ToolTip="Start all saved waiting prompts together" AutomationProperties.Name="Start waiting prompts"/>
+                        <Button DockPanel.Dock="Right" Content="Review…" Click="ReviewWaitingAgents_Click" Padding="10,6"
+                                IsEnabled="{Binding CanReviewWaitingAgents}" AutomationProperties.Name="Review waiting prompts"/>
+                        <TextBlock Text="{Binding WaitingAgentLabel}" Foreground="{StaticResource TextBrush}" FontSize="12"
+                                   VerticalAlignment="Center" Margin="0,0,10,0" AutomationProperties.LiveSetting="Polite"/>
+                    </DockPanel>
+                </Border>
+            <controls:CodexActivityStrip x:Name="CodexCrewPanel" Margin="0,14,0,0" VisibleAgents="{Binding CodexCrewVisibleAgents, Mode=TwoWay}"
                                          AccountUsage="{Binding CodexAccountUsage}"
                                          CanStartAgent="{Binding CanStartAgent}"
                                          StartAgentRequested="StartCodexAgent_Click"
                                          ThoughtBubblesEnabled="{Binding CodexCrewThoughtBubblesEnabled, Mode=TwoWay}"
                                          ThoughtBubbleSeconds="{Binding CodexCrewThoughtBubbleSeconds, Mode=TwoWay}"
                                          WatcherRequested="CodexAlerts_Click"/>
+            </StackPanel>
             <Grid Grid.Row="5" Margin="0,14,12,0"><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions><TextBlock Text="{Binding Notice}" Foreground="{StaticResource MutedBrush}" FontSize="11" TextTrimming="CharacterEllipsis" ToolTip="{Binding Notice}"/><TextBlock Grid.Column="1" Text="{Binding LastChecked}" Foreground="{StaticResource MutedBrush}" FontSize="10" Margin="15,0,0,0"/></Grid>
         </Grid>
         <GridSplitter x:Name="NextCommitSplitter" Grid.Column="2" Width="6" HorizontalAlignment="Center" VerticalAlignment="Stretch"
@@ -1209,12 +1233,15 @@
                 <Grid Margin="8,0,8,0" MinHeight="28">
                     <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
                     <Border Background="{StaticResource SurfaceBrush}" Padding="8,0" HorizontalAlignment="Left" VerticalAlignment="Center">
-                    <TextBlock Text="Git Commit" Foreground="{StaticResource TextBrush}" FontSize="15" FontWeight="SemiBold" VerticalAlignment="Center"/>
+                        <TextBlock Text="{Binding NextCommitActiveConnectionLabel}" Foreground="{Binding NextCommitActiveConnectionColor}"
+                                   FontSize="14" FontWeight="SemiBold" VerticalAlignment="Center" TextWrapping="Wrap"
+                                   ToolTip="{Binding NextCommitActiveConnectionDetail}"
+                                   AutomationProperties.Name="{Binding NextCommitActiveConnectionLabel}" AutomationProperties.LiveSetting="Polite"/>
                     </Border>
                     <Grid Grid.Column="1" Background="{StaticResource SurfaceBrush}">
                         <ToggleButton x:Name="NextCommitSettingsToggle" Style="{StaticResource NextCommitSettingsButton}"
                                       PreviewKeyDown="NextCommitSettingsToggle_PreviewKeyDown" ToolTip="Git commit settings"
-                                      AutomationProperties.Name="Git commit settings" AutomationProperties.HelpText="Set PR sound reminder. Click outside or press Escape to close."/>
+                                      AutomationProperties.Name="Git commit settings" AutomationProperties.HelpText="Review preview details and character count. Click outside or press Escape to close."/>
                         <Popup x:Name="NextCommitSettingsMenu" PlacementTarget="{Binding ElementName=NextCommitSettingsToggle}" Placement="Bottom" VerticalOffset="6"
                                IsOpen="{Binding IsChecked, ElementName=NextCommitSettingsToggle, Mode=TwoWay}" StaysOpen="False" AllowsTransparency="True"
                                DataContext="{Binding PlacementTarget.DataContext, RelativeSource={RelativeSource Self}}" Opened="NextCommitSettingsMenu_Opened">
@@ -1229,12 +1256,6 @@
                                             ToolTip="Refresh shared project Git data after setting up a repository outside the Launcher."/>
                                     <Border Height="1" Background="{StaticResource BorderBrush}" Margin="0,12,0,12"/>
                                     <TextBlock Text="{Binding NextCommitCharacterCount}" TextWrapping="Wrap" FontSize="11" Foreground="{StaticResource MutedBrush}"/>
-                                    <CheckBox Content="_PR sound reminder" Style="{StaticResource LongRunningTaskCheckBox}"
-                                              IsChecked="{Binding NextCommitPrReminderEnabled, Mode=TwoWay}" Margin="0,8,0,0"
-                                              AutomationProperties.Name="Enable PR sound reminder for commit message length"
-                                              ToolTip="Off by default for each launcher session. First sound after 5 minutes, then every 5 minutes while the docked panel is visible and the selected commit message exceeds 3,000 characters."/>
-                                    <TextBlock Text="Sound every 5 minutes above 3,000 message characters to remind you to make a PR. Counts message text, not code diff size."
-                                               Foreground="{StaticResource MutedBrush}" FontSize="11" TextWrapping="Wrap" Margin="0,4,0,0"/>
                                 </StackPanel>
                             </Border>
                         </Popup>
@@ -1252,7 +1273,7 @@
                         <ComboBox x:Name="NextCommitRepositoryPicker" Grid.Column="1" ItemsSource="{Binding NextCommitRepositories}"
                                   SelectedItem="{Binding SelectedNextCommitRepository, Mode=TwoWay}" DisplayMemberPath="DisplayName"
                                   ToolTip="{Binding SelectedNextCommitRepository.RepositoryRoot}" AutomationProperties.Name="Git commit repository">
-                            <ComboBox.ItemContainerStyle><Style TargetType="ComboBoxItem">
+                            <ComboBox.ItemContainerStyle><Style TargetType="ComboBoxItem" BasedOn="{StaticResource {x:Type ComboBoxItem}}">
                                 <Setter Property="ToolTip" Value="{Binding RepositoryRoot}"/>
                             </Style></ComboBox.ItemContainerStyle>
                         </ComboBox>

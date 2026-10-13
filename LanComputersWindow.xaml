@@ -15,7 +15,7 @@
             <Setter Property="Foreground" Value="{DynamicResource MutedBrush}"/>
             <Setter Property="Margin" Value="0,0,0,5"/>
         </Style>
-        <Style TargetType="PasswordBox">
+        <Style TargetType="PasswordBox" BasedOn="{StaticResource {x:Type PasswordBox}}">
             <Setter Property="Foreground" Value="{DynamicResource TextBrush}"/>
             <Setter Property="Background" Value="#111923"/>
             <Setter Property="BorderBrush" Value="{DynamicResource BorderBrush}"/>

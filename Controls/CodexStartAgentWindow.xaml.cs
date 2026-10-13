@@ -13,7 +13,7 @@ public partial class CodexStartAgentWindow : Window, IDashboardReplacementWindow
 {
     private bool _replacementClosePending;
     public bool IsDashboardReplacementReady => !IsSubmitting && !_savingContext && !_checkingStatus &&
-        !_closingContext && !_pastingImage && !_loadingAccess;
+        !_closingContext && !_pastingImage && !_loadingAccess && !_changingContextGatherer && !_receivingContextGathererDraft;
     public bool IsDashboardReplacementClosePending => _replacementClosePending;
 
     private readonly string _projectId;
@@ -57,13 +57,15 @@ public partial class CodexStartAgentWindow : Window, IDashboardReplacementWindow
 
     public CodexStartAgentWindow(string projectId, string projectName, string folder, string draft = "",
         string? pendingAttemptId = null, IReadOnlyList<CodexAgentChatImage>? draftImages = null,
-        bool keepAwake = false)
+        bool keepAwake = false, bool inspectSubmission = false)
     {
+        FullStackLauncher.Services.WindowTheme.Attach(this);
         _projectId = projectId;
         _projectName = projectName;
         _folder = folder;
         _previousAttemptId = pendingAttemptId;
         InitializeComponent();
+        InitializeContentSizing();
         ProjectTitle.Text = projectName;
         ProjectTitle.ToolTip = folder;
         PromptBox.Text = draft;
@@ -92,18 +94,21 @@ public partial class CodexStartAgentWindow : Window, IDashboardReplacementWindow
         {
             PromptBox.Focus();
             PromptBox.CaretIndex = PromptBox.Text.Length;
-            // Start Agent always opens a composer. Old receipts are inspected only
-            // through Previous submission, never adopted as this draft's identity.
+            // Ordinary Start Agent opens a composer. Explicit submission review uses
+            // the same recovery path, preserving the unsent composer separately.
             if (!_closed && _preferencesAvailable)
             {
                 await LoadAccessAsync();
                 if (_accessAvailable) await LoadModelsAsync();
             }
+            if (!_closed && inspectSubmission && pendingAttemptId is not null)
+                await InspectSubmissionAsync(pendingAttemptId);
         };
         Closed += (_, _) =>
         {
             _closed = true;
             _lifetime.Cancel();
+            _ = StopContextGathererAsync();
             _lifetime.Dispose();
         };
     }
@@ -118,7 +123,7 @@ public partial class CodexStartAgentWindow : Window, IDashboardReplacementWindow
         UpdateControls();
         try
         {
-            var models = await new CodexModelCatalog().LoadAsync(_lifetime.Token);
+            var models = await new CodexModelCatalog().LoadAsync(_folder, _lifetime.Token);
             if (_closed) return;
             _restoringModels = true;
             try
@@ -219,6 +224,7 @@ public partial class CodexStartAgentWindow : Window, IDashboardReplacementWindow
     {
         if (_initializing) return;
         var locked = IsSubmitting || _checkingStatus || _savingContext || _pastingImage ||
+            _changingContextGatherer || _receivingContextGathererDraft ||
             PendingAttemptId is not null || _composerDraft is not null;
         var canChoose = !locked && !_loadingModels && !_loadingAccess;
         ModelChoice.IsEnabled = canChoose;
@@ -228,32 +234,35 @@ public partial class CodexStartAgentWindow : Window, IDashboardReplacementWindow
         EffortChoice.ToolTip = (EffortChoice.SelectedItem as CodexReasoningEffortOption)?.Description;
         RefreshButton.IsEnabled = canChoose;
         PromptBox.IsReadOnly = locked;
-        MessageImages.IsEnabled = !locked;
+        MessageImages.IsEnabled = !IsSubmitting && !_receivingContextGathererDraft && !_pastingImage;
+        MessageImages.Tag = !locked;
         ContextBox.IsReadOnly = locked || !_preferencesAvailable;
         SaveContextButton.IsEnabled = !locked && _preferencesAvailable && HasUnsavedContext;
         ContextStatus.Text = HasUnsavedContext ? "Unsaved context" :
             string.IsNullOrWhiteSpace(ContextBox.Text) ? "" : "Saved for this project";
-        CloseButton.IsEnabled = !IsSubmitting && !_savingContext && !_checkingStatus && !_closingContext && !_pastingImage && !_loadingAccess;
+        CloseButton.IsEnabled = !IsSubmitting && !_savingContext && !_checkingStatus && !_closingContext && !_pastingImage && !_loadingAccess &&
+            !_changingContextGatherer && !_receivingContextGathererDraft;
         StartButton.IsEnabled = !locked && !_loadingModels && !_loadingAccess && _accessAvailable && _preferencesAvailable && _recoveryAvailable &&
             ModelChoice.SelectedItem is CodexModelOption && EffortChoice.SelectedItem is CodexReasoningEffortOption &&
             AccessChoice.SelectedItem is AgentAccessOption &&
             (!string.IsNullOrWhiteSpace(PromptBox.Text) || _messageImages.Count > 0);
-        StartButton.Content = IsSubmitting ? "Starting…" : "_Start Agent";
+        WaitButton.IsEnabled = StartButton.IsEnabled;
+        WaitButton.Content = _savingWaiting ? "Saving…" : "_Wait";
+        StartButton.Content = IsSubmitting && !_savingWaiting ? "Starting…" : "_Start Agent";
         var showingSubmission = PendingAttemptId is not null || _composerDraft is not null;
         Title = showingSubmission ? "Agent submission" : "Start Agent";
         ChatModeTitle.Text = showingSubmission ? "Submitted Codex chat" : "New Codex chat";
         StartButton.Visibility = showingSubmission ? Visibility.Collapsed : Visibility.Visible;
+        WaitButton.Visibility = StartButton.Visibility;
         CheckStatusButton.Visibility = PendingAttemptId is not null || !_recoveryAvailable ? Visibility.Visible : Visibility.Collapsed;
         CheckStatusButton.IsEnabled = !_checkingStatus && !IsSubmitting;
         ReviewButton.Visibility = _pendingReceipt?.RequiresReview == true ? Visibility.Visible : Visibility.Collapsed;
         ReviewButton.IsEnabled = !_checkingStatus && !IsSubmitting;
-        PreviousSubmissionButton.Visibility = PendingAttemptId is null && _composerDraft is null
-            ? Visibility.Visible : Visibility.Collapsed;
-        PreviousSubmissionButton.IsEnabled = canChoose && !_closingContext;
         NewChatButton.Visibility = PendingAttemptId is not null || _composerDraft is not null
             ? Visibility.Visible : Visibility.Collapsed;
         NewChatButton.IsEnabled = !IsSubmitting && !_checkingStatus && !_savingContext && !_pastingImage &&
-            !_loadingAccess && !_loadingModels && !_closingContext;
+            !_loadingAccess && !_loadingModels && !_closingContext && !_changingContextGatherer && !_receivingContextGathererDraft;
+        UpdateContextGathererControls();
     }
 
     private async void Refresh_Click(object sender, RoutedEventArgs e)
@@ -313,31 +322,15 @@ public partial class CodexStartAgentWindow : Window, IDashboardReplacementWindow
 
     private async void Start_Click(object sender, RoutedEventArgs e)
     {
-        if (!StartButton.IsEnabled || _preferences is null ||
-            ModelChoice.SelectedItem is not CodexModelOption model ||
-            EffortChoice.SelectedItem is not CodexReasoningEffortOption effort ||
-            AccessChoice.SelectedItem is not AgentAccessOption access) return;
-        if (PromptBox.Text.Length > CodexAgentChatClient.MaximumPromptCharacters)
-        {
-            ShowStatus($"Message is too long ({PromptBox.Text.Length:N0} characters). Shorten it to " +
-                $"{CodexAgentChatClient.MaximumPromptCharacters:N0} characters or fewer. Your full text is kept.", error: true);
-            PromptBox.Focus();
-            return;
-        }
-        if (!ValidateContext()) return;
-        var prompt = PromptBox.Text;
-        var context = ContextBox.Text;
-        var keepAwake = DraftKeepAwake;
-        var candidate = _preferences with { ModelId = model.Id, ReasoningEffort = effort.Id, AccessMode = access.Mode };
+        if (!StartButton.IsEnabled || !TryCaptureRequest(out var request, out var candidate)) return;
         IsSubmitting = true;
         ShowStatus("Starting a new Codex chat…");
         UpdateControls();
         try
         {
+            await StopContextGathererAsync();
             // Save only the remembered model and access choices here. Context changes require Save context.
             _preferences = await Task.Run(() => _store.Save(candidate));
-            var request = new CodexAgentChatRequest(_projectId, _projectName, _folder, prompt,
-                context, model.Id, effort.Id) { Images = DraftImages, AccessMode = access.Mode, KeepAwake = keepAwake };
             var receipt = await _client.StartAsync(request, _lifetime.Token);
             if (!_closed) ApplyReceipt(receipt);
         }
@@ -355,6 +348,34 @@ public partial class CodexStartAgentWindow : Window, IDashboardReplacementWindow
                 if (PendingAttemptId is null) PromptBox.Focus();
             }
         }
+    }
+
+    private bool TryCaptureRequest(out CodexAgentChatRequest request, out CodexAgentPromptPreferences preferences)
+    {
+        request = null!;
+        preferences = null!;
+        if (_preferences is null ||
+            ModelChoice.SelectedItem is not CodexModelOption model ||
+            EffortChoice.SelectedItem is not CodexReasoningEffortOption effort ||
+            AccessChoice.SelectedItem is not AgentAccessOption access) return false;
+        if (PromptBox.Text.Length > CodexAgentChatClient.MaximumPromptCharacters)
+        {
+            ShowStatus($"Message is too long ({PromptBox.Text.Length:N0} characters). Shorten it to " +
+                $"{CodexAgentChatClient.MaximumPromptCharacters:N0} characters or fewer. Your full text is kept.", error: true);
+            PromptBox.Focus();
+            return false;
+        }
+        if (!ValidateContext()) return false;
+        // Capture the entire draft before awaiting; every start path uses this same frozen request.
+        request = new CodexAgentChatRequest(_projectId, _projectName, _folder, PromptBox.Text,
+            ContextBox.Text, model.Id, effort.Id)
+        {
+            Images = DraftImages,
+            AccessMode = access.Mode,
+            KeepAwake = DraftKeepAwake
+        };
+        preferences = _preferences with { ModelId = model.Id, ReasoningEffort = effort.Id, AccessMode = access.Mode };
+        return true;
     }
 
     private void ApplyReceipt(CodexAgentChatReceipt receipt)
@@ -424,15 +445,15 @@ public partial class CodexStartAgentWindow : Window, IDashboardReplacementWindow
         System.Collections.IEnumerable? Models, CodexModelOption? Model, CodexReasoningEffortOption? Effort,
         AgentAccessOption? Access);
 
-    private async void PreviousSubmission_Click(object sender, RoutedEventArgs e)
+    private async Task InspectSubmissionAsync(string attemptId)
     {
-        if (!PreviousSubmissionButton.IsEnabled) return;
+        if (_closed || !RefreshButton.IsEnabled || _closingContext) return;
         _checkingStatus = true;
         UpdateControls();
         try
         {
-            var receipt = await Task.Run(() => _previousAttemptId is { } attemptId
-                ? _client.ReadReceipt(attemptId) : _client.FindPendingReceipt(_projectId));
+            await StopContextGathererAsync();
+            var receipt = await Task.Run(() => _client.ReadReceipt(attemptId));
             if (_closed) return;
             if (receipt is null)
             {
@@ -631,7 +652,8 @@ public partial class CodexStartAgentWindow : Window, IDashboardReplacementWindow
 
     private async void Window_Closing(object? sender, CancelEventArgs e)
     {
-        if (IsSubmitting || _savingContext || _checkingStatus || _closingContext || _pastingImage || _loadingAccess)
+        if (IsSubmitting || _savingContext || _checkingStatus || _closingContext || _pastingImage || _loadingAccess ||
+            _changingContextGatherer || _receivingContextGathererDraft)
         {
             e.Cancel = true;
             return;

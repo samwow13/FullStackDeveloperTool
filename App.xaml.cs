@@ -10,6 +10,7 @@ public partial class App : Application
 
     protected override async void OnStartup(StartupEventArgs e)
     {
+        Services.WindowTheme.Initialize();
         DispatcherUnhandledException += (_, args) =>
         {
             // WPF can report one deferred rendering error per item. A modal dialog here

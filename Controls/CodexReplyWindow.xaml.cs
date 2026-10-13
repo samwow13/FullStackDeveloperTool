@@ -28,6 +28,7 @@ public partial class CodexReplyWindow : Window, IDashboardReplacementWindow
     public CodexReplyWindow(string threadId, string title, string draft, string replyId, bool retryLocked,
         string agentMessage = "")
     {
+        FullStackLauncher.Services.WindowTheme.Attach(this);
         _threadId = threadId;
         _inbox = new CodexReplyInboxStore(new SettingsStore().SettingsPath);
         ReplyId = replyId;

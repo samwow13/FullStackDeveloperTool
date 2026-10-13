@@ -21,14 +21,18 @@ public sealed class CodexModelCatalog
     private const string IncompatibleMessage =
         "Codex returned an unsupported model catalog. Update Codex, then refresh models.";
 
-    public async Task<IReadOnlyList<CodexModelOption>> LoadAsync(CancellationToken cancellationToken = default)
+    public Task<IReadOnlyList<CodexModelOption>> LoadAsync(CancellationToken cancellationToken = default) =>
+        LoadAsync(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), cancellationToken);
+
+    public async Task<IReadOnlyList<CodexModelOption>> LoadAsync(string folder,
+        CancellationToken cancellationToken = default)
     {
         using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         timeout.CancelAfter(TimeSpan.FromSeconds(30));
         try
         {
             await using var connection = await CodexAppServerConnection.StartAsync(
-                Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), timeout.Token).ConfigureAwait(false);
+                folder, timeout.Token).ConfigureAwait(false);
             return await LoadAsync(connection, timeout.Token).ConfigureAwait(false);
         }
         catch (Exception) when (timeout.IsCancellationRequested)

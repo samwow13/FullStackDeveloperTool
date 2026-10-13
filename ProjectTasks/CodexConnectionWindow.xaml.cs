@@ -13,6 +13,7 @@ public partial class CodexConnectionWindow : Window, IDashboardReplacementWindow
 
     public CodexConnectionWindow(string projectId, string projectName, string folder)
     {
+        FullStackLauncher.Services.WindowTheme.Attach(this);
         InitializeComponent();
         _model = new(projectId, projectName, folder);
         DataContext = _model;

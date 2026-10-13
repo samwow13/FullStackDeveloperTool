@@ -100,6 +100,46 @@ public sealed class ProjectGitService
         }
     }
 
+    /// <summary>Discard stale refresh results only for repositories using the changed Azure token scope.</summary>
+    internal void InvalidateAzureTokenScope(string scope)
+    {
+        static bool Matches(GitRemoteInfo remote, string expected)
+        {
+            if ((remote.Provider ?? GitConnectionService.InferProvider(remote.FetchUrl)) != GitHostingProvider.AzureDevOps)
+                return false;
+            try
+            {
+                var target = GitConnectionService.ParseTarget(GitHostingProvider.AzureDevOps, remote.FetchUrl);
+                return !target.IsSsh && AzureDevOpsImportService.ParseProjectUrl(target.CloneUrl).TokenScope == expected;
+            }
+            catch (InvalidOperationException) { return false; }
+        }
+        List<(string Root, GitRepositoryState State)> affected = [];
+        lock (_gate)
+        {
+            foreach (var root in _repositories.Where(pair => pair.Value.State?.Snapshot?.Remotes.Any(remote => Matches(remote, scope)) == true)
+                .Select(pair => pair.Key).ToArray())
+            {
+                var entry = _repositories[root];
+                entry.Generation++;
+                entry.Dirty = true;
+                entry.Details.Clear();
+                if (entry.State is { } state)
+                {
+                    var updated = state with { ActiveConnection = new()
+                    {
+                        Label = "Reading connection" + (state.ActiveRemote is { } active ? " · " + active.Name : ""),
+                        HeaderLabel = "Git - Reading connection…",
+                        Detail = "The saved Azure DevOps token scope changed. The active connection route needs a fresh local read."
+                    } };
+                    entry.State = updated;
+                    affected.Add((root, updated));
+                }
+            }
+        }
+        foreach (var (root, state) in affected) PublishRepository(root, state);
+    }
+
     /// <summary>Record only a confirmed explicit fetch; this never performs a Git operation.</summary>
     public void MarkFetched(string folder, string remoteName)
     {
@@ -116,7 +156,7 @@ public sealed class ProjectGitService
         PublishRepository(root, published);
     }
 
-    /// <summary>Read selection and summaries once, with no Git subprocess or snapshot rescan.</summary>
+    /// <summary>Read selection and summaries locally. Only a changed selected remote rereads its Git authentication route.</summary>
     public async Task<GitRepositoryState> RefreshLedgerAsync(string folder, CancellationToken token = default)
     {
         var root = Normalize(folder);
@@ -379,6 +419,7 @@ public sealed class ProjectGitService
                     }, token).ConfigureAwait(false);
                 }
             }
+            state = state with { ActiveConnection = await GitActiveConnectionService.ReadAsync(state, token).ConfigureAwait(false) };
             var detailRemote = state.ActiveRemote?.Name ?? "";
             if (snapshot.IsRepository) state = await BuildDetailsAsync(state, detailRemote, token).ConfigureAwait(false);
         }
@@ -394,7 +435,11 @@ public sealed class ProjectGitService
             state = (entry.State ?? new GitRepositoryState { RepositoryRoot = root }) with
             {
                 Error = FailureMessage(exception), Failure = exception, IsRefreshing = false,
-                PendingSummaries = null
+                PendingSummaries = null, ActiveConnection = new()
+                {
+                    Label = "Connection unavailable",
+                    Detail = "The repository could not be read. Refresh Git status to read the active connection."
+                }
             };
         }
         finally { if (acquired) _readSlots.Release(); }
@@ -527,9 +572,25 @@ public sealed class ProjectGitService
         GitRepositoryState before, long generation, CancellationToken token)
     {
         var after = await ReadLedgerStateAsync(before, token).ConfigureAwait(false);
-        var changed = !SameLedger(before, after);
         var selectedChanged = before.ActiveRemote?.Name != after.ActiveRemote?.Name
             || before.Selection != after.Selection || before.SelectionError != after.SelectionError;
+        if (before.ActiveRemote != after.ActiveRemote)
+        {
+            await _readSlots.WaitAsync(token).ConfigureAwait(false);
+            try { after = after with { ActiveConnection = await GitActiveConnectionService.ReadAsync(after, token).ConfigureAwait(false) }; }
+            catch (GitCommandExitUnconfirmedException exception)
+            {
+                lock (_gate) entry.UnconfirmedCommand = exception;
+                after = after with
+                {
+                    Error = FailureMessage(exception), Failure = exception,
+                    ActiveConnection = new() { Label = "Connection unavailable",
+                        Detail = "The Git connection read has not exited. Confirm its exit before retrying." }
+                };
+            }
+            finally { _readSlots.Release(); }
+        }
+        var changed = !SameLedger(before, after);
         var publish = false;
         lock (_gate)
         {
@@ -566,7 +627,8 @@ public sealed class ProjectGitService
 
     private static async Task<GitRepositoryState> ReadLedgerStateAsync(GitRepositoryState state, CancellationToken token)
     {
-        if (state.Snapshot is not { IsRepository: true } snapshot) return state;
+        if (state.Snapshot is not { IsRepository: true } snapshot)
+            return state with { ActiveConnection = GitActiveConnectionService.NoRemote(state) };
         try
         {
             var ledger = await AgentGitChangeStore.ReadCachedAsync(snapshot, token).ConfigureAwait(false);
@@ -576,14 +638,16 @@ public sealed class ProjectGitService
                 : ledger.Summaries.SingleOrDefault(batch => batch.RemoteName == active.Name && batch.ConnectionId == connectionId)
                     ?? new AgentGitSummaryBatch { RepositoryRoot = state.RepositoryRoot, Branch = snapshot.Branch,
                         RemoteName = active.Name, ConnectionId = connectionId! };
-            return state with { Selection = ledger.Selection, ActiveRemote = active, SelectionSource = source,
+            var updated = state with { Selection = ledger.Selection, ActiveRemote = active, SelectionSource = source,
                 SelectionError = error, LedgerError = null, PendingSummaries = summaries, SummaryBatches = ledger.Summaries };
+            return active is null ? updated with { ActiveConnection = GitActiveConnectionService.NoRemote(updated) } : updated;
         }
         catch (OperationCanceledException) when (token.IsCancellationRequested) { throw; }
         catch (Exception exception)
         {
-            return state with { Selection = null, ActiveRemote = null, SelectionSource = null,
+            var updated = state with { Selection = null, ActiveRemote = null, SelectionSource = null,
                 SelectionError = FailureMessage(exception), LedgerError = FailureMessage(exception), PendingSummaries = null, SummaryBatches = [] };
+            return updated with { ActiveConnection = GitActiveConnectionService.NoRemote(updated) };
         }
     }
 
@@ -755,6 +819,7 @@ public sealed class ProjectGitService
 
     private static bool SameLedger(GitRepositoryState left, GitRepositoryState right) =>
         left.Selection == right.Selection && left.ActiveRemote?.Name == right.ActiveRemote?.Name
+        && left.ActiveConnection == right.ActiveConnection
         && left.SelectionError == right.SelectionError && left.LedgerError == right.LedgerError
         && SameSummaries(left.PendingSummaries, right.PendingSummaries)
         && left.SummaryBatches.Count == right.SummaryBatches.Count

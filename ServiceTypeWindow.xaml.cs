@@ -8,6 +8,7 @@ public partial class ServiceTypeWindow : Window
 
     public ServiceTypeWindow(string workingDirectory)
     {
+        FullStackLauncher.Services.WindowTheme.Attach(this);
         InitializeComponent();
         Width = Math.Min(Width, SystemParameters.WorkArea.Width);
         MaxHeight = SystemParameters.WorkArea.Height;

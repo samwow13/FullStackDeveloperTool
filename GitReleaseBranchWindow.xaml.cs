@@ -46,6 +46,7 @@ public partial class GitReleaseBranchWindow : Window, IDashboardReplacementWindo
         Func<string, CancellationToken, IProgress<string>, Task<GitLocalMergeReview>>? compare = null,
         Func<GitLocalMergeReview, CancellationToken, IProgress<string>, Task<GitLocalMergeOutcome>>? merge = null)
     {
+        FullStackLauncher.Services.WindowTheme.Attach(this);
         _loadBranches = loadBranches;
         _remote = remote;
         _currentBranch = currentBranch;

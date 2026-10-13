@@ -1,4 +1,5 @@
 using System.IO;
+using System.Net;
 using System.Net.Http;
 using System.Net.Http.Headers;
 using System.Security.Cryptography;
@@ -25,10 +26,15 @@ public static class GitConnectionService
         {
             var (_, host, path, _) = SplitTarget(GitRepositoryService.ValidateRemoteUrl(url));
             if (IsAzureHost(host)) return GitHostingProvider.AzureDevOps;
+            var parts = path.Trim('/').Split('/');
+            if (parts.Length >= 3 && parts[^2] == "_git")
+            {
+                _ = ParseTarget(GitHostingProvider.AzureDevOps, url);
+                return GitHostingProvider.AzureDevOps;
+            }
             if (host.Equals("github.com", StringComparison.OrdinalIgnoreCase)
                 || host.Equals("ssh.github.com", StringComparison.OrdinalIgnoreCase)) return GitHostingProvider.GitHub;
-            // Enterprise hosts cannot be identified by their domain name alone.
-            _ = path;
+            // Other Enterprise hosts cannot be identified by their domain name alone.
             return null;
         }
         catch (InvalidOperationException) { return null; }
@@ -38,12 +44,14 @@ public static class GitConnectionService
 
     public static GitConnectionTarget ParseTarget(GitHostingProvider provider, string url)
     {
-        var clean = GitRepositoryService.ValidateRemoteUrl(url.Trim());
-        if (clean.Split('/').Any(part => Uri.UnescapeDataString(part) is "." or ".."))
+        var input = url.Trim();
+        if (input.Split('/').Any(part => Uri.UnescapeDataString(part) is "." or ".."))
             throw new InvalidOperationException("Use the provider's complete clone URL without ambiguous path segments.");
+        var clean = GitRepositoryService.ValidateRemoteUrl(input);
         var (ssh, host, path, user) = SplitTarget(clean);
-        if (Uri.CheckHostName(host) != UriHostNameType.Dns || !host.Contains('.') || host.EndsWith('.')
-            || host.Equals("localhost", StringComparison.OrdinalIgnoreCase))
+        if ((provider != GitHostingProvider.AzureDevOps || ssh)
+            && (Uri.CheckHostName(host) != UriHostNameType.Dns || !host.Contains('.') || host.EndsWith('.')
+            || host.Equals("localhost", StringComparison.OrdinalIgnoreCase)))
             throw new InvalidOperationException("Enter the clone URL for the hosting domain, including its full domain name.");
         var parts = path.Trim('/').Split('/');
         if (parts.Any(part => part.Length == 0 || UnsafePathPart(part)))
@@ -51,8 +59,12 @@ public static class GitConnectionService
         if (ssh && user != "git")
             throw new InvalidOperationException("Use the provider's SSH clone URL with the git SSH user.");
         string organization;
+        var collectionUrl = "";
+        var isHosted = false;
         if (provider == GitHostingProvider.GitHub)
         {
+            if (!ssh && !new Uri(clean).IsDefaultPort)
+                throw new InvalidOperationException("This setup flow supports GitHub HTTPS on its standard port. Configure other transport endpoints with Git directly.");
             if (IsAzureHost(host)) throw new InvalidOperationException("This URL belongs to Azure DevOps. Choose Azure DevOps in the previous step.");
             if (parts.Length != 2 || !Regex.IsMatch(parts[0], "^[A-Za-z0-9][A-Za-z0-9-]*$")
                 || !Regex.IsMatch(parts[1], "^[A-Za-z0-9_.-]+$") || parts[1] is "." or ".." or ".git")
@@ -66,24 +78,26 @@ public static class GitConnectionService
                 if (!host.Equals("ssh.dev.azure.com", StringComparison.OrdinalIgnoreCase) || parts.Length != 4 || parts[0] != "v3")
                     throw new InvalidOperationException("Use the Azure DevOps SSH clone URL: git@ssh.dev.azure.com:v3/organization/project/repository.");
                 organization = parts[1];
+                if (!OrganizationName.IsMatch(organization)) throw new InvalidOperationException("The Azure organization name in this clone URL is invalid.");
+                collectionUrl = "https://dev.azure.com/" + Uri.EscapeDataString(organization);
+                isHosted = true;
             }
-            else if (host.Equals("dev.azure.com", StringComparison.OrdinalIgnoreCase))
+            else
             {
-                if (parts.Length != 4 || parts[2] != "_git")
-                    throw new InvalidOperationException("Use https://dev.azure.com/organization/project/_git/repository from Azure DevOps Clone.");
-                organization = parts[0];
+                if (parts.Length < 3 || parts[^2] != "_git" || parts.Take(parts.Length - 2).Contains("_git", StringComparer.Ordinal))
+                    throw new InvalidOperationException("Use the complete Azure DevOps HTTPS clone URL ending in project/_git/repository. Azure DevOps Server collection paths and HTTPS ports are supported.");
+                var project = AzureDevOpsImportService.ParseProjectUrl(clean);
+                organization = project.Organization;
+                collectionUrl = project.CollectionUrl;
+                isHosted = project.IsHosted;
             }
-            else if (Regex.IsMatch(host, "^[A-Za-z0-9][A-Za-z0-9-]*\\.visualstudio\\.com$", RegexOptions.IgnoreCase))
-            {
-                if (parts.Length is < 3 or > 4 || parts[^2] != "_git")
-                    throw new InvalidOperationException("Use the complete organization.visualstudio.com clone URL containing project/_git/repository.");
-                organization = host.Split('.')[0];
-            }
-            else throw new InvalidOperationException("Use an Azure DevOps Services domain at dev.azure.com or organization.visualstudio.com. Azure DevOps Server authentication is not supported by this setup flow.");
-            if (!OrganizationName.IsMatch(organization)) throw new InvalidOperationException("The Azure organization name in this clone URL is invalid.");
         }
         else throw new InvalidOperationException("Choose GitHub or Azure DevOps before entering a clone URL.");
-        return new GitConnectionTarget { Provider = provider, CloneUrl = clean, Host = host, Organization = organization, IsSsh = ssh };
+        return new GitConnectionTarget
+        {
+            Provider = provider, CloneUrl = clean, Host = host, Organization = organization,
+            CollectionUrl = collectionUrl, IsHosted = isHosted, IsSsh = ssh
+        };
     }
 
     public static Task<GitConnectionCheckResult> CheckAsync(string root, GitHostingProvider provider, string url, CancellationToken token = default) =>
@@ -122,7 +136,7 @@ public static class GitConnectionService
                 finally { savedToken = null; }
                 if (!tokenAuthenticated)
                     return new GitConnectionCheckResult { Message = "The saved Azure DevOps token could not be verified. Check network access, token expiry, organization, and Code permissions, then reconnect with a token." };
-                var accessible = await ProbeRepositoryAsync(root, target, token, []).ConfigureAwait(false);
+                var accessible = await ProbeRepositoryAsync(root, target, token, [], personalAccessToken: true).ConfigureAwait(false);
                 return new GitConnectionCheckResult
                 {
                     Authenticated = true, RepositoryAccessible = accessible,
@@ -139,6 +153,19 @@ public static class GitConnectionService
                     Message = "Automatic verification skips custom Git credential helpers. Open Config and choose Check connection to verify this repository explicitly."
                 };
 
+            if (target.Provider == GitHostingProvider.AzureDevOps && !target.IsHosted
+                && await VerifyIdentityAsync(target, null, token).ConfigureAwait(false))
+            {
+                var accessible = await ProbeRepositoryAsync(root, target, token, helperOptions, windowsAuthentication: true).ConfigureAwait(false);
+                return new GitConnectionCheckResult
+                {
+                    Authenticated = true, RepositoryAccessible = accessible,
+                    Message = accessible
+                        ? "Windows authentication and repository read access verified. Push permissions are checked when pushing."
+                        : "Windows authentication is verified, but Git repository read access could not be verified. Check Git Credential Manager, repository permissions and network access."
+                };
+            }
+
             if (interactive && target.Provider == GitHostingProvider.GitHub)
             {
                 var instance = new Uri(target.CloneUrl).GetLeftPart(UriPartial.Authority);
@@ -149,12 +176,15 @@ public static class GitConnectionService
                     return new GitConnectionCheckResult { Message = "GitHub sign-in did not complete. Install or update Git for Windows with Git Credential Manager enabled, then retry. For Enterprise, your administrator may need to configure Git Credential Manager's OAuth application." };
             }
 
-            var providerId = target.Provider == GitHostingProvider.GitHub ? "github" : "azure-repos";
+            var providerId = target.Provider == GitHostingProvider.GitHub ? "github" : target.IsHosted ? "azure-repos" : "generic";
             var credentialArgs = new List<string>
             {
                 "-c", "credential.provider=" + providerId, "-c", "credential.guiPrompt=" + (interactive ? "true" : "false"),
                 "-c", "credential.allowUnsafeRemotes=false"
             };
+            if (target.Provider == GitHostingProvider.AzureDevOps && !target.IsHosted)
+                credentialArgs.AddRange(["-c", "credential." + target.CloneUrl + ".provider=generic",
+                    "-c", "credential." + target.CloneUrl + ".useHttpPath=true"]);
             credentialArgs.AddRange(helperOptions);
             credentialArgs.AddRange(["credential", "fill"]);
             var credential = await GitRepositoryService.GitAsync(root,
@@ -285,16 +315,23 @@ public static class GitConnectionService
             throw new InvalidOperationException("Git rewrites this clone URL or cannot resolve it. Review your URL rewrite rules with Git before connecting this domain; setup will not send credentials to a substituted destination.");
     }
 
-    private static async Task<bool> ProbeRepositoryAsync(string root, GitConnectionTarget target, CancellationToken token, IReadOnlyList<string>? helperOptions = null)
+    private static async Task<bool> ProbeRepositoryAsync(string root, GitConnectionTarget target, CancellationToken token,
+        IReadOnlyList<string>? helperOptions = null, bool windowsAuthentication = false, bool personalAccessToken = false)
     {
         await RequireUnchangedUrlAsync(root, target, token).ConfigureAwait(false);
         var args = new List<string>
         {
             "-c", "http.followRedirects=false", "-c", "http." + target.CloneUrl + ".sslVerify=true"
         };
+        if (target.Provider == GitHostingProvider.AzureDevOps && !target.IsHosted)
+            args.AddRange(["-c", "credential." + target.CloneUrl + ".provider=generic",
+                "-c", "credential." + target.CloneUrl + ".useHttpPath=true"]);
+        if (windowsAuthentication)
+            args.AddRange(["-c", "http." + target.CloneUrl + ".emptyAuth=true"]);
         if (helperOptions is not null) args.AddRange(helperOptions);
         args.AddRange(["ls-remote", "--heads", "--", target.CloneUrl]);
-        var result = await GitRepositoryService.GitAsync(root, args, token, network: true, strictSsh: true).ConfigureAwait(false);
+        var result = await GitRepositoryService.GitAsync(root, args, token, network: true, strictSsh: true,
+            azureDevOpsTokenUrl: personalAccessToken ? target.CloneUrl : null).ConfigureAwait(false);
         if (result.ExitCode != 0) return false;
         // Empty repositories are valid; successful empty output does not mean a missing branch.
         return result.Output.Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries).All(line =>
@@ -316,18 +353,21 @@ public static class GitConnectionService
             var equals = clean.IndexOf('=');
             if (equals <= 0) return null;
             var key = clean[..equals];
-            if (key is not ("protocol" or "host" or "username" or "password")) continue;
+            if (key is not ("protocol" or "host" or "path" or "username" or "password")) continue;
             if (!fields.TryAdd(key, clean[(equals + 1)..])) return null;
         }
         var uri = new Uri(target.CloneUrl);
         if (!fields.TryGetValue("protocol", out var protocol) || protocol != "https"
-            || !fields.TryGetValue("host", out var host) || !host.Equals(uri.Authority, StringComparison.OrdinalIgnoreCase)
+            || !fields.TryGetValue("host", out var host)
+            || (!host.Equals(uri.Authority, StringComparison.OrdinalIgnoreCase)
+                && !(uri.IsDefaultPort && host.Equals(uri.Authority + ":443", StringComparison.OrdinalIgnoreCase)))
             || !fields.TryGetValue("username", out var username) || username.Contains(':') || username.Any(char.IsControl)
             || !fields.TryGetValue("password", out var password) || password.Length is 0 or > 65535 || password.Any(char.IsControl)) return null;
+        if (fields.TryGetValue("path", out var path) && path != Uri.UnescapeDataString(uri.AbsolutePath).Trim('/')) return null;
         return new Credential(username, password);
     }
 
-    private static async Task<bool> VerifyIdentityAsync(GitConnectionTarget target, Credential credential, CancellationToken token,
+    private static async Task<bool> VerifyIdentityAsync(GitConnectionTarget target, Credential? credential, CancellationToken token,
         bool personalAccessToken = false)
     {
         var clone = new Uri(target.CloneUrl);
@@ -335,21 +375,37 @@ public static class GitConnectionService
             ? target.Host.Equals("github.com", StringComparison.OrdinalIgnoreCase)
                 ? new Uri("https://api.github.com/user")
                 : new Uri(clone.GetLeftPart(UriPartial.Authority) + "/api/v3/user")
-            : new Uri(target.Host.Equals("dev.azure.com", StringComparison.OrdinalIgnoreCase)
-                ? "https://dev.azure.com/" + target.Organization + "/_apis/connectionData?connectOptions=0&lastChangeId=-1&lastChangeId64=-1"
-                : "https://" + target.Host + "/_apis/connectionData?connectOptions=0&lastChangeId=-1&lastChangeId64=-1");
+            : new Uri(target.CollectionUrl + "/_apis/connectionData?connectOptions=0&lastChangeId=-1&lastChangeId64=-1");
         using var timeout = CancellationTokenSource.CreateLinkedTokenSource(token);
         timeout.CancelAfter(TimeSpan.FromSeconds(30));
-        // No redirects or cookie/default-credential authentication. Only the reviewed provider sees this header.
-        using var handler = new HttpClientHandler { AllowAutoRedirect = false, UseCookies = false, UseDefaultCredentials = false };
+        // Windows authentication is limited to the reviewed Server collection. Redirects and cookies stay disabled.
+        using var handler = new HttpClientHandler
+        {
+            AllowAutoRedirect = false, UseCookies = false,
+            UseDefaultCredentials = credential is null && target.Provider == GitHostingProvider.AzureDevOps && !target.IsHosted
+        };
+        if (credential is not null && !personalAccessToken && target.Provider == GitHostingProvider.AzureDevOps && !target.IsHosted)
+        {
+            var separator = credential.Username.IndexOf('\\');
+            var account = separator > 0 && separator < credential.Username.Length - 1
+                ? new NetworkCredential(credential.Username[(separator + 1)..], credential.Password, credential.Username[..separator])
+                : new NetworkCredential(credential.Username, credential.Password);
+            var credentials = new CredentialCache();
+            var collection = new Uri(target.CollectionUrl + "/");
+            credentials.Add(collection, "Negotiate", account);
+            credentials.Add(collection, "NTLM", account);
+            handler.Credentials = credentials;
+        }
         using var client = new HttpClient(handler) { Timeout = Timeout.InfiniteTimeSpan };
         using var request = new HttpRequestMessage(HttpMethod.Get, endpoint);
         request.Headers.UserAgent.ParseAdd("FullStackLauncher-Git-Setup/1.0");
         request.Headers.Accept.ParseAdd("application/json");
         // Azure's Entra credentials are JWTs; PATs and GitHub credentials use the helper's Basic pair.
-        request.Headers.Authorization = !personalAccessToken && target.Provider == GitHostingProvider.AzureDevOps && credential.Password.StartsWith("eyJ", StringComparison.Ordinal)
-            ? new AuthenticationHeaderValue("Bearer", credential.Password)
-            : new AuthenticationHeaderValue("Basic", Convert.ToBase64String(Encoding.UTF8.GetBytes(credential.Username + ":" + credential.Password)));
+        if (credential is not null)
+            request.Headers.Authorization = !personalAccessToken && target.Provider == GitHostingProvider.AzureDevOps
+                && target.IsHosted && credential.Password.StartsWith("eyJ", StringComparison.Ordinal)
+                ? new AuthenticationHeaderValue("Bearer", credential.Password)
+                : new AuthenticationHeaderValue("Basic", Convert.ToBase64String(Encoding.UTF8.GetBytes(credential.Username + ":" + credential.Password)));
         try
         {
             using var response = await client.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, timeout.Token).ConfigureAwait(false);
@@ -390,8 +446,6 @@ public static class GitConnectionService
         if (scp.Success) return (true, scp.Groups["host"].Value.ToLowerInvariant(), scp.Groups["path"].Value, "git");
         if (!Uri.TryCreate(clean, UriKind.Absolute, out var uri) || uri.Scheme is not ("https" or "ssh"))
             throw new InvalidOperationException("Use the provider's HTTPS or SSH clone URL.");
-        if (uri.Scheme == "https" && !uri.IsDefaultPort)
-            throw new InvalidOperationException("This setup flow supports HTTPS on its standard port. Configure other transport endpoints with Git directly.");
         return (uri.Scheme == "ssh", uri.Host.ToLowerInvariant(), uri.AbsolutePath, uri.UserInfo);
     }
 

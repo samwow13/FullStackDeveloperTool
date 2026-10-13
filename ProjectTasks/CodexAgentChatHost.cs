@@ -79,6 +79,8 @@ internal static class CodexAgentChatHost
             Save(CodexAgentChatState.Starting, "Connecting to Codex for this new chat.");
             var request = receipt.Request;
             if (!Directory.Exists(request.Folder)) throw new InvalidOperationException("The project folder no longer exists.");
+            // Assemble bounded evidence before any remote chat mutation or submission-intent marker.
+            var preparedPrompt = MakePrompt(request);
             using var startup = new CancellationTokenSource(TimeSpan.FromSeconds(90));
             connection = await CodexAppServerConnection.StartAsync(request.Folder, startup.Token,
                 experimentalApi: true, includeImagePayloads: request.Images.Count > 0).ConfigureAwait(false);
@@ -113,7 +115,7 @@ internal static class CodexAgentChatHost
             Save(CodexAgentChatState.Starting, "Sending the prompt and saved project context.");
             var input = new List<object>
             {
-                new { type = "text", text = MakePrompt(request), text_elements = Array.Empty<object>() }
+                new { type = "text", text = preparedPrompt, text_elements = Array.Empty<object>() }
             };
             input.AddRange(stagedImagePaths.Select(path => (object)new { type = "localImage", path }));
             var turnResponse = await connection.RequestAsync("turn/start", new
@@ -229,13 +231,7 @@ internal static class CodexAgentChatHost
         }
     }
 
-    private static string MakePrompt(CodexAgentChatRequest request)
-    {
-        var prompt = string.IsNullOrWhiteSpace(request.Prompt) && request.Images.Count > 0
-            ? "Review the attached images." : request.Prompt;
-        return string.IsNullOrWhiteSpace(request.Context) ? prompt
-            : "Saved project context:\n" + request.Context + "\n\nUser request:\n" + prompt;
-    }
+    private static string MakePrompt(CodexAgentChatRequest request) => CodexAgentBrowserContext.BuildPrompt(request);
 
     private static async Task ContinueIfEnabledAsync(CodexAppServerConnection connection,
         CodexAgentChatReceipt original, CodexAgentKeepAwakeStore keepAwake)

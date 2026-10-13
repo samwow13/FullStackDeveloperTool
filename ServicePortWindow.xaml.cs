@@ -22,6 +22,7 @@ public partial class ServicePortWindow : Window, IDashboardReplacementWindow
     internal ServicePortWindow(string serviceName, int? port, string? unavailableReason,
         bool stopped, Func<string, Task> save)
     {
+        FullStackLauncher.Services.WindowTheme.Attach(this);
         _save = save;
         _initialPort = port?.ToString(CultureInfo.InvariantCulture) ?? "";
         _editable = unavailableReason is null;

@@ -36,6 +36,7 @@ public partial class DeveloperToolEditorWindow : Window
 
     public DeveloperToolEditorWindow(DeveloperTool tool, string settingsDirectory, bool isNew = false, IReadOnlyList<DeveloperTool>? tools = null)
     {
+        FullStackLauncher.Services.WindowTheme.Attach(this);
         ArgumentNullException.ThrowIfNull(tool);
         _settingsDirectory = Path.GetFullPath(settingsDirectory);
         _original = Clone(tool);

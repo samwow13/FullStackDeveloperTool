@@ -32,6 +32,7 @@ public partial class ApiSecretsWindow : Window, IDashboardReplacementWindow
 
     public ApiSecretsWindow(string workingDirectory, string serviceName, bool production)
     {
+        FullStackLauncher.Services.WindowTheme.Attach(this);
         InitializeComponent();
         _store = new ApiSecretStore(workingDirectory);
         _production = production;

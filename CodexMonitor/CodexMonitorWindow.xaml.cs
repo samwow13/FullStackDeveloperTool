@@ -119,6 +119,7 @@ public partial class CodexMonitorWindow : Window
 
     private CodexMonitorWindow(Mutex instance, string[] args)
     {
+        FullStackLauncher.Services.WindowTheme.Attach(this);
         _instance = instance;
         _codexHome = Option(args, "--codex-home") ?? Environment.GetEnvironmentVariable("CODEX_HOME")
             ?? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".codex");

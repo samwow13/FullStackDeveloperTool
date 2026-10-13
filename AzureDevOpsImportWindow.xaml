@@ -126,12 +126,16 @@
                     <Label Content="_Project URL" Target="{Binding ElementName=ProjectUrlBox}"/>
                     <TextBox x:Name="ProjectUrlBox" TextChanged="ProjectUrl_Changed"
                              AutomationProperties.Name="Azure DevOps project URL in connection settings"/>
+                    <TextBlock Text="Paste a project, repository, or browser URL from Azure DevOps cloud or your server."
+                               Style="{StaticResource HelpText}" Margin="0,6,0,0"/>
+                    <TextBlock x:Name="SettingsTargetText" Style="{StaticResource HelpText}" Margin="0,6,0,0"/>
                     <StackPanel x:Name="TokenSettingsPanel" Visibility="Collapsed" Margin="0,12,0,0">
                         <Label Content="Personal access _token" Target="{Binding ElementName=TokenSettingsBox}"/>
                         <PasswordBox x:Name="TokenSettingsBox" PasswordChanged="Token_Changed" MaxLength="512" MinHeight="36"
                                      Background="{StaticResource BackgroundBrush}" Foreground="{StaticResource TextBrush}" Padding="8"
                                      AutomationProperties.Name="Azure DevOps personal access token in connection settings"/>
-                        <TextBlock Text="Leave blank to use saved token. Encrypted for this Windows user. Code: Read for cloning; Read &amp; write for pushes."
+                        <TextBlock Text="Leave blank to use saved token, encrypted for this Windows user. Matching HTTPS organization/collection repositories reuse it for sync, fetch, pull, and push. Code: Read for cloning; Read &amp; write for pushes."
+                                   ToolTip="GitHub keeps its Git authentication. Local commits keep the author from Git configuration."
                                    Style="{StaticResource HelpText}" Margin="0,6,0,0"/>
                         <Button x:Name="ForgetTokenButton" Content="Forget saved token" Click="ForgetToken_Click" HorizontalAlignment="Left" Margin="0,8,0,0"/>
                     </StackPanel>
@@ -149,12 +153,16 @@
                     <Label Content="_Project URL" Target="{Binding ElementName=InlineProjectUrlBox}"/>
                     <TextBox x:Name="InlineProjectUrlBox" TextChanged="ProjectUrl_Changed"
                              AutomationProperties.Name="Azure DevOps project URL"/>
+                    <TextBlock Text="Paste a project, repository, or browser URL from Azure DevOps cloud or your server."
+                               Style="{StaticResource HelpText}" Margin="0,6,0,0"/>
+                    <TextBlock x:Name="InlineTargetText" Style="{StaticResource HelpText}" Margin="0,6,0,0"/>
                     <StackPanel x:Name="InlineTokenPanel" Visibility="Collapsed" Margin="0,12,0,0">
                         <Label Content="Personal access _token" Target="{Binding ElementName=InlineTokenBox}"/>
                         <PasswordBox x:Name="InlineTokenBox" PasswordChanged="Token_Changed" MaxLength="512" MinHeight="36"
                                      Background="{StaticResource BackgroundBrush}" Foreground="{StaticResource TextBrush}" Padding="8"
                                      AutomationProperties.Name="Azure DevOps personal access token"/>
-                        <TextBlock Text="Leave blank to use saved token. Encrypted for this Windows user. Code: Read for cloning; Read &amp; write for pushes."
+                        <TextBlock Text="Leave blank to use saved token, encrypted for this Windows user. Matching HTTPS organization/collection repositories reuse it for sync, fetch, pull, and push. Code: Read for cloning; Read &amp; write for pushes."
+                                   ToolTip="GitHub keeps its Git authentication. Local commits keep the author from Git configuration."
                                    Style="{StaticResource HelpText}" Margin="0,6,0,0"/>
                     </StackPanel>
                     <WrapPanel Margin="0,12,0,0">
@@ -288,7 +296,34 @@
                     <TextBlock x:Name="SourceProjectText" FontWeight="SemiBold" TextWrapping="Wrap" Margin="0,0,0,16"/>
                     <Label Content="_Repository" Target="{Binding ElementName=RepositoryBox}"/>
                     <ComboBox x:Name="RepositoryBox" DisplayMemberPath="Name" IsEnabled="False"
-                              SelectionChanged="Repository_Changed" AutomationProperties.Name="Azure DevOps repository"/>
+                              IsEditable="True" IsTextSearchEnabled="False" StaysOpenOnEdit="True" MaxDropDownHeight="300"
+                              DropDownOpened="RepositoryDropdown_Opened"
+                              TextBoxBase.TextChanged="RepositorySearch_Changed" SelectionChanged="Repository_Changed"
+                              AutomationProperties.Name="Search Azure DevOps repositories"/>
+                    <TextBlock Text="Type to search repositories by name." Style="{StaticResource HelpText}" Margin="0,6,0,0"/>
+                    <StackPanel x:Name="RecentRepositoryPanel" Visibility="Collapsed" Margin="0,20,0,0">
+                        <TextBlock Text="Recent favorites" FontWeight="SemiBold" Margin="0,0,0,8"
+                                   ToolTip="Last 10 repository picks for this project, most recent first."/>
+                        <ItemsControl x:Name="RecentRepositoriesList" AutomationProperties.Name="Ten recent repository favorites">
+                            <ItemsControl.ItemsPanel>
+                                <ItemsPanelTemplate><UniformGrid Columns="2"/></ItemsPanelTemplate>
+                            </ItemsControl.ItemsPanel>
+                            <ItemsControl.ItemTemplate>
+                                <DataTemplate>
+                                    <Button Click="RecentRepository_Click" Style="{StaticResource RowAction}" Margin="0,0,6,4"
+                                            HorizontalContentAlignment="Stretch" ToolTip="{Binding Name}"
+                                            AutomationProperties.Name="{Binding Name}">
+                                        <Grid>
+                                            <Grid.ColumnDefinitions><ColumnDefinition Width="22"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+                                            <TextBlock Text="★" Foreground="{StaticResource AccentBrush}" VerticalAlignment="Center"/>
+                                            <TextBlock Grid.Column="1" Text="{Binding Name}" TextTrimming="CharacterEllipsis"
+                                                       VerticalAlignment="Center" TextAlignment="Left"/>
+                                        </Grid>
+                                    </Button>
+                                </DataTemplate>
+                            </ItemsControl.ItemTemplate>
+                        </ItemsControl>
+                    </StackPanel>
                 </StackPanel>
                 <StackPanel x:Name="BranchesPage" Visibility="Collapsed">
                     <TextBlock x:Name="BranchRepositoryText" FontWeight="SemiBold" TextWrapping="Wrap" Margin="0,0,0,20"/>
@@ -335,7 +370,7 @@
                 <Button x:Name="CancelOperationButton" Content="Cancel operation" Click="CancelOperation_Click" Visibility="Collapsed"/>
             </WrapPanel>
             <WrapPanel Grid.Column="1">
-                <Button x:Name="CancelButton" Content="Cancel" IsCancel="True" Click="Cancel_Click" MinWidth="80" Margin="0,0,8,0"/>
+                <Button x:Name="CancelButton" Content="Cancel" Click="Cancel_Click" MinWidth="80" Margin="0,0,8,0"/>
                 <Button x:Name="NextButton" Content="_Next" Click="Next_Click" Visibility="Collapsed" Style="{StaticResource PrimaryButton}"/>
                 <Button x:Name="AddRepositoryButton" Content="_Add repository" Click="AddRepository_Click"
                         Visibility="Collapsed" Style="{StaticResource PrimaryButton}"/>

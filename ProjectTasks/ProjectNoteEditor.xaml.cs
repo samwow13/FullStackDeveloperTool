@@ -80,6 +80,7 @@ public partial class ProjectNoteEditor : UserControl
                 Foreground = (System.Windows.Media.Brush)FindResource("TextBrush"),
                 Background = (System.Windows.Media.Brush)FindResource("SurfaceBrush")
             };
+            FullStackLauncher.Services.WindowTheme.Attach(dialog);
             var content = new StackPanel { Margin = new Thickness(20) };
             content.Children.Add(new TextBlock
             {
@@ -251,6 +252,7 @@ public partial class ProjectNoteEditor : UserControl
             Foreground = (Brush)FindResource("TextBrush"),
             Background = (Brush)FindResource("SurfaceBrush")
         };
+        FullStackLauncher.Services.WindowTheme.Attach(dialog);
         var layout = new Grid { Margin = new Thickness(16) };
         layout.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
         layout.RowDefinitions.Add(new RowDefinition { Height = new GridLength(1, GridUnitType.Star) });
@@ -314,6 +316,7 @@ public partial class ProjectNoteEditor : UserControl
                 Content = new Image { Source = preview, Stretch = Stretch.None, Margin = new Thickness(16) }
             }
         };
+        FullStackLauncher.Services.WindowTheme.Attach(viewer);
         viewer.ShowDialog();
     }
 }

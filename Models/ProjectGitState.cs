@@ -24,6 +24,7 @@ public sealed record GitRepositoryState
     public GitRepositorySnapshot? Snapshot { get; init; }
     public AgentGitConnectionSelection? Selection { get; init; }
     public GitRemoteInfo? ActiveRemote { get; init; }
+    public GitActiveConnectionInfo ActiveConnection { get; init; } = new();
     public string? SelectionSource { get; init; }
     public string? SelectionError { get; init; }
     public string RemoteName { get; init; } = "";

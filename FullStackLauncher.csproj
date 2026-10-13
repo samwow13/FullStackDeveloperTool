@@ -18,6 +18,7 @@
     <DefaultItemExcludes>$(DefaultItemExcludes);**\codex-reply-inbox.json*;**\*.codex-reply-inbox.json*;**\codex-agent-prompts.json*;**\*.codex-agent-prompts.json*;**\codex-agent-chats\**;**\*.codex-agent-chats\**</DefaultItemExcludes>
     <DefaultItemExcludes>$(DefaultItemExcludes);**\codex-project-associations.json*;**\*.codex-project-associations.json*</DefaultItemExcludes>
     <DefaultItemExcludes>$(DefaultItemExcludes);**\codex-agent-keep-awake\**;**\*.codex-agent-keep-awake\**</DefaultItemExcludes>
+    <DefaultItemExcludes>$(DefaultItemExcludes);**\codex-agent-waiting\**;**\*.codex-agent-waiting\**</DefaultItemExcludes>
     <DefaultItemExcludes>$(DefaultItemExcludes);**\*.codex-crew-mute.json*;**\codex-crew-mute.dat*</DefaultItemExcludes>
     <DefaultItemExcludes>$(DefaultItemExcludes);RemoteCompanion\**</DefaultItemExcludes>
     <DefaultItemExcludes>$(DefaultItemExcludes);**\azure-devops-tokens\**</DefaultItemExcludes>

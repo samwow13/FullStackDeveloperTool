@@ -25,6 +25,7 @@ public partial class GitProjectConnectWindow : Window, INotifyPropertyChanged, I
         Func<GitProjectConnectRequest, Task<IDisposable>>? prepare,
         Func<GitProjectConnectResult, Task>? apply)
     {
+        FullStackLauncher.Services.WindowTheme.Attach(this);
         SourceFolder = sourceFolder;
         _prepare = prepare;
         _apply = apply;

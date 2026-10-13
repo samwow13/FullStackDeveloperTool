@@ -8,6 +8,8 @@ public sealed record GitConnectionTarget
     public string CloneUrl { get; init; } = "";
     public string Host { get; init; } = "";
     public string Organization { get; init; } = "";
+    public string CollectionUrl { get; init; } = "";
+    public bool IsHosted { get; init; }
     public bool IsSsh { get; init; }
     public string DisplayName => Provider == GitHostingProvider.GitHub ? "GitHub" : "Azure DevOps";
 }

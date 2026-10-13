@@ -57,6 +57,8 @@ Use `launcher_recent_activity` for bounded launcher lifecycle messages. It exclu
 
 An explicit `chatId` registration or `launcher_bind_reply_inbox` saves the newest chat-to-project assignment separately from settings and Codex data. The assignment contains only chat and project IDs plus an update time, and survives session expiry, unregistration, and dashboard replacement. Registration alone does not bind or read a reply inbox; receiving replies still requires explicit `launcher_bind_reply_inbox`. Older clients can continue registering without `chatId`. Launcher-owned Start Agent and task receipts also provide saved project identity for their exact acknowledged chat IDs.
 
+After a new Git summary is saved, the popup displays **{work title} updated commit message**. It uses the registered or explicitly bound chat's title from the available Codex Crew snapshot, falling back to the registered task name when that title is unavailable. Long titles wrap, and retrying an already saved update does not display another popup.
+
 ## Agent restart warnings
 
 After an agent Restart passes configuration and command preflight, the dashboard shows the exact warning **Agent initiated restart** immediately before stopping the service. It is a nonblocking popup that does not take focus, remains visible when the dashboard is minimized, and closes after eight seconds or dismissal. Sequential API and frontend restarts reuse the same popup and reset its timer. Manual dashboard restarts do not display this agent warning. A rejected reservation, Production action, Force stop suspension, or preflight does not emit an initiated warning. The warning means an operation began; it does not prove the service became healthy.

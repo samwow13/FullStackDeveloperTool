@@ -1,5 +1,4 @@
 using System.Diagnostics;
-using System.Runtime.InteropServices;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Input;
@@ -46,6 +45,7 @@ public partial class LanDesktopWindow : Window
 
     public LanDesktopWindow(LanCompanionClient client, LanCompanionSession companion)
     {
+        FullStackLauncher.Services.WindowTheme.Attach(this);
         _client = client;
         _companion = companion;
         InitializeComponent();
@@ -454,8 +454,6 @@ public partial class LanDesktopWindow : Window
         var handle = new WindowInteropHelper(this).Handle;
         _source = HwndSource.FromHwnd(handle);
         _source?.AddHook(WindowMessage);
-        var enabled = 1;
-        if (DwmSetWindowAttribute(handle, 20, ref enabled, sizeof(int)) != 0) DwmSetWindowAttribute(handle, 19, ref enabled, sizeof(int));
     }
 
     private IntPtr WindowMessage(IntPtr handle, int message, IntPtr wParam, IntPtr lParam, ref bool handled)
@@ -490,9 +488,6 @@ public partial class LanDesktopWindow : Window
         _lifetime.Cancel();
         _lifetime.Dispose();
     }
-
-    [DllImport("dwmapi.dll")]
-    private static extern int DwmSetWindowAttribute(IntPtr window, int attribute, ref int value, int size);
 
     private sealed record MonitorChoice(string Id, string Label);
 }

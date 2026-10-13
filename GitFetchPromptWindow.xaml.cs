@@ -8,6 +8,7 @@ public partial class GitFetchPromptWindow : Window
 {
     public GitFetchPromptWindow(GitRemoteInfo remote)
     {
+        FullStackLauncher.Services.WindowTheme.Attach(this);
         InitializeComponent();
         Width = Math.Min(Width, SystemParameters.WorkArea.Width);
         MaxHeight = SystemParameters.WorkArea.Height;

@@ -1,4 +1,4 @@
-# Browser page context for Snip
+# Browser page context
 
 This Manifest V3 extension lets FullStack Launcher capture live HTML and CSS from the selected Chrome or Edge tab. The launcher keeps the capture with the note. The note's separate inclusion choice controls whether that saved source enters a queued prompt.
 
@@ -7,15 +7,23 @@ This Manifest V3 extension lets FullStack Launcher capture live HTML and CSS fro
 1. In the launcher's Notes & queue page, open browser capture setup. Copy its pairing code and open the extension folder it provides. The source checkout's `BrowserCaptureExtension` folder also works.
 2. In Chrome, open `chrome://extensions`. In Edge, open `edge://extensions`. Turn on **Developer mode**, choose **Load unpacked**, and select the extension folder. Keep the folder in place after installation.
 3. Check that the installed extension ID is `poppjfplkbpgbabkabcbhdaifmbfcijf`. If it differs, reload the supplied folder rather than a copied or repackaged manifest.
-4. Open the extension's **Options** (or click its toolbar icon). Paste the 64-character pairing code and save. Repeat the installation and pairing in each browser you use for Snip.
+4. Open the extension's **Options** (or click its toolbar icon). Paste the 64-character pairing code and choose **Save & connect**. The field stays masked and clears after saving. Wait for **Chrome connected to Launcher** or **Edge connected to Launcher**; saving the code alone does not confirm a connection. Repeat the installation and pairing in each browser you use.
 
 The extension asks for access to web pages so Snip can capture an already-open tab without a second browser click. It connects only to the launcher's local broker at `127.0.0.1:47873`. Before reading a tab, it verifies an HMAC proof from the broker using the pairing code. It never sends the code over the connection. The launcher checks the extension's origin and its proof in return. If the launcher is closed, the extension waits and reconnects when a browser tab or window gains focus.
+
+## Desktop Context Gatherer
+
+**Context Gatherer** in **Start Agent** uses Windows desktop screenshots and does not require this extension or browser pairing. Hold **Ctrl** and drag over an area in any visible browser or desktop app, confirm or retake the screenshot, collect more images if needed, then continue to the prompt. See the [Launcher workflow](../README.md#project-notes-and-automatic-queue).
+
+Extension version **1.5.0** retains browser source capture for **Snip image…**, automatic frontend links, and saved login filling. Reload the extension after updating its files and keep the existing pairing code. Browser Ctrl+click gathering has been removed.
+
+The setup page polls a private extension-only worker endpoint for connection state. It displays a connected browser only after the launcher acknowledges the mutual authentication handshake. The status response never includes the pairing code or page data.
 
 ## Open frontend after build
 
 Frontend service cards can opt into **Open after build**. The same paired extension checks all tabs in each open Chrome or Edge profile for the local frontend site, including application routes and local host aliases at the same scheme and port. An existing tab stays untouched. When no matching tab exists and every browser window has a complete paired inventory, the extension opens one tab. If a profile is unpaired, a tab cannot be checked, or browser state changes during inspection, automatic opening is skipped. Incognito windows require extension access; otherwise their incomplete inventory also prevents automatic opening.
 
-The extension returns only whether a matching local site exists, window counts, and inventory revisions. Tab URLs, titles, HTML, and CSS are not sent for this operation. Requests expire quickly; cancellation removes only a tab created by that canceled request. Reload version 1.2.0 in the browser's extension page after updating the extension files. Pair every open profile that should permit automatic opening.
+The extension returns only whether a matching local site exists, window counts, and inventory revisions. Tab URLs, titles, HTML, and CSS are not sent for this operation. Requests expire quickly; cancellation removes only a tab created by that canceled request. Pair every open profile that should permit automatic opening.
 
 ## Fill saved website logins
 
@@ -31,7 +39,7 @@ Only fixed outcome tokens return from a login request. Passwords are never saved
 
 ## Capture scope
 
-- Snip triggers a single capture of the selected, active HTTP or HTTPS tab. No page source is sent by the extension outside an authenticated capture request.
+- Snip triggers a single capture of the selected, active HTTP or HTTPS tab. Page source is sent only for an authenticated Snip request.
 - HTML is a snapshot of the main frame's live DOM. Scripts, inline event handlers, hidden inputs, current form values, and named credential attributes are removed from a copy before serialization. Other visible page text and attributes can still contain sensitive information.
 - CSS includes accessible stylesheet rules, including inline and adopted stylesheets. A cross-origin stylesheet can block CSS rule access. Embedded frames and Shadow DOM contents are outside this snapshot. The launcher marks these cases **partial**. HTML and CSS are each capped at 200,000 characters; truncation is also marked **partial**.
 - Browser internal pages, PDFs, and pages where browser site access is blocked cannot supply HTML/CSS. The image can still be snipped, with source capture marked unavailable.

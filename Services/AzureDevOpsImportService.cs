@@ -9,7 +9,7 @@ using FullStackLauncher.Models;
 
 namespace FullStackLauncher.Services;
 
-/// <summary>Reads Azure DevOps Services metadata with explicit GCM or protected personal-token authentication.</summary>
+/// <summary>Reads Azure DevOps cloud and server metadata with GCM, Windows, or protected token authentication.</summary>
 public static class AzureDevOpsImportService
 {
     private const int ResponseLimit = 8 * 1024 * 1024;
@@ -18,47 +18,80 @@ public static class AzureDevOpsImportService
     private const int PageLimit = 100;
     private static readonly Regex OrganizationName = new("^[A-Za-z0-9][A-Za-z0-9-]*$", RegexOptions.CultureInvariant);
     private static readonly Regex LegacyHost = new("^([A-Za-z0-9][A-Za-z0-9-]*)\\.visualstudio\\.com$", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+    private static readonly HashSet<string> ProjectRoutes = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "_git", "_workitems", "_boards", "_backlogs", "_dashboards", "_build", "_release", "_settings",
+        "_wiki", "_testPlans", "_queries", "_sprints", "_library", "_artifacts", "_overview", "_versionControl", "_apis"
+    };
 
     public static AzureDevOpsProjectTarget ParseProjectUrl(string projectUrl)
     {
         var input = projectUrl?.Trim() ?? "";
         if (input.Length is 0 or > 4000 || input.Any(char.IsControl) || input.Contains('\\') ||
-            !Uri.TryCreate(input, UriKind.Absolute, out var uri) || uri.Scheme != "https" || !uri.IsDefaultPort ||
-            uri.Query.Length != 0 || uri.Fragment.Length != 0)
+            !Uri.TryCreate(input, UriKind.Absolute, out var uri) || uri.Scheme != "https" || string.IsNullOrEmpty(uri.Host) ||
+            uri.UserInfo.Contains(':') || uri.UserInfo.Contains('%'))
             throw InvalidProjectUrl();
 
-        // Inspect the original path as well: Uri normalization can conceal dot segments.
-        var authorityEnd = input.IndexOf('/', input.IndexOf("://", StringComparison.Ordinal) + 3);
-        var path = authorityEnd < 0 ? "" : input[authorityEnd..];
+        // Ignore browser navigation state, but inspect the original path: Uri hides dot segments.
+        var navigationStart = input.IndexOfAny(['?', '#']);
+        var address = navigationStart < 0 ? input : input[..navigationStart];
+        var authorityEnd = address.IndexOf('/', address.IndexOf("://", StringComparison.Ordinal) + 3);
+        var path = authorityEnd < 0 ? "" : address[authorityEnd..];
         if (path.EndsWith('/')) path = path[..^1];
         if (!path.StartsWith('/') || path.Length < 2) throw InvalidProjectUrl();
-        var parts = path[1..].Split('/').Select(DecodePathPart).ToArray();
+        var projectParts = new List<string>();
+        foreach (var rawPart in path[1..].Split('/'))
+        {
+            var part = DecodePathPart(rawPart);
+            if (ProjectRoutes.Contains(part)) break;
+            projectParts.Add(part);
+        }
+        var parts = projectParts.ToArray();
         string organization;
         string project;
+        string collectionUrl;
+        var hosted = true;
         if (uri.Host.Equals("dev.azure.com", StringComparison.OrdinalIgnoreCase))
         {
-            if (parts.Length != 2 && !(parts.Length == 4 && parts[2] == "_git")) throw InvalidProjectUrl();
+            if (!uri.IsDefaultPort || parts.Length != 2) throw InvalidProjectUrl();
             organization = parts[0];
             project = parts[1];
+            collectionUrl = "https://dev.azure.com/" + Uri.EscapeDataString(organization);
         }
         else
         {
             var legacy = LegacyHost.Match(uri.Host);
-            if (!legacy.Success) throw InvalidProjectUrl();
-            organization = legacy.Groups[1].Value;
-            if (parts.Length > 1 && parts[0].Equals("DefaultCollection", StringComparison.OrdinalIgnoreCase))
-                parts = parts[1..];
-            if (parts.Length != 1 && !(parts.Length == 3 && parts[1] == "_git")) throw InvalidProjectUrl();
-            project = parts[0];
+            if (legacy.Success)
+            {
+                if (!uri.IsDefaultPort) throw InvalidProjectUrl();
+                organization = legacy.Groups[1].Value;
+                if (parts.Length > 1 && parts[0].Equals("DefaultCollection", StringComparison.OrdinalIgnoreCase))
+                    parts = parts[1..];
+                if (parts.Length != 1) throw InvalidProjectUrl();
+                project = parts[0];
+                collectionUrl = "https://dev.azure.com/" + Uri.EscapeDataString(organization);
+            }
+            else
+            {
+                if (parts.Length == 0 || parts[^1].Equals("tfs", StringComparison.OrdinalIgnoreCase) ||
+                    parts[^1].Equals("DefaultCollection", StringComparison.OrdinalIgnoreCase)) throw InvalidProjectUrl();
+                hosted = false;
+                project = parts[^1];
+                organization = parts.Length > 1 ? parts[^2] : uri.Host;
+                collectionUrl = uri.GetLeftPart(UriPartial.Authority);
+                if (parts.Length > 1) collectionUrl += "/" + string.Join("/", parts[..^1].Select(Uri.EscapeDataString));
+            }
         }
-        if (!OrganizationName.IsMatch(organization) ||
-            (uri.UserInfo.Length != 0 && (!parts.Contains("_git", StringComparer.Ordinal) ||
-             !uri.UserInfo.Equals(organization, StringComparison.OrdinalIgnoreCase)))) throw InvalidProjectUrl();
+        if (hosted && !OrganizationName.IsMatch(organization)) throw InvalidProjectUrl();
+        // Usernames in copied clone links are routing hints, never credentials for requests.
+        collectionUrl = new UriBuilder(collectionUrl) { UserName = "", Password = "" }.Uri.AbsoluteUri.TrimEnd('/');
         return new AzureDevOpsProjectTarget
         {
             Organization = organization,
             Project = project,
-            ProjectUrl = "https://dev.azure.com/" + Uri.EscapeDataString(organization) + "/" + Uri.EscapeDataString(project)
+            CollectionUrl = collectionUrl,
+            IsHosted = hosted,
+            ProjectUrl = collectionUrl + "/" + Uri.EscapeDataString(project)
         };
     }
 
@@ -78,7 +111,7 @@ public static class AzureDevOpsImportService
         {
             // The repository-list API returns the complete project list; it does not define pagination.
             using var page = await ReadPageAsync(client,
-                target.ProjectUrl + "/_apis/git/repositories?includeLinks=false&includeHidden=false&api-version=7.1", deadline).ConfigureAwait(false);
+                target.ProjectUrl + "/_apis/git/repositories?includeLinks=false&includeHidden=false&api-version=" + target.ApiVersion, deadline).ConfigureAwait(false);
             if (page.ContinuationToken.Length != 0)
                 throw new InvalidOperationException("Azure DevOps returned an incomplete repository list. Open Azure DevOps or retry before importing.");
             var values = ReadValues(page.Document);
@@ -151,7 +184,7 @@ public static class AzureDevOpsImportService
             for (var pageNumber = 0; pageNumber < PageLimit; pageNumber++)
             {
                 var endpoint = target.ProjectUrl + "/_apis/git/repositories/" + id.ToString("D") +
-                    "/refs?filter=heads%2F&%24top=1000&includeLinks=false&includeStatuses=false&api-version=7.1";
+                    "/refs?filter=heads%2F&%24top=1000&includeLinks=false&includeStatuses=false&api-version=" + target.ApiVersion;
                 if (continuation.Length != 0) endpoint += "&continuationToken=" + Uri.EscapeDataString(continuation);
                 using var page = await ReadPageAsync(client, endpoint, deadline).ConfigureAwait(false);
                 foreach (var entry in ReadValues(page.Document).EnumerateArray())
@@ -195,13 +228,7 @@ public static class AzureDevOpsImportService
         try
         {
             // A public repository response alone does not establish authenticated token access.
-            using var identity = await ReadPageAsync(client, "https://dev.azure.com/" +
-                Uri.EscapeDataString(target.Organization) + "/_apis/connectionData?connectOptions=0&lastChangeId=-1&lastChangeId64=-1",
-                timeout.Token).ConfigureAwait(false);
-            var root = identity.Document.RootElement;
-            if (!root.TryGetProperty("authenticatedUser", out var authenticated) || !GitConnectionService.IsAuthenticatedAzureIdentity(authenticated)
-                || !root.TryGetProperty("authorizedUser", out var authorized) || !GitConnectionService.IsAuthenticatedAzureIdentity(authorized))
-                throw new InvalidOperationException("Azure DevOps did not verify this token's account. Check token expiry, organization, and permissions.");
+            await VerifyIdentityAsync(client, target, timeout.Token).ConfigureAwait(false);
             var result = await read(client, timeout.Token).ConfigureAwait(false);
             token.ThrowIfCancellationRequested();
             if (supplied) AzureDevOpsTokenStore.Save(target.ProjectUrl, secret);
@@ -221,6 +248,7 @@ public static class AzureDevOpsImportService
         Func<HttpClient, CancellationToken, Task<T>> read, CancellationToken token)
     {
         token.ThrowIfCancellationRequested();
+        if (!target.IsHosted) return await WithWindowsAuthenticationAsync(target, read, token).ConfigureAwait(false);
         var localAppData = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
         if (string.IsNullOrWhiteSpace(localAppData) || !Path.IsPathFullyQualified(localAppData))
             throw new InvalidOperationException("The Windows user data folder is unavailable. Restart the launcher with a valid Windows user profile.");
@@ -299,6 +327,43 @@ public static class AzureDevOpsImportService
         return result;
     }
 
+    private static async Task<T> WithWindowsAuthenticationAsync<T>(AzureDevOpsProjectTarget target,
+        Func<HttpClient, CancellationToken, Task<T>> read, CancellationToken token)
+    {
+        using var timeout = CancellationTokenSource.CreateLinkedTokenSource(token);
+        timeout.CancelAfter(TimeSpan.FromSeconds(90));
+        using var handler = new HttpClientHandler
+        {
+            AllowAutoRedirect = false, UseCookies = false, UseDefaultCredentials = true
+        };
+        using var client = new HttpClient(handler) { Timeout = Timeout.InfiniteTimeSpan };
+        client.DefaultRequestHeaders.UserAgent.ParseAdd("FullStackLauncher-Azure-Import/1.0");
+        client.DefaultRequestHeaders.Accept.ParseAdd("application/json");
+        try
+        {
+            await VerifyIdentityAsync(client, target, timeout.Token).ConfigureAwait(false);
+            return await read(client, timeout.Token).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (!token.IsCancellationRequested)
+        { throw new InvalidOperationException("Azure DevOps Server discovery timed out. Check server and network access, then retry."); }
+        catch (HttpRequestException)
+        { throw new InvalidOperationException("Azure DevOps Server could not be reached. Check network access and TLS trust, then retry."); }
+        catch (IOException)
+        { throw new InvalidOperationException("Azure DevOps Server returned an unreadable response. Check server access, then retry."); }
+        catch (JsonException) { throw InvalidMetadata(); }
+    }
+
+    private static async Task VerifyIdentityAsync(HttpClient client, AzureDevOpsProjectTarget target, CancellationToken token)
+    {
+        using var identity = await ReadPageAsync(client, target.CollectionUrl +
+            "/_apis/connectionData?connectOptions=0&lastChangeId=-1&lastChangeId64=-1", token).ConfigureAwait(false);
+        var root = identity.Document.RootElement;
+        if (root.ValueKind != JsonValueKind.Object ||
+            !root.TryGetProperty("authenticatedUser", out var authenticated) || !GitConnectionService.IsAuthenticatedAzureIdentity(authenticated) ||
+            !root.TryGetProperty("authorizedUser", out var authorized) || !GitConnectionService.IsAuthenticatedAzureIdentity(authorized))
+            throw new InvalidOperationException("Azure DevOps did not verify this connection's account. Check Windows account or token access and collection permissions.");
+    }
+
     private static async Task RememberAccountAsync(string folder, AzureDevOpsProjectTarget target,
         string accountProtocol, string credentialManager, CancellationToken token)
     {
@@ -372,11 +437,11 @@ public static class AzureDevOpsImportService
         if (!response.IsSuccessStatusCode)
             throw new InvalidOperationException(response.StatusCode switch
             {
-                HttpStatusCode.Unauthorized => "Azure DevOps authentication failed. Reconnect with your chosen method and check the organization, account, or token expiry.",
+                HttpStatusCode.Unauthorized => "Azure DevOps authentication failed. Check your account or token expiry. For a self-hosted server without Windows account access, use Connect with Azure DevOps Token.",
                 HttpStatusCode.Forbidden => "This Azure DevOps connection cannot read the project. Check project permissions and token Code Read scope when using a token.",
-                HttpStatusCode.NotFound => "Azure DevOps could not find this project or repository for your account. Check the project URL and permissions.",
+                HttpStatusCode.NotFound => "Azure DevOps could not find this project or repository for your account. Include the full collection and project path or paste a complete clone URL, and check permissions.",
                 HttpStatusCode.TooManyRequests => "Azure DevOps rate limited this request. Wait before retrying.",
-                _ when (int)response.StatusCode is >= 300 and < 400 => "Azure DevOps redirected this request. Use the current HTTPS project URL at dev.azure.com.",
+                _ when (int)response.StatusCode is >= 300 and < 400 => "Azure DevOps redirected this request. Use the server's final HTTPS project URL, including its collection path. Authentication is not forwarded to redirects.",
                 _ => "Azure DevOps discovery failed (HTTP " + (int)response.StatusCode + "). Retry when the service is available."
             });
         if (response.Content.Headers.ContentLength > ResponseLimit ||
@@ -435,25 +500,29 @@ public static class AzureDevOpsImportService
         {
             var clean = GitRepositoryService.ValidateRemoteUrl(remoteUrl);
             var remote = new Uri(clean);
-            if (remote.Scheme != "https" || !remote.IsDefaultPort) throw InvalidMetadata();
+            if (remote.Scheme != "https") throw InvalidMetadata();
             var parts = remote.AbsolutePath.Trim('/').Split('/').Select(DecodePathPart).ToArray();
             var legacy = LegacyHost.Match(remote.Host);
             // Azure can return a default-project clone URL without a project path. Make that
             // project explicit using the already-validated API project identity and repository name.
-            var shorthand = remote.Host.Equals("dev.azure.com", StringComparison.OrdinalIgnoreCase)
+            var collection = new Uri(target.CollectionUrl);
+            var serverShorthand = !target.IsHosted && remote.GetLeftPart(UriPartial.Authority).Equals(
+                collection.GetLeftPart(UriPartial.Authority), StringComparison.OrdinalIgnoreCase) &&
+                remote.AbsolutePath == collection.AbsolutePath.TrimEnd('/') + "/_git/" + Uri.EscapeDataString(repositoryName);
+            var shorthand = serverShorthand || (remote.Host.Equals("dev.azure.com", StringComparison.OrdinalIgnoreCase)
                 ? parts.Length == 3 && parts[0].Equals(target.Organization, StringComparison.OrdinalIgnoreCase) && parts[1] == "_git"
                 : legacy.Success && legacy.Groups[1].Value.Equals(target.Organization, StringComparison.OrdinalIgnoreCase) &&
                     (parts.Length == 2 && parts[0] == "_git" || parts.Length == 3 &&
-                     parts[0].Equals("DefaultCollection", StringComparison.OrdinalIgnoreCase) && parts[1] == "_git");
+                     parts[0].Equals("DefaultCollection", StringComparison.OrdinalIgnoreCase) && parts[1] == "_git"));
             if (shorthand)
             {
                 if (!parts[^1].Equals(repositoryName, StringComparison.Ordinal)) throw InvalidMetadata();
-                clean = "https://dev.azure.com/" + Uri.EscapeDataString(target.Organization) + "/" +
+                clean = target.CollectionUrl + "/" +
                     Uri.EscapeDataString(projectName) + "/_git/" + Uri.EscapeDataString(repositoryName);
             }
             clean = GitConnectionService.ValidateUrl(GitHostingProvider.AzureDevOps, clean);
             var cloneProject = ParseProjectUrl(clean);
-            if (!cloneProject.Organization.Equals(target.Organization, StringComparison.OrdinalIgnoreCase) ||
+            if (cloneProject.TokenScope != target.TokenScope ||
                 (!cloneProject.Project.Equals(projectName, StringComparison.OrdinalIgnoreCase) &&
                  (!Guid.TryParse(cloneProject.Project, out var cloneProjectId) || cloneProjectId != projectId)))
                 throw InvalidMetadata();
@@ -474,7 +543,7 @@ public static class AzureDevOpsImportService
         branch.Split('/').All(part => part.Length > 0 && !part.StartsWith('.') && !part.EndsWith(".lock", StringComparison.OrdinalIgnoreCase));
 
     private static InvalidOperationException InvalidProjectUrl() => new(
-        "Use https://dev.azure.com/organization/project or its complete HTTPS clone URL. Azure DevOps Services only; remove credentials, query parameters and fragments.");
+        "Paste an HTTPS Azure DevOps project, repository, or project browser URL. For a self-hosted server, include the full collection and project path, such as https://server:8443/tfs/Collection/Project. Remove passwords and tokens; a server or collection root alone does not identify a project.");
 
     private static InvalidOperationException InvalidMetadata() => new(
         "Azure DevOps returned incomplete or unsupported metadata. Refresh the project or repository list before importing.");

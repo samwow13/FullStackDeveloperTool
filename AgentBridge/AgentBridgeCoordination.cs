@@ -9,7 +9,7 @@ internal sealed record AgentServiceActivity(string SessionId, string Owner, stri
     DateTime LastSeenUtc, DateTime? ExpiresUtc, int? QueuePosition,
     bool DeclaredUse, bool HoldsReservation, bool IsActing, bool IsStale);
 
-internal sealed record AgentSessionIdentity(string SessionId, string Owner);
+internal sealed record AgentSessionIdentity(string SessionId, string Owner, string? ChatId = null);
 
 /// <summary>
 /// Cooperative, in-memory reservations for local agent sessions. Dashboard controls remain
@@ -28,11 +28,12 @@ internal sealed partial class AgentBridgeCoordination
 
     internal string InstanceId { get; } = Guid.NewGuid().ToString("N");
 
-    private sealed class AgentSession(string projectId, string owner, long startSequence, DateTime now)
+    private sealed class AgentSession(string projectId, string owner, long startSequence, DateTime now, string? chatId)
     {
         internal string Id { get; } = Guid.NewGuid().ToString("N");
         internal string ProjectId { get; } = projectId;
         internal string Owner { get; } = owner;
+        internal string? ChatId { get; } = chatId;
         internal long StartSequence { get; } = startSequence;
         internal long NotificationSequence { get; set; } = startSequence;
         internal DateTime LastSeenUtc { get; set; } = now;
@@ -80,14 +81,14 @@ internal sealed partial class AgentBridgeCoordination
 
     private static string NewToken() => Convert.ToHexString(RandomNumberGenerator.GetBytes(24));
 
-    internal object Register(string projectId, string owner)
+    internal object Register(string projectId, string owner, string? chatId = null)
     {
         Prune();
         owner = CleanText(owner, 80);
         if (owner.Length == 0) throw new ArgumentException("Give this agent session a short owner label.");
         var token = NewToken();
         var now = DateTime.UtcNow;
-        _sessions.Add(token, new AgentSession(projectId, owner, _sequence, now));
+        _sessions.Add(token, new AgentSession(projectId, owner, _sequence, now, chatId));
         return new { instanceId = InstanceId, sessionToken = token, sessionId = _sessions[token].Id, projectId, owner,
             expiresUtc = now + SessionLifetime, eventCursor = _sequence };
     }
@@ -108,7 +109,7 @@ internal sealed partial class AgentBridgeCoordination
     internal AgentSessionIdentity SessionIdentity(string projectId, string sessionToken)
     {
         var session = RequireSession(projectId, sessionToken);
-        return new(session.Id, session.Owner);
+        return new(session.Id, session.Owner, session.ChatId ?? session.ReplyChatId);
     }
 
     internal object Unregister(string projectId, string sessionToken)

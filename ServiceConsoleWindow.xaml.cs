@@ -20,6 +20,7 @@ public partial class ServiceConsoleWindow : Window
 
     public ServiceConsoleWindow(string projectName, string serviceName, ObservableCollection<ConsoleLine> lines)
     {
+        FullStackLauncher.Services.WindowTheme.Attach(this);
         ArgumentNullException.ThrowIfNull(lines);
         _source = lines;
         InitializeComponent();

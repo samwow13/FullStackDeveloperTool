@@ -40,7 +40,6 @@ public partial class MainWindow
         // confirmation, so polling and build output cannot compete with its first paint.
         // Keep this separate from _closing: the user's explicit Save choice must still work.
         _closeRequested = true;
-        SuspendNextCommitReminder();
         var resumeGitComparison = SuspendDashboardGitChecks();
         var resumeStatus = _timer.IsEnabled;
         var resumeConsole = _consoleTimer.IsEnabled;

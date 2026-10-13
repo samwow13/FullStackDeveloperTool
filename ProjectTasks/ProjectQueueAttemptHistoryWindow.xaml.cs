@@ -22,6 +22,7 @@ public partial class ProjectQueueAttemptHistoryWindow : Window, INotifyPropertyC
 
     public ProjectQueueAttemptHistoryWindow(ProjectTasksViewModel sourceModel, string? preferredAttemptId = null)
     {
+        FullStackLauncher.Services.WindowTheme.Attach(this);
         _sourceModel = sourceModel ?? throw new ArgumentNullException(nameof(sourceModel));
         if (!string.Equals(_store.StorePath, sourceModel.StorePath, StringComparison.OrdinalIgnoreCase))
             throw new InvalidOperationException("Queue attempt history is not using the selected task store.");

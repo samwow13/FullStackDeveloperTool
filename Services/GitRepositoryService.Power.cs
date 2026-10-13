@@ -72,6 +72,7 @@ public static partial class GitRepositoryService
             await ValidateDestinationAsync(root, remote, destinationBranch, snapshot, token).ConfigureAwait(false);
             var branchCreated = false;
             var committed = false;
+            var pushAttempted = false;
             var summaryNotice = "";
             try
             {
@@ -80,7 +81,7 @@ public static partial class GitRepositoryService
                 if (snapshot.IsUnborn && snapshot.Branch != destinationBranch)
                 {
                     progress?.Report("Creating the first local commit…");
-                    snapshot = await CommitAllCoreAsync(root, snapshot, message, null, token).ConfigureAwait(false);
+                    snapshot = await CommitAllCoreAsync(root, snapshot, message, null, token, progress).ConfigureAwait(false);
                     committed = true;
                     GitCommitPreviewState.Clear(root, previewBranch, previewConnectionId);
                     summaryNotice = await ConsumeReviewedAgentSummariesAsync(reviewedSummaries, snapshot.HeadCommit).ConfigureAwait(false);
@@ -94,7 +95,7 @@ public static partial class GitRepositoryService
                 }
                 var before = snapshot.HeadCommit;
                 progress?.Report("Saving local changes…");
-                snapshot = await CommitAllCoreAsync(root, snapshot, message, null, token).ConfigureAwait(false);
+                snapshot = await CommitAllCoreAsync(root, snapshot, message, null, token, progress).ConfigureAwait(false);
                 committed |= snapshot.HeadCommit != before;
                 if (snapshot.HeadCommit != before)
                 {
@@ -105,6 +106,7 @@ public static partial class GitRepositoryService
                 RequireSameLocalState(snapshot, await ReadCoreAsync(root, token).ConfigureAwait(false));
                 await RequireUnchangedPowerRemoteAsync(root, remote, url, token).ConfigureAwait(false);
                 progress?.Report($"Pushing {destinationBranch} to {remote}…");
+                pushAttempted = true;
                 var pushed = await PushCommitAsync(root, remote, destinationBranch, snapshot.HeadCommit, token).ConfigureAwait(false);
                 progress?.Report("Push confirmed. Refreshing local status…");
                 return (branchCreated ? $"Created and checked out {destinationBranch} from the reviewed local history. " : "")
@@ -114,7 +116,10 @@ public static partial class GitRepositoryService
             {
                 var preserved = (branchCreated ? $"The new branch {destinationBranch} remains checked out. " : "")
                     + (committed ? "The confirmed local commit remains saved. " : "A local commit was not confirmed; inspect the working tree and local history. ");
-                throw new GitCommitPushException(preserved + "Pushing was not confirmed. Refresh and review; use Push for existing commits rather than recommitting.\n" + Sanitize(exception.Message) + summaryNotice, committed, exception);
+                var pushStatus = pushAttempted
+                    ? "Pushing was not confirmed. Refresh and review; use Push for existing commits rather than recommitting."
+                    : "Push was not started. Refresh and inspect local changes before retrying; use Push if a local commit already exists.";
+                throw new GitCommitPushException(preserved + pushStatus + "\n" + Sanitize(exception.Message) + summaryNotice, committed, exception);
             }
         });
 
@@ -203,7 +208,7 @@ public static partial class GitRepositoryService
                 {
                     progress?.Report("Preserving uncommitted changes in a local checkpoint…");
                     var checkpointMessage = $"Save local changes before merging {remote}/{sourceBranch} into {destinationBranch}";
-                    snapshot = await CommitAllCoreAsync(root, snapshot, checkpointMessage, null, token).ConfigureAwait(false);
+                    snapshot = await CommitAllCoreAsync(root, snapshot, checkpointMessage, null, token, progress).ConfigureAwait(false);
                     pending = pending with { CheckpointCommit = snapshot.HeadCommit, PreparedHead = snapshot.HeadCommit, Stage = GitSyncStage.Checkpointed };
                     await WritePendingSyncAsync(root, pending, false, token).ConfigureAwait(false);
                 }
@@ -296,7 +301,7 @@ public static partial class GitRepositoryService
                     pending = pending with { Stage = GitSyncStage.Finalizing };
                     await WritePendingSyncAsync(root, pending, false, token).ConfigureAwait(false);
                     var before = snapshot.HeadCommit;
-                    snapshot = await CommitAllCoreAsync(root, snapshot, message, mergeHead, token).ConfigureAwait(false);
+                    snapshot = await CommitAllCoreAsync(root, snapshot, message, mergeHead, token, progress).ConfigureAwait(false);
                     committed = true;
                     if (snapshot.HeadCommit != before)
                     {
@@ -378,7 +383,8 @@ public static partial class GitRepositoryService
         }
     }
 
-    private static async Task<GitRepositorySnapshot> CommitAllCoreAsync(string root, GitRepositorySnapshot snapshot, string message, string? mergeHead, CancellationToken token)
+    private static async Task<GitRepositorySnapshot> CommitAllCoreAsync(string root, GitRepositorySnapshot snapshot, string message, string? mergeHead, CancellationToken token,
+        IProgress<string>? progress = null)
     {
         ValidateCommitMessage(message);
         if (snapshot.Changes.Any(change => change.IsConflict))
@@ -394,7 +400,18 @@ public static partial class GitRepositoryService
         await RequireCommitIdentityAsync(root, token).ConfigureAwait(false);
         var beforeStage = await ReadCoreAsync(root, token).ConfigureAwait(false);
         RequireSameLocalState(snapshot, beforeStage);
-        EnsureSuccess(await GitAsync(root, ["add", "--all", "--", ":/"], token).ConfigureAwait(false));
+        progress?.Report("Staging local files…");
+        const string stagingContext = "Staging did not finish. No commit or push was started by this step. Review ignored build outputs and local files before retrying. If Git reports index.lock, confirm all Git writers have stopped and preserve the stale lock as a backup before removing it from the index path.";
+        try
+        {
+            EnsureSuccess(await GitAsync(root, ["add", "--all", "--", ":/"], token, commandTimeout: StagingTimeout).ConfigureAwait(false));
+        }
+        catch (GitCommandExitUnconfirmedException exception) { throw exception.WithContext(stagingContext); }
+        catch (Exception exception) when (IsPowerFailure(exception))
+        {
+            throw new InvalidOperationException(stagingContext + "\n" + Sanitize(exception.Message), exception);
+        }
+        progress?.Report("Verifying staged files…");
         var staged = await ReadCoreAsync(root, token).ConfigureAwait(false);
         RequireExactRoot(root, staged);
         if (staged.Branch != snapshot.Branch || staged.HeadCommit != snapshot.HeadCommit || staged.IsDetached || staged.Changes.Any(change => change.IsConflict))
@@ -408,6 +425,7 @@ public static partial class GitRepositoryService
         EnsureSuccess(tree);
         var expectedTree = tree.Output.Trim();
         if (!IsObjectId(expectedTree)) throw new InvalidOperationException("The staged tree could not be verified.");
+        progress?.Report("Creating the local commit…");
         EnsureSuccess(await GitAsync(root, ["commit", "--no-status", "--message", message], token).ConfigureAwait(false));
         var committed = await ReadCoreAsync(root, token).ConfigureAwait(false);
         RequireExactRoot(root, committed);

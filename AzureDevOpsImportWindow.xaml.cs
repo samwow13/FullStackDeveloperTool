@@ -11,7 +11,7 @@ namespace FullStackLauncher;
 
 public partial class AzureDevOpsImportWindow : Window, IDashboardReplacementWindow
 {
-    public bool IsDashboardReplacementReady => !_cloning && !_checkingExit && _unconfirmedCommands.Count == 0;
+    public bool IsDashboardReplacementReady => !_cloning && !_checkingExit && !_confirmingClose && _unconfirmedCommands.Count == 0;
     public bool IsDashboardReplacementClosePending => _closeRequested && !_closed &&
         (_cloning || _checkingExit || _lookups.Count > 0) && _unconfirmedCommands.Count == 0;
 
@@ -40,6 +40,7 @@ public partial class AzureDevOpsImportWindow : Window, IDashboardReplacementWind
     private bool _workspaceNameEdited;
     private bool _cloning;
     private bool _checkingExit;
+    private bool _confirmingClose;
     private bool _closeRequested;
     private bool _allowClose;
     private bool _closed;
@@ -52,6 +53,7 @@ public partial class AzureDevOpsImportWindow : Window, IDashboardReplacementWind
     public AzureDevOpsImportWindow(string settingsDirectory, IReadOnlyList<ProjectProfile> savedProjects,
         bool useTokenAuthentication = false, string? existingWorkspaceFolder = null)
     {
+        FullStackLauncher.Services.WindowTheme.Attach(this);
         _settingsDirectory = Path.GetFullPath(settingsDirectory);
         _savedProjects = savedProjects;
         _useTokenAuthentication = useTokenAuthentication;
@@ -110,6 +112,7 @@ public partial class AzureDevOpsImportWindow : Window, IDashboardReplacementWind
         InvalidateReview();
         _loadedProjectUrl = null;
         _repositories = [];
+        ClearRepositorySearch();
         _draftRepositoryId = null;
         _draftStartingBranch = null;
         _draftFeatureBranch = DefaultFeatureBranch;
@@ -140,6 +143,7 @@ public partial class AzureDevOpsImportWindow : Window, IDashboardReplacementWind
         InvalidateReview();
         _loadedProjectUrl = null;
         _repositories = [];
+        ClearRepositorySearch();
         ResetBranchChoices();
         ClearError();
         SetStatus("Connect to verify and save this token.");
@@ -163,8 +167,9 @@ public partial class AzureDevOpsImportWindow : Window, IDashboardReplacementWind
             ClearTokenDraft();
             _loadedProjectUrl = null;
             _repositories = [];
+            ClearRepositorySearch();
             ResetBranchChoices();
-            SetStatus("Saved token removed for this organization. Enter a token to connect again.");
+            SetStatus("Saved token removed for this organization or server collection. Enter a token to connect again.");
         }, _selectionVersion, "Removing saved token…");
     }
 
@@ -212,6 +217,9 @@ public partial class AzureDevOpsImportWindow : Window, IDashboardReplacementWind
                     else AzureDevOpsImportPreferences.SaveLastProjectUrl(projectUrl);
                 }); }
                 catch (Exception exception) { saveError = exception; }
+                Exception? favoritesError = null;
+                try { _recentRepositoryIds = await Task.Run(() => AzureDevOpsImportPreferences.LoadRecentRepositoryIds(projectUrl)); }
+                catch (Exception exception) { _recentRepositoryIds = []; favoritesError = exception; }
                 if (_closed || _closeRequested) return;
                 if (_page == ImportPage.Connection || _page == ImportPage.Branches) _page = ImportPage.Repository;
                 PopulateRepositoryChoices();
@@ -220,8 +228,11 @@ public partial class AzureDevOpsImportWindow : Window, IDashboardReplacementWind
                     SetStatus(_page == ImportPage.Workspace ? "" : RepositoryChoicesStatus());
                 if (saveError is not null)
                     ReportError("Connected, but the project URL could not be remembered.", saveError);
+                if (favoritesError is not null)
+                    ReportError("Connected, but recent repository favorites could not be loaded.", favoritesError);
                 UpdateControls();
-            }, version, interactive && !_useTokenAuthentication ? "Waiting for Microsoft sign-in and loading repositories…" : "Loading repositories…");
+            }, version, interactive && !_useTokenAuthentication && AzureDevOpsImportService.ParseProjectUrl(projectUrl).IsHosted
+                ? "Waiting for Microsoft sign-in and loading repositories…" : "Loading repositories…");
 
         if (!_closed && !_closeRequested && CanStartAction)
         {
@@ -234,18 +245,21 @@ public partial class AzureDevOpsImportWindow : Window, IDashboardReplacementWind
     private void PopulateRepositoryChoices()
     {
         var keepId = _draftRepositoryId;
-        var choices = _repositories.Where(repository => !_selectedRepositories.Any(item => SameRepository(item.Repository, repository))).ToArray();
+        var choices = AvailableRepositories().ToArray();
+        var restored = choices.FirstOrDefault(repository => repository.Id == keepId);
+        if (restored is null && choices.Length == 1 && string.IsNullOrEmpty(_repositorySearch)) restored = choices[0];
+        if (restored is not null) _repositorySearch = restored.Name;
         _updatingSelections = true;
         try
         {
-            RepositoryBox.ItemsSource = choices;
-            var restored = choices.FirstOrDefault(repository => repository.Id == keepId);
-            if (restored is not null) RepositoryBox.SelectedItem = restored;
-            else if (choices.Length == 1) RepositoryBox.SelectedIndex = 0;
+            RepositoryBox.ItemsSource = restored is null ? FilterRepositories(_repositorySearch) : choices;
+            RepositoryBox.SelectedItem = restored;
+            RepositoryBox.Text = _repositorySearch;
         }
         finally { _updatingSelections = false; }
+        PopulateRecentRepositories();
         SourceProjectText.Text = _loadedProjectUrl is null ? "" : AzureDevOpsImportService.ParseProjectUrl(_loadedProjectUrl).Project;
-        if (RepositoryBox.SelectedItem is AzureDevOpsImportRepository selected) _draftRepositoryId = selected.Id;
+        _draftRepositoryId = restored?.Id;
     }
 
     private async void StartRepository_Click(object sender, RoutedEventArgs e)
@@ -267,15 +281,17 @@ public partial class AzureDevOpsImportWindow : Window, IDashboardReplacementWind
         InvalidateReview();
         ClearError();
         _draftRepositoryId = null;
+        _repositorySearch = "";
         _draftStartingBranch = null;
         _draftFeatureBranch = DefaultFeatureBranch;
         ResetBranchChoices();
         ShowPage(ImportPage.Repository);
     }
 
-    private string RepositoryChoicesStatus() => RepositoryBox.Items.Count > 0 ? "Choose a repository."
-        : _repositories.Count == 0 ? "No accessible repositories were found in this project."
-        : "All repositories from this project are already added.";
+    private string RepositoryChoicesStatus() => _repositories.Count == 0 ? "No accessible repositories were found in this project."
+        : !AvailableRepositories().Any() ? "All repositories from this project are already added."
+        : RepositoryBox.Items.Count == 0 ? "No matching repositories. Change or clear the search."
+        : RepositoryBox.SelectedItem is null ? "Choose a repository." : "";
 
     private void Repository_Changed(object sender, SelectionChangedEventArgs e)
     {
@@ -283,6 +299,7 @@ public partial class AzureDevOpsImportWindow : Window, IDashboardReplacementWind
         InvalidateReview();
         ClearError();
         var repository = RepositoryBox.SelectedItem as AzureDevOpsImportRepository;
+        if (repository is not null) _repositorySearch = repository.Name;
         _draftRepositoryId = repository?.Id;
         _draftStartingBranch = null;
         _draftFeatureBranch = DefaultFeatureBranch;
@@ -307,7 +324,7 @@ public partial class AzureDevOpsImportWindow : Window, IDashboardReplacementWind
         var projectUrl = _loadedProjectUrl;
         var version = _selectionVersion;
         await RunLookupAsync(token => ReadBranchesAsync(projectUrl, repository.Id, token),
-            branches =>
+            async branches =>
             {
                 _branchRepositoryId = repository.Id;
                 _updatingSelections = true;
@@ -323,6 +340,7 @@ public partial class AzureDevOpsImportWindow : Window, IDashboardReplacementWind
                 SetStatus(branches.Count == 0 ? "This repository has no branches to clone."
                     : BranchBox.SelectedItem is null ? "Select a starting branch." : "");
                 UpdateControls();
+                if (branches.Count > 0) await RememberRepositoryAsync(projectUrl, repository.Id, version);
             }, version, "Loading branches…");
         if (CanStartAction) BranchBox.Focus();
     }
@@ -648,7 +666,7 @@ public partial class AzureDevOpsImportWindow : Window, IDashboardReplacementWind
     private bool IsCurrent(int version, CancellationTokenSource cancellation, bool allowCanceled = false) =>
         !_closed && !_closeRequested && version == _selectionVersion && (allowCanceled || !cancellation.IsCancellationRequested);
 
-    private bool CanStartAction => !_cloning && !_checkingExit && !_closeRequested && !_closed
+    private bool CanStartAction => !_cloning && !_checkingExit && !_confirmingClose && !_closeRequested && !_closed
         && _unconfirmedCommands.Count == 0 && _lookups.Count == 0;
 
     private bool TryGetSelection(out AzureDevOpsWorkspaceRepository selection)
@@ -826,7 +844,12 @@ public partial class AzureDevOpsImportWindow : Window, IDashboardReplacementWind
     private void Window_PreviewKeyDown(object sender, KeyEventArgs e)
     {
         if (e.Key != Key.Escape) return;
-        if (ConfigPopup.IsOpen)
+        if (RepositoryBox.IsDropDownOpen)
+        {
+            RepositoryBox.IsDropDownOpen = false;
+            e.Handled = true;
+        }
+        else if (ConfigPopup.IsOpen)
         {
             ConfigPopup.IsOpen = false;
             e.Handled = true;
@@ -841,6 +864,11 @@ public partial class AzureDevOpsImportWindow : Window, IDashboardReplacementWind
             ClearError();
             EndRepositoryFlow();
             StartRepositoryButton.Focus();
+            e.Handled = true;
+        }
+        else
+        {
+            if (CancelButton.IsEnabled) Close();
             e.Handled = true;
         }
     }
@@ -934,18 +962,29 @@ public partial class AzureDevOpsImportWindow : Window, IDashboardReplacementWind
         CheckButton.IsEnabled = SignInButton.IsEnabled = InlineCheckButton.IsEnabled = InlineSignInButton.IsEnabled = navigate && _page != ImportPage.Review;
         TokenSettingsPanel.Visibility = InlineTokenPanel.Visibility = _useTokenAuthentication ? Visibility.Visible : Visibility.Collapsed;
         CheckButton.Visibility = InlineCheckButton.Visibility = _useTokenAuthentication ? Visibility.Collapsed : Visibility.Visible;
-        SignInButton.Content = InlineSignInButton.Content = _useTokenAuthentication ? "_Connect & save" : "_Sign in & load";
+        AzureDevOpsProjectTarget? target = null;
+        try { target = AzureDevOpsImportService.ParseProjectUrl(ProjectUrlBox.Text); }
+        catch (InvalidOperationException) { }
+        SettingsTargetText.Text = InlineTargetText.Text = target is null ? "" :
+            $"Collection: {target.CollectionUrl}\nProject: {target.Project}";
+        SettingsTargetText.Visibility = InlineTargetText.Visibility = target is null ? Visibility.Collapsed : Visibility.Visible;
+        SignInButton.Content = InlineSignInButton.Content = _useTokenAuthentication ? "_Connect & save"
+            : target is { IsHosted: false } ? "_Connect & load" : "_Sign in & load";
+        SignInButton.ToolTip = InlineSignInButton.ToolTip = target is { IsHosted: false } && !_useTokenAuthentication
+            ? "Use your current Windows account. For token authentication, choose Connect with Azure DevOps Token when creating a project."
+            : null;
         TokenSettingsBox.IsEnabled = InlineTokenBox.IsEnabled = ForgetTokenButton.IsEnabled = navigate && _page != ImportPage.Review;
         DestinationModeBox.IsEnabled = navigate && _existingWorkspaceFolder is null;
         WorkspaceNamePanel.Visibility = UsesExistingWorkspace ? Visibility.Collapsed : Visibility.Visible;
         UpdateDestinationControls(navigate);
         WorkspaceNameBox.IsEnabled = navigate && _page == ImportPage.Review && !UsesExistingWorkspace;
         StartRepositoryButton.IsEnabled = navigate && _configured && _selectedRepositories.Count < 128;
-        SelectedRepositoriesList.IsEnabled = !_loadingPreferences && !_cloning && !_checkingExit && !_closeRequested
+        SelectedRepositoriesList.IsEnabled = !_loadingPreferences && !_cloning && !_checkingExit && !_confirmingClose && !_closeRequested
             && _unconfirmedCommands.Count == 0 && (_lookups.Count == 0 || _inlineRow is not null);
         EmptyRepositoriesText.Visibility = _selectedRepositories.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
         WorkspaceRepositoryHeaders.Visibility = _selectedRepositories.Count > 0 ? Visibility.Visible : Visibility.Collapsed;
-        RepositoryBox.IsEnabled = navigate && RepositoryBox.Items.Count > 0;
+        RepositoryBox.IsEnabled = navigate && _loadedProjectUrl is not null && AvailableRepositories().Any();
+        RecentRepositoriesList.IsEnabled = navigate && _loadedProjectUrl is not null;
         BranchBox.IsEnabled = ready && BranchBox.Items.Count > 0 && _branchRepositoryId is not null;
         FeatureBranchBox.IsEnabled = ready && _branchRepositoryId is not null;
         NextButton.Visibility = _page == ImportPage.Repository ? Visibility.Visible : Visibility.Collapsed;
@@ -970,7 +1009,7 @@ public partial class AzureDevOpsImportWindow : Window, IDashboardReplacementWind
         BusyProgress.Visibility = busy ? Visibility.Visible : Visibility.Collapsed;
         CancelOperationButton.Visibility = _cloning || _lookups.Count > 0 ? Visibility.Visible : Visibility.Collapsed;
         CancelOperationButton.IsEnabled = !_closeRequested;
-        CancelButton.IsEnabled = !_checkingExit;
+        CancelButton.IsEnabled = !_checkingExit && !_confirmingClose;
         CheckExitButton.Visibility = _unconfirmedCommands.Count > 0 ? Visibility.Visible : Visibility.Collapsed;
         CheckExitButton.IsEnabled = !_checkingExit && !_cloning && _lookups.Count == 0;
     }
@@ -998,12 +1037,53 @@ public partial class AzureDevOpsImportWindow : Window, IDashboardReplacementWind
 
     private void Window_Closing(object? sender, CancelEventArgs e)
     {
+        if (_confirmingClose)
+        {
+            e.Cancel = true;
+            return;
+        }
         if (_allowClose) return;
         if (_unconfirmedCommands.Count > 0 || _checkingExit)
         {
             e.Cancel = true;
             SetStatus("Git process exit must be confirmed before closing. Use Check process exit.");
             return;
+        }
+        if (!_closeRequested && _selectedRepositories.Count > 0)
+        {
+            var count = _selectedRepositories.Count;
+            var repositories = count == 1 ? "repository" : "repositories";
+            var confirmed = false;
+            _confirmingClose = true;
+            UpdateControls();
+            try
+            {
+                confirmed = MessageBox.Show(this,
+                    $"You have added {count} {repositories} to this workspace setup.\n\n" +
+                    "Canceling will discard your repository selections and branch choices. " +
+                    "Existing repository folders and downloaded files will remain on disk.\n\n" +
+                    "Cancel workspace setup?",
+                    "Cancel workspace setup", MessageBoxButton.YesNo, MessageBoxImage.Warning,
+                    MessageBoxResult.No) == MessageBoxResult.Yes;
+            }
+            finally
+            {
+                _confirmingClose = false;
+                UpdateControls();
+            }
+            // A clone can finish while the confirmation pumps the dispatcher.
+            if (_allowClose) return;
+            if (!confirmed)
+            {
+                e.Cancel = true;
+                return;
+            }
+            if (_unconfirmedCommands.Count > 0 || _checkingExit)
+            {
+                e.Cancel = true;
+                SetStatus("Git process exit must be confirmed before closing. Use Check process exit.");
+                return;
+            }
         }
         ConfigPopup.IsOpen = false;
         _closeRequested = true;

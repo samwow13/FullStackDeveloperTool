@@ -27,6 +27,7 @@ public partial class ToolCredentialManagerWindow : Window, IDashboardReplacement
     public ToolCredentialManagerWindow(string? preferredKind = null, string? websiteOrigin = null,
         string? selectedId = null, IReadOnlyList<DeveloperTool>? tools = null)
     {
+        FullStackLauncher.Services.WindowTheme.Attach(this);
         _preferredKind = preferredKind;
         ToolCredentialEditorWindow.TryWebsiteOrigin(websiteOrigin, out var origin);
         _websiteOrigin = origin;
@@ -199,6 +200,7 @@ public partial class ToolCredentialManagerWindow : Window, IDashboardReplacement
             WindowStartupLocation = WindowStartupLocation.CenterOwner, ShowInTaskbar = false,
             Background = (Brush)FindResource("BackgroundBrush"), Foreground = (Brush)FindResource("TextBrush")
         };
+        FullStackLauncher.Services.WindowTheme.Attach(dialog);
         var layout = new StackPanel { Margin = new Thickness(20) };
         layout.Children.Add(new TextBlock
         {

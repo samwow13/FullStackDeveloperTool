@@ -12,6 +12,7 @@ public partial class GitPostPushLinkWindow : Window
 
     public GitPostPushLinkWindow(string root, GitRemoteInfo remote, string? draft = null)
     {
+        FullStackLauncher.Services.WindowTheme.Attach(this);
         _remote = remote;
         InitializeComponent();
         Height = Math.Min(Height, SystemParameters.WorkArea.Height);

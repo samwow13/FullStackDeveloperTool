@@ -4,7 +4,7 @@ using System.Text.Json;
 namespace FullStackLauncher.ProjectTasks;
 
 /// <summary>Bounded clipboard images and private files owned by one saved chat attempt.</summary>
-internal static class CodexAgentImageStaging
+internal static partial class CodexAgentImageStaging
 {
     internal static void ValidateImages(IReadOnlyList<CodexAgentChatImage>? images)
     {
@@ -12,6 +12,7 @@ internal static class CodexAgentImageStaging
             throw new ArgumentException("Attach at most 12 images to an agent message.");
         var ids = new HashSet<string>(StringComparer.Ordinal);
         var totalBytes = 0;
+        var totalSourceCharacters = 0;
         foreach (var image in images)
         {
             if (image is null || !Guid.TryParseExact(image.Id, "N", out _) || !ids.Add(image.Id))
@@ -20,6 +21,13 @@ internal static class CodexAgentImageStaging
                 throw new ArgumentException("An attached image caption must be at most 240 characters.");
             if (image.MimeType is not ("image/png" or "image/jpeg"))
                 throw new ArgumentException("Attached images must be PNG or JPEG.");
+            if (image.BrowserContext is { } context)
+            {
+                context.Validate();
+                totalSourceCharacters += context.Html.Length + context.Css.Length;
+                if (totalSourceCharacters > CodexAgentBrowserContext.MaximumTotalSourceCharacters)
+                    throw new ArgumentException("Attached browser context exceeds the supported message size. Remove a capture and retry.");
+            }
             var bytes = DecodeImage(image);
             if (image.MimeType == "image/png" && !bytes.AsSpan().StartsWith(new byte[] { 137, 80, 78, 71, 13, 10, 26, 10 })
                 || image.MimeType == "image/jpeg" && !bytes.AsSpan().StartsWith(new byte[] { 255, 216, 255 }))

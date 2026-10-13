@@ -35,6 +35,10 @@ public static partial class GitRepositoryService
             var cleanUrl = GitConnectionService.ValidateUrl(review.Provider, review.CloneUrl);
             if (!string.Equals(cleanUrl, review.CloneUrl, StringComparison.Ordinal))
                 throw new InvalidOperationException("The repository URL changed. Review it again before cloning.");
+            var useAzureDevOpsToken = review.UseAzureDevOpsToken
+                || (review.Provider == GitHostingProvider.AzureDevOps
+                    && !GitConnectionService.ParseTarget(review.Provider, cleanUrl).IsSsh
+                    && AzureDevOpsTokenStore.HasSavedToken(cleanUrl));
             var gate = RepositoryGates.GetOrAdd(fullFolder, _ => new SemaphoreSlim(1, 1));
             await gate.WaitAsync(token).ConfigureAwait(false);
             try
@@ -64,7 +68,7 @@ public static partial class GitRepositoryService
                 cloneArguments.InsertRange(0, await CloneFilterOptionsAsync(fullFolder, token).ConfigureAwait(false));
                 if (review.UseAzureDevOpsToken && review.Provider != GitHostingProvider.AzureDevOps)
                     throw new InvalidOperationException("Personal access tokens in this import flow require an Azure DevOps repository.");
-                if (review.UseAzureDevOpsToken)
+                if (useAzureDevOpsToken)
                 {
                     // Keep token-based LFS downloads on this repository's standard endpoint, regardless of .lfsconfig.
                     var lfsRepository = cleanUrl.TrimEnd('/');
@@ -72,13 +76,14 @@ public static partial class GitRepositoryService
                     cloneArguments.InsertRange(0, ["-c", "lfs.url=" + lfsRepository + "/info/lfs",
                         "-c", "lfs.basictransfersonly=true", "-c", "lfs.standalonetransferagent="]);
                 }
-                if (review.Provider == GitHostingProvider.AzureDevOps && review.Branch is not null && !review.UseAzureDevOpsToken)
+                if (review.Provider == GitHostingProvider.AzureDevOps && review.Branch is not null && !useAzureDevOpsToken
+                    && GitConnectionService.ParseTarget(review.Provider, cleanUrl).IsHosted)
                     cloneArguments.InsertRange(0, await GitCredentialManagerSupport.CloneOptionsAsync(fullFolder, token).ConfigureAwait(false));
                 if (review.Branch is not null) cloneArguments.AddRange(["--branch", review.Branch]);
                 cloneArguments.AddRange(["--", cleanUrl, fullFolder]);
                 var clone = await GitAsync(fullFolder, cloneArguments, token,
-                    network: true, interactive: !review.UseAzureDevOpsToken, strictSsh: true,
-                    azureDevOpsTokenUrl: review.UseAzureDevOpsToken ? cleanUrl : null).ConfigureAwait(false);
+                    network: true, interactive: !useAzureDevOpsToken, strictSsh: true,
+                    azureDevOpsTokenUrl: useAzureDevOpsToken ? cleanUrl : null).ConfigureAwait(false);
                 if (clone.ExitCode != 0)
                 {
                     try { ThrowCommandFailure(clone); }
@@ -90,7 +95,7 @@ public static partial class GitRepositoryService
                 }
                 var success = Result(clone, "Repository cloned.");
                 var branchConfirmed = review.Branch is null && review.FeatureBranch is null;
-                var tokenConnectionConfirmed = !review.UseAzureDevOpsToken;
+                var tokenConnectionConfirmed = !useAzureDevOpsToken;
                 try
                 {
                     await using var repositoryLease = await AcquireRepositoryOperationLeaseAsync(fullFolder, token).ConfigureAwait(false);
@@ -112,7 +117,7 @@ public static partial class GitRepositoryService
                         ["config", "--local", "--replace-all", "remote.origin.launcherProvider", review.Provider.ToString()], token).ConfigureAwait(false));
                     EnsureSuccess(await GitAsync(fullFolder,
                         ["config", "--local", "--replace-all", "remote.origin.launcherProviderTarget", RemoteTargetFingerprint(cleanUrl)], token).ConfigureAwait(false));
-                    if (review.UseAzureDevOpsToken)
+                    if (useAzureDevOpsToken)
                         await AzureDevOpsTokenGitAuthentication.BindOriginAsync(fullFolder, cleanUrl, token).ConfigureAwait(false);
                     tokenConnectionConfirmed = true;
                     return success;

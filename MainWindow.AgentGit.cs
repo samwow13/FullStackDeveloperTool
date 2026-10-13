@@ -72,7 +72,7 @@ public partial class MainWindow
         // Project/session identity is rechecked after asynchronous filesystem work. A report never
         // inherits a session from another project and never acquires service control authority.
         EnsureAgentGitProjectCurrent(discovery);
-        _ = _agentCoordination.SessionIdentity(project.Id, request.SessionToken ?? "");
+        var session = _agentCoordination.SessionIdentity(project.Id, request.SessionToken ?? "");
         token.ThrowIfCancellationRequested();
         var recorded = await AgentGitChangeStore.RecordWithResultAsync(repository.RepositoryRoot, request.Branch,
             connection.RemoteName, connection.ConnectionId, request.UpdateId, request.Bullets, token);
@@ -84,7 +84,7 @@ public partial class MainWindow
             try { await _projectGitService.RefreshLedgerAsync(repository.RepositoryRoot, _nextCommitLifetime.Token); }
             catch (OperationCanceledException) when (_nextCommitLifetime.IsCancellationRequested) { }
             catch (Exception) { }
-            ShowAgentGitUpdateNotice();
+            ShowAgentGitUpdateNotice(CodexCrewPanel.FindAgentWorkTitle(project.Id, session.ChatId) ?? session.Owner);
             if (ReferenceEquals(SelectedProject, project))
             {
                 if (SelectedNextCommitRepository is { } selected && selected.RepositoryId == repository.RepositoryId

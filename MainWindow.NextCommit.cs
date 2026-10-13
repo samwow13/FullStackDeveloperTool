@@ -17,6 +17,7 @@ public partial class MainWindow
     private bool _updatingNextCommitRepositories;
     private bool _markingNextCommitViewed;
     private bool _nextCommitHasNoRepository;
+    private bool _nextCommitConnectionUnavailable;
     private int _nextCommitProjectGeneration;
     private string _nextCommitMessage = "";
     private string _nextCommitStatus = "Choose a project to preview its next commit.";
@@ -53,6 +54,14 @@ public partial class MainWindow
     public string NextCommitMessage => _nextCommitMessage;
     public CommitMessagePresentation NextCommitPresentation => _nextCommitPresentation;
     public string NextCommitStatus => _nextCommitStatus;
+    public string NextCommitActiveConnectionLabel => SelectedNextCommitRepository is { } selected
+        ? (_nextCommitConnectionUnavailable ? null : selected.ActiveConnection?.HeaderLabel) ?? "Git - Connection unavailable"
+        : "Git";
+    public string NextCommitActiveConnectionColor => !_nextCommitConnectionUnavailable
+        ? SelectedNextCommitRepository?.ActiveConnection?.Foreground ?? "#B8C6D9" : "#B8C6D9";
+    public string NextCommitActiveConnectionDetail => !_nextCommitConnectionUnavailable
+        ? SelectedNextCommitRepository?.ActiveConnection?.Detail ?? "Open Git Config to review this repository's connection."
+        : "Connection information could not be read. Open Git Config to review this repository.";
     public bool HasNoNextCommitRepository => _nextCommitHasNoRepository;
     public bool HasNextCommitGitContent => !HasNoNextCommitRepository;
     public bool HasNextCommitStatusNotice => !HasNoNextCommitRepository && _nextCommitStatus != NextCommitLiveStatus;
@@ -113,6 +122,7 @@ public partial class MainWindow
         NextCommitSettingsToggle.IsChecked = false;
         _nextCommitProjectGeneration++;
         _nextCommitHasNoRepository = false;
+        _nextCommitConnectionUnavailable = false;
         _dashboardGitScopePending = SelectedProject is { IsArchived: false };
         _nextCommitBatches.Clear();
         _nextCommitAcknowledgedIds.Clear();
@@ -141,9 +151,11 @@ public partial class MainWindow
             var discovery = await DiscoverAgentGitAsync(project, null, _nextCommitLifetime.Token);
             var results = await Task.WhenAll(discovery.Repositories.Select(async repository =>
             {
+                var activeConnection = _projectGitService.TryGetRepository(repository.RepositoryRoot, out var cached)
+                    && cached.Error is null ? cached.ActiveConnection : null;
                 if (!repository.CanRecordChanges || repository.ActiveConnectionId is null || repository.Branch is null)
                     return (Repository: repository, Batch: (AgentGitSummaryBatch?)null,
-                        Error: repository.Detail ?? "Choose an active connection and a named branch in Git.");
+                        Error: repository.Detail ?? "Choose an active connection and a named branch in Git.", ActiveConnection: activeConnection);
                 var remote = repository.Connections.Single(connection => connection.IsActive);
                 try
                 {
@@ -153,18 +165,21 @@ public partial class MainWindow
                     if (batch is null || batch.Branch != repository.Branch || batch.ConnectionId != remote.ConnectionId
                         || batch.RemoteName != remote.RemoteName)
                         throw new InvalidOperationException("The active commit-summary scope changed. Refresh the project before continuing.");
-                    return (Repository: repository, Batch: (AgentGitSummaryBatch?)batch, Error: (string?)null);
+                    return (Repository: repository, Batch: (AgentGitSummaryBatch?)batch, Error: (string?)null,
+                        ActiveConnection: (GitActiveConnectionInfo?)shared.ActiveConnection);
                 }
                 catch (OperationCanceledException) { throw; }
                 catch (Exception)
                 {
                     return (Repository: repository, Batch: (AgentGitSummaryBatch?)null,
-                        Error: (string?)"Pending AI updates could not be read. Open Git to review repository access and the change ledger.");
+                        Error: (string?)"Pending AI updates could not be read. Open Git to review repository access and the change ledger.",
+                        ActiveConnection: activeConnection);
                 }
             }));
             if (_closeRequested || _closing || _closed || generation != _nextCommitProjectGeneration || !ReferenceEquals(project, SelectedProject)) return;
             EnsureAgentGitProjectCurrent(discovery);
             _dashboardGitScopePending = false;
+            _nextCommitConnectionUnavailable = false;
             var repositoryNames = GitRepositoryDisplayNames.Create(_store.ResolveRoot(project),
                 results.Select(result => result.Repository.RepositoryRoot));
             var oldId = SelectedNextCommitRepository?.RepositoryId
@@ -176,15 +191,14 @@ public partial class MainWindow
                 result.Repository.RepositoryRoot, result.Repository.Branch, result.Repository.ActiveConnectionId,
                 result.Batch?.RemoteName ?? result.Repository.Connections.FirstOrDefault(connection => connection.IsActive)?.RemoteName,
                 repositoryNames[result.Repository.RepositoryRoot],
-                _nextCommitBatches[result.Repository.RepositoryId].Batch?.Entries.Count)).ToArray();
+                _nextCommitBatches[result.Repository.RepositoryId].Batch?.Entries.Count, result.ActiveConnection)).ToArray();
             // Only successful folder inspection can confirm that Git is absent.
             _nextCommitHasNoRepository = choices.Length == 0 && sharedProject.Error is null
                 && discovery.Warning is null && discovery.Folders.Length > 0
                 && discovery.Folders.All(folder => folder.State == nameof(GitBranchState.NotRepository));
             if (!NextCommitRepositories.SequenceEqual(choices))
             {
-                // Rebuilding picker items may temporarily clear selection. Keep the
-                // reminder countdown when the final selected scope is unchanged.
+                // Ignore transient selection changes while rebuilding picker items.
                 _updatingNextCommitRepositories = true;
                 try
                 {
@@ -212,6 +226,7 @@ public partial class MainWindow
             if (generation != _nextCommitProjectGeneration || !ReferenceEquals(project, SelectedProject) || _closeRequested || _closing || _closed) return;
             _dashboardGitScopePending = false;
             _nextCommitHasNoRepository = false;
+            _nextCommitConnectionUnavailable = true;
             _nextCommitBatches.Clear();
             _nextCommitUnviewedCount = 0;
             _nextCommitStatus = "Preview unavailable. Open Git to review the configured folders.";
@@ -265,8 +280,8 @@ public partial class MainWindow
         }
         _nextCommitPresentation = CreateNextCommitPresentation(_nextCommitMessage, displayedBatch, includePlainLines);
         SynchronizeDashboardGitScope();
-        UpdateNextCommitReminder();
         foreach (var name in new[] { nameof(NextCommitMessage), nameof(NextCommitPresentation), nameof(NextCommitStatus), nameof(HasNoNextCommitRepository), nameof(HasNextCommitGitContent), nameof(HasNextCommitStatusNotice), nameof(NextCommitDraftHint), nameof(HasNextCommitDraftHint),
+            nameof(NextCommitActiveConnectionLabel), nameof(NextCommitActiveConnectionColor), nameof(NextCommitActiveConnectionDetail),
             nameof(NextCommitOverLimit), nameof(NextCommitCharacterCount),
             nameof(NextCommitLimitStatus), nameof(GitCommitButtonLabel) }) Changed(name);
     }
@@ -365,7 +380,7 @@ public partial class MainWindow
     }
 
     public sealed record NextCommitRepository(string RepositoryId, string RepositoryRoot, string? Branch, string? ConnectionId, string? RemoteName,
-        string? Label = null, int? PendingUpdateCount = null)
+        string? Label = null, int? PendingUpdateCount = null, GitActiveConnectionInfo? ActiveConnection = null)
     {
         public string DisplayName => $"{Label ?? System.IO.Path.GetFileName(RepositoryRoot)} · {Branch ?? "branch unavailable"}"
             + (PendingUpdateCount is > 0 ? $" · {PendingUpdateCount:N0} pending" : "");

@@ -18,7 +18,7 @@ public static partial class GitRepositoryService
     [
         "node_modules", "bin", "obj", ".vs", ".idea", ".venv", "venv", "__pycache__", ".pytest_cache",
         ".mypy_cache", ".angular", ".next", ".nuxt", ".cache", "coverage", "TestResults", "dist", "build",
-        "artifacts", "publish", "portable", "api-runtime", "monitor-runtime", "api-secrets", "database-connections",
+        "artifacts", ".codex-build", "publish", "portable", "api-runtime", "monitor-runtime", "api-secrets", "database-connections",
         "azure-devops-tokens", "codex-agent-chats", "codex-agent-keep-awake", ".ssh", ".aws", ".azure", ".svn", ".hg"
     ];
     private static readonly string[] ConnectExcludedFiles =
@@ -479,11 +479,30 @@ public static partial class GitRepositoryService
         var info = Path.Combine(repository, ".git", "info");
         Directory.CreateDirectory(info);
         using var directory = OpenCloneDirectory(info, out _);
-        using var file = new FileStream(Path.Combine(info, "exclude"), FileMode.CreateNew, FileAccess.Write, FileShare.None);
+        var path = Path.Combine(info, "exclude");
+        if (File.Exists(path) && (File.GetAttributes(path) & FileAttributes.ReparsePoint) != 0)
+            throw new InvalidOperationException("The local Git exclusion file is a link. Review it before adding default exclusions.");
+        using var file = new FileStream(path, FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None);
+        RequireConnectFileHandle(file, path);
+        if (file.Length > 256 * 1024)
+            throw new InvalidOperationException("The local Git exclusion file exceeds the setup limit. Review it before adding default exclusions.");
+        string existing;
+        using (var reader = new StreamReader(file, new UTF8Encoding(false, true), detectEncodingFromByteOrderMarks: true, leaveOpen: true))
+        {
+            existing = reader.ReadToEnd();
+            if (reader.CurrentEncoding.CodePage != Encoding.UTF8.CodePage)
+                throw new InvalidOperationException("The local Git exclusion file must use UTF-8 before default exclusions can be added. Its existing contents were preserved.");
+        }
+        var lines = existing.Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries).ToHashSet(StringComparer.Ordinal);
+        var missing = ConnectExcludedDirectories.Select(name => name + "/").Concat(ConnectExcludedFiles)
+            .Where(pattern => !lines.Contains(pattern)).ToArray();
+        if (missing.Length == 0) return;
+        // Preserve all existing bytes and rules, including Git's template exclusion file.
+        file.Position = file.Length;
         using var writer = new StreamWriter(file, new UTF8Encoding(false));
-        writer.WriteLine("# Local exclusions added by Full Stack Launcher during project connection.");
-        foreach (var name in ConnectExcludedDirectories) writer.WriteLine(name + "/");
-        foreach (var pattern in ConnectExcludedFiles) writer.WriteLine(pattern);
+        writer.WriteLine();
+        writer.WriteLine("# Local exclusions added by Full Stack Launcher during repository setup.");
+        foreach (var pattern in missing) writer.WriteLine(pattern);
     }
 
     private static async Task CopyConnectSourceAsync(GitProjectConnectReview review, CancellationToken token)

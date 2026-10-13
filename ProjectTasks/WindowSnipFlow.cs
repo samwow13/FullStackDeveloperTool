@@ -250,6 +250,7 @@ internal static class WindowSnipFlow
             ShowInTaskbar = false, Topmost = true, Background = PanelBrush, Foreground = TextBrush,
             FontFamily = new FontFamily("Segoe UI"), WindowStartupLocation = WindowStartupLocation.Manual
         };
+        FullStackLauncher.Services.WindowTheme.Attach(panel);
         var layout = new DockPanel { Margin = new Thickness(15) };
         var actions = new StackPanel { Orientation = Orientation.Horizontal, HorizontalAlignment = HorizontalAlignment.Right };
         var start = ActionButton("Start snip", true);
@@ -371,6 +372,7 @@ internal static class WindowSnipFlow
 
         public WindowPicker(Window owner)
         {
+            FullStackLauncher.Services.WindowTheme.Attach(this);
             Owner = owner;
             Title = "Snip Image · Choose window";
             Width = 750; Height = 540; MinWidth = 500; MinHeight = 350;
@@ -853,6 +855,7 @@ internal static class WindowSnipFlow
 
         public SnipReview(BitmapSource snip)
         {
+            FullStackLauncher.Services.WindowTheme.Attach(this);
             Title = "Review snip"; Width = 900; Height = 660; MinWidth = 480; MinHeight = 360;
             WindowStartupLocation = WindowStartupLocation.CenterScreen;
             Background = PanelBrush; Foreground = TextBrush; FontFamily = new FontFamily("Segoe UI");

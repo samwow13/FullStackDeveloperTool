@@ -26,8 +26,8 @@ public partial class LanComputersWindow : Window
 
     public LanComputersWindow()
     {
+        FullStackLauncher.Services.WindowTheme.Attach(this);
         InitializeComponent();
-        InitializeLanTheme();
         ComputersList.ItemsSource = _computers;
         _ready = true;
         UpdateControls();

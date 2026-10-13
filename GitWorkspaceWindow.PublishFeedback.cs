@@ -167,7 +167,7 @@ public partial class GitWorkspaceWindow
         PublishSuccessIcon.Visibility = confirmed ? Visibility.Visible : Visibility.Collapsed;
         PublishUnconfirmedIcon.Visibility = confirmed ? Visibility.Collapsed : Visibility.Visible;
         PublishFeedbackDismiss.Visibility = Visibility.Visible;
-        PublishFeedbackHeading.Text = confirmed ? "Pushed successfully" : "Push not confirmed";
+        PublishFeedbackHeading.Text = confirmed ? "Pushed successfully" : "Publication stopped";
         PublishFeedbackDetail.Text = string.IsNullOrWhiteSpace(detail)
             ? confirmed ? "Your commits reached the selected remote." : "Push was not confirmed. Review error details and refresh local and remote status before trying again."
             : SensitiveDataProtection.Redact(detail);

@@ -10,6 +10,7 @@ let reconnectTimer = null;
 let heartbeatTimer = null;
 let proofTimer = null;
 let authenticated = false;
+let authenticationConfirmed = false;
 let captureBusy = false;
 let connecting = false;
 let challenge = '';
@@ -47,6 +48,7 @@ function closeSocket() {
   heartbeatTimer = null;
   proofTimer = null;
   authenticated = false;
+  authenticationConfirmed = false;
   captureBusy = false;
   for (const operation of loginOperations.values()) operation.canceled = true;
   loginOperations.clear();
@@ -149,6 +151,10 @@ async function handleMessage(connection, raw) {
       if (socket === connection && connection.readyState === WebSocket.OPEN)
         connection.send(JSON.stringify({ type: 'ping' }));
     }, HEARTBEAT_MS);
+    return;
+  }
+  if (message?.type === 'authenticated') {
+    authenticationConfirmed = true;
     return;
   }
   if (message?.type === 'capture') {
@@ -813,6 +819,29 @@ chrome.storage.onChanged.addListener((changes, area) => {
   if (area !== 'local' || !changes.pairingCode) return;
   closeSocket();
   scheduleReconnect(100);
+});
+chrome.runtime.onMessage.addListener((message, sender, respond) => {
+  // Only our options document may query connection state or request reconnect.
+  // The response contains no pairing code, page data, or connection secrets.
+  if (sender.id !== chrome.runtime.id || sender.url !== chrome.runtime.getURL('options.html') ||
+      !['launcherPairingStatus', 'launcherPairingReconnect'].includes(message?.type)) return false;
+  (async () => {
+    if (message.type === 'launcherPairingReconnect' && !authenticationConfirmed) {
+      closeSocket();
+      clearTimeout(reconnectTimer);
+      reconnectTimer = null;
+      await connect();
+    }
+    const stored = await chrome.storage.local.get('pairingCode');
+    const paired = !!bytesFromHex(stored.pairingCode || '');
+    const connected = paired && stored.pairingCode === pairingCode && authenticated && authenticationConfirmed &&
+      socket?.readyState === WebSocket.OPEN;
+    const connectingNow = paired && (connecting || socket?.readyState === WebSocket.CONNECTING ||
+      socket?.readyState === WebSocket.OPEN && !connected);
+    respond({ paired, state: connected ? 'connected' : connectingNow ? 'connecting' : paired ? 'unavailable' : 'unpaired',
+      browser: browserName === 'msedge' ? 'Edge' : 'Chrome' });
+  })().catch(() => respond({ paired: false, state: 'unavailable', browser: browserName === 'msedge' ? 'Edge' : 'Chrome' }));
+  return true;
 });
 chrome.tabs.onActivated.addListener(() => scheduleReconnect(100));
 chrome.tabs.onCreated.addListener(changedSiteInventory);

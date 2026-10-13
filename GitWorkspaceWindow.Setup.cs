@@ -86,7 +86,9 @@ public partial class GitWorkspaceWindow
         SetupStep.Connections => "Choose or manage your online connection.",
         SetupStep.Provider => "Choose where your online repository lives.",
         SetupStep.Destination => _setupRoute == SetupRoute.New ? "Leave README, license and .gitignore unchecked, then copy its clone URL." : "Copy the HTTPS or SSH clone URL from your online repository.",
-        SetupStep.Authentication => "Use your Git credentials for this destination. The launcher does not save your password or token.",
+        SetupStep.Authentication => _setupProvider == GitHostingProvider.AzureDevOps && !IsSshTarget
+            ? "A saved Azure DevOps token is reused for matching HTTPS destinations. Your commit author still comes from Git configuration."
+            : "Use your Git credentials for this destination. Your commit author still comes from Git configuration.",
         SetupStep.Review => "Check the destination before saving.",
         SetupStep.CloneReview => "Clone downloads history and files into an empty folder.",
         _ => "You can now open your Git workspace."
@@ -107,13 +109,15 @@ public partial class GitWorkspaceWindow
     public string AuthDestination => SensitiveDataProtection.Redact(RemoteUrl?.Text.Trim() ?? "");
     public string AuthenticationHint => IsSshTarget
         ? $"This {ProviderLabel} connection uses SSH. Add your public key to your provider account, load the private key into your SSH agent, and verify the server's host key with Git. Then choose Check connection. SSH checks never accept an unknown host key automatically."
+        : IsAzureDevOpsServerTarget
+            ? "Saved tokens are reused for sync, fetch, pull, and push within this HTTPS server collection. Without a saved token, Git Credential Manager uses your Windows account or server credential. Keep the full HTTPS host, port, and collection path; connect to your work network or VPN when required."
         : _setupProvider == GitHostingProvider.AzureDevOps
-            ? "Connect with the Microsoft account that has access to this Azure DevOps organization. Git Credential Manager reuses an existing account or opens sign-in when needed. An Azure CLI login alone does not establish Git access. Install Git for Windows with Git Credential Manager if it is missing, then retry."
+            ? "Saved tokens are reused for sync, fetch, pull, and push within this HTTPS organization. Without a saved token, Git Credential Manager signs in with your Microsoft account. An Azure CLI login alone does not establish Git access."
             : "Sign in with the GitHub account that has access to this domain and repository. Git Credential Manager handles sign-in; your organization may also require SSO authorization. Install Git for Windows with Git Credential Manager if it is missing, then retry.";
     public string AuthenticationMessage => _authenticationMessage;
     public string SignInLabel => IsSshTarget ? "Check SSH connection"
         : _setupProvider == GitHostingProvider.AzureDevOps ? "Connect with Git…" : "Sign in to GitHub…";
-    public Visibility AzureAccountHelpVisibility => _setupProvider == GitHostingProvider.AzureDevOps && !IsSshTarget ? Visibility.Visible : Visibility.Collapsed;
+    public Visibility AzureAccountHelpVisibility => _setupProvider == GitHostingProvider.AzureDevOps && !IsSshTarget && !IsAzureDevOpsServerTarget ? Visibility.Visible : Visibility.Collapsed;
     public string AzureAccountHelpText
     {
         get
@@ -121,10 +125,19 @@ public partial class GitWorkspaceWindow
             string organization;
             try { organization = GitConnectionService.ParseTarget(GitHostingProvider.AzureDevOps, RemoteUrl?.Text.Trim() ?? "").Organization; }
             catch { return "Enter a valid Azure DevOps clone URL first."; }
-            return $"To choose another Microsoft account with Git Credential Manager's OAuth mode, run this from the local repository, replacing ACCOUNT_EMAIL with your account:\n\ngit credential-manager azure-repos bind --local {organization} ACCOUNT_EMAIL\n\nThen choose Connect with Git. This binding applies to this repository. If Git is configured to use a personal access token, account bindings do not select that token; update the matching stored credential through Windows Credential Manager. Open the account guide below for those steps.";
+            return $"To choose another Microsoft account with Git Credential Manager's OAuth mode, run this from the local repository, replacing ACCOUNT_EMAIL with your account:\n\ngit credential-manager azure-repos bind --local {organization} ACCOUNT_EMAIL\n\nThen choose Connect with Git. This binding applies to this repository. Saved Launcher tokens take priority for matching HTTPS organizations; change them through Connect with Azure DevOps Token connection settings. Account bindings do not select tokens stored by Git Credential Manager; use the account guide below to update those credentials.";
         }
     }
     public string CompletionMessage => _completionMessage;
+    private bool IsAzureDevOpsServerTarget
+    {
+        get
+        {
+            if (_setupProvider != GitHostingProvider.AzureDevOps) return false;
+            try { return !GitConnectionService.ParseTarget(GitHostingProvider.AzureDevOps, RemoteUrl?.Text.Trim() ?? "").IsHosted; }
+            catch { return false; }
+        }
+    }
     public string SetupNextLabel => _setupStep switch
     {
         SetupStep.Local when CanInitialize => "Create local repository…",
@@ -336,6 +349,11 @@ public partial class GitWorkspaceWindow
     {
         if (_busy) return;
         var url = _setupProvider == GitHostingProvider.AzureDevOps ? "https://dev.azure.com/" : "https://github.com/new";
+        if (IsAzureDevOpsServerTarget)
+        {
+            try { url = GitConnectionService.ParseTarget(GitHostingProvider.AzureDevOps, RemoteUrl?.Text.Trim() ?? "").CollectionUrl; }
+            catch { SetStatus("Open your Azure DevOps Server collection and create an empty repository, then return with its HTTPS clone URL."); return; }
+        }
         try { System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(url) { UseShellExecute = true }); }
         catch { SetStatus("Your browser could not open. Open your provider and create an empty repository, then return with its clone URL."); }
     }

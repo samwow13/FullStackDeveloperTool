@@ -11,10 +11,14 @@ namespace FullStackLauncher.Services;
 /// </summary>
 public sealed class CodexActivityProjectReceiptReader
 {
-    private const int MaximumChatReceiptBytes = 1024 * 1024;
+    // Match the chat store's bounded version-3 envelope: 24 MB of images plus
+    // escaped browser evidence. Large attachments do not change identity trust.
+    private const int MaximumChatReceiptBytes = 64_000_000;
     private const int MaximumTaskFileBytes = 64 * 1024 * 1024;
     private const int MaximumChatFiles = 4096;
-    private const int MaximumCombinedChatBytes = 32 * 1024 * 1024;
+    // Allow several maximum-sized receipts while retaining a finite scan budget.
+    // Unchanged receipts use identity-only cached entries and are not read again.
+    private const int MaximumCombinedChatBytes = 256_000_000;
     private const int MaximumTaskReceipts = 10_000;
     private readonly string _chatDirectory;
     private readonly string _taskPath;
@@ -64,13 +68,15 @@ public sealed class CodexActivityProjectReceiptReader
                     token.ThrowIfCancellationRequested();
                     var attemptId = Path.GetFileNameWithoutExtension(file.Name);
                     if (!Guid.TryParseExact(attemptId, "N", out _)) continue;
-                    totalBytes += file.Length;
-                    if (totalBytes > MaximumCombinedChatBytes) throw new InvalidDataException();
                     retainedPaths.Add(file.FullName);
-                    identities.AddRange(ReadCached(file.FullName, MaximumChatReceiptBytes,
-                        root => ReadChatReceipt(root, attemptId), token));
+                    // Enumeration metadata may predate an atomic receipt update. Limit the
+                    // actual current read to the remaining budget, then charge its actual size.
+                    var remainingBytes = (int)Math.Min(MaximumChatReceiptBytes, MaximumCombinedChatBytes - totalBytes);
+                    identities.AddRange(ReadCached(file.FullName, remainingBytes,
+                        root => ReadChatReceipt(root, attemptId), token, out var observedBytes));
+                    totalBytes += observedBytes;
                 }
-                identities.AddRange(ReadCached(_taskPath, MaximumTaskFileBytes, ReadTaskReceipts, token));
+                identities.AddRange(ReadCached(_taskPath, MaximumTaskFileBytes, ReadTaskReceipts, token, out _));
                 foreach (var obsolete in _cache.Keys.Where(path => !retainedPaths.Contains(path)).ToArray()) _cache.Remove(obsolete);
 
                 var newest = new Dictionary<string, ReceiptIdentity>(StringComparer.Ordinal);
@@ -100,8 +106,9 @@ public sealed class CodexActivityProjectReceiptReader
     }
 
     private IReadOnlyList<ReceiptIdentity> ReadCached(string path, int maximumBytes,
-        Func<JsonElement, ReceiptIdentity[]> parse, CancellationToken token)
+        Func<JsonElement, ReceiptIdentity[]> parse, CancellationToken token, out long observedBytes)
     {
+        observedBytes = 0;
         FileInfo file;
         try
         {
@@ -112,7 +119,11 @@ public sealed class CodexActivityProjectReceiptReader
         catch (FileNotFoundException) { _cache.Remove(path); return []; }
         catch (DirectoryNotFoundException) { _cache.Remove(path); return []; }
         var stamp = new FileStamp(file.Length, file.LastWriteTimeUtc.Ticks, file.CreationTimeUtc.Ticks);
-        if (_cache.TryGetValue(path, out var cached) && cached.Stamp == stamp) return cached.Identities;
+        if (_cache.TryGetValue(path, out var cached) && cached.Stamp == stamp)
+        {
+            observedBytes = stamp.Length;
+            return cached.Identities;
+        }
         using var stream = new FileStream(path, FileMode.Open, FileAccess.Read,
             FileShare.ReadWrite | FileShare.Delete, 4096, FileOptions.SequentialScan);
         using var content = new MemoryStream();
@@ -125,6 +136,7 @@ public sealed class CodexActivityProjectReceiptReader
             content.Write(buffer, 0, count);
         }
         var bytes = content.ToArray();
+        observedBytes = bytes.LongLength;
         var offset = bytes.Length >= 3 && bytes[0] == 0xef && bytes[1] == 0xbb && bytes[2] == 0xbf ? 3 : 0;
         using var document = JsonDocument.Parse(bytes.AsMemory(offset), new JsonDocumentOptions
         {
@@ -138,7 +150,7 @@ public sealed class CodexActivityProjectReceiptReader
     private static ReceiptIdentity[] ReadChatReceipt(JsonElement root, string attemptId)
     {
         RequireUniqueProperties(root);
-        if (Required(root, "version", JsonValueKind.Number).GetInt32() is not (1 or 2) ||
+        if (Required(root, "version", JsonValueKind.Number).GetInt32() is not (1 or 2 or 3) ||
             Required(root, "attemptId", JsonValueKind.String).GetString() != attemptId) throw new InvalidDataException();
         var request = Required(root, "request", JsonValueKind.Object);
         RequireUniqueProperties(request);

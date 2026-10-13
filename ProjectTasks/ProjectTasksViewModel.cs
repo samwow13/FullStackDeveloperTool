@@ -32,6 +32,7 @@ public sealed partial class ProjectTasksViewModel : INotifyPropertyChanged, IDis
     private string _modelStatus = "Connecting to Codex to load model and thinking-level choices…";
     private bool _refreshingRows;
     private bool _loadingModels;
+    private string _modelDiscoveryFolder = "";
     private bool _disposed;
     private bool _queueCommandBusy;
     private DateTimeOffset _nextBlockedStoreReloadAt;
@@ -1247,13 +1248,22 @@ public sealed partial class ProjectTasksViewModel : INotifyPropertyChanged, IDis
     private async Task RefreshModelsAsync()
     {
         if (_loadingModels) return;
+        var folder = _modelDiscoveryFolder;
+        if (string.IsNullOrWhiteSpace(folder))
+        {
+            Models.Clear();
+            ModelStatus = "Select a project to load its Codex models and thinking levels.";
+            LoadQueueOptions();
+            RefreshBindings();
+            return;
+        }
         _loadingModels = true;
         ModelStatus = "Reading models from the installed Codex interface…";
         RefreshBindings();
         try
         {
-            var models = await _catalog.LoadAsync(_lifetime.Token);
-            if (_disposed) return;
+            var models = await _catalog.LoadAsync(folder, _lifetime.Token);
+            if (_disposed || !string.Equals(folder, _modelDiscoveryFolder, StringComparison.OrdinalIgnoreCase)) return;
             Models.Clear();
             foreach (var model in models) Models.Add(model);
             ModelStatus = $"{Models.Count} models loaded. Each thinking-level list comes from Codex.";
@@ -1261,7 +1271,7 @@ public sealed partial class ProjectTasksViewModel : INotifyPropertyChanged, IDis
         catch (OperationCanceledException) when (_lifetime.IsCancellationRequested) { }
         catch (Exception ex) when (ex is InvalidOperationException or TimeoutException or IOException or UnauthorizedAccessException or System.ComponentModel.Win32Exception)
         {
-            if (!_disposed)
+            if (!_disposed && string.Equals(folder, _modelDiscoveryFolder, StringComparison.OrdinalIgnoreCase))
             {
                 Models.Clear();
                 ModelStatus = ex is InvalidOperationException or TimeoutException ? ex.Message : "Models could not be read. Check the installed Codex CLI and try Refresh models again.";
@@ -1270,8 +1280,24 @@ public sealed partial class ProjectTasksViewModel : INotifyPropertyChanged, IDis
         finally
         {
             _loadingModels = false;
-            if (!_disposed) { LoadQueueOptions(); RefreshBindings(); }
+            if (!_disposed)
+            {
+                LoadQueueOptions();
+                RefreshBindings();
+                if (!string.Equals(folder, _modelDiscoveryFolder, StringComparison.OrdinalIgnoreCase))
+                    _ = RefreshModelsAsync();
+            }
         }
+    }
+
+    private void UpdateModelDiscoveryContext()
+    {
+        var folder = _project is null ? "" : AssignedFolder;
+        if (string.Equals(folder, _modelDiscoveryFolder, StringComparison.OrdinalIgnoreCase)) return;
+        _modelDiscoveryFolder = folder;
+        Models.Clear();
+        // Saved selections stay in the task store. Only this folder's catalog can validate them.
+        _ = RefreshModelsAsync();
     }
 
     private void LoadQueueOptions()
@@ -1365,6 +1391,7 @@ public sealed partial class ProjectTasksViewModel : INotifyPropertyChanged, IDis
         }
         finally { _refreshingRows = false; }
         LoadEditor();
+        UpdateModelDiscoveryContext();
         LoadQueueOptions();
         RefreshBindings();
     }
