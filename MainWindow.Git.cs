@@ -133,7 +133,14 @@ public partial class MainWindow
         catch (Exception exception) when (exception is OperationCanceledException or TimeoutException) { }
     }
 
-    private async Task OpenGitWorkspaceAsync(string? preferredRepositoryRoot)
+    private async void ChangeGitConnection_Click(object sender, RoutedEventArgs e)
+    {
+        var repositoryRoot = SelectedNextCommitRepository?.RepositoryRoot;
+        NextCommitSettingsToggle.IsChecked = false;
+        await OpenGitWorkspaceAsync(repositoryRoot, openConnections: true);
+    }
+
+    private async Task OpenGitWorkspaceAsync(string? preferredRepositoryRoot, bool openConnections = false)
     {
         if (SelectedProjectItem is not { } project || IsEditing || _savingProjectEdits || _closeRequested || _closing) return;
         try
@@ -150,7 +157,7 @@ public partial class MainWindow
                     gitService: _projectGitService,
                     prepareProjectConnect: request => PrepareGitProjectConnectAsync(capturedProject, request),
                     applyProjectConnect: result => ApplyGitProjectConnectAsync(capturedProject, result)) { Owner = this };
-                await workspace.ShowGitDialogAsync(this);
+                await workspace.ShowGitDialogAsync(this, openConnections);
                 await RefreshNextCommitAsync();
                 if (workspace.ConnectedProject is { } connected &&
                     !SameGitConnectPath(connected.ProjectFolder, connected.SourceFolder) &&

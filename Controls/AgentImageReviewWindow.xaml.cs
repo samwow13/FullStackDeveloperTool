@@ -17,6 +17,11 @@ public partial class AgentImageReviewWindow : Window
         MaxHeight = SystemParameters.WorkArea.Height;
         CaptureTitle.Text = attachment.BrowserContext?.Title is { Length: > 0 } title ? title : attachment.Caption;
         CaptureImage.Source = CodexAgentImageStaging.CreatePreview(attachment, 1440);
+        if (attachment.CaptureContext is { } capture)
+        {
+            CaptureContextJson.Text = capture.FormatForReview();
+            CaptureDetails.Visibility = Visibility.Visible;
+        }
         if (attachment.BrowserContext is { } context)
         {
             _context = context;

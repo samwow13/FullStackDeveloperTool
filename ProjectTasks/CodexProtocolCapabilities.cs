@@ -12,11 +12,21 @@ internal static class CodexProtocolCapabilities
 {
     private const int MaximumSchemaBytes = 256 * 1024;
     private const string DirectoryPrefix = "FullStackLauncher-codex-schema-";
+    private enum SchemaCapability { ProjectConfigRead, ServiceTierSelection, StandardTierSelection }
     private sealed record ExecutableIdentity(string Path, long Length, long LastWriteTicks);
-    private static readonly ConcurrentDictionary<ExecutableIdentity, Lazy<Task<bool?>>> Cache = new();
+    private static readonly ConcurrentDictionary<(ExecutableIdentity, SchemaCapability), Lazy<Task<bool?>>> Cache = new();
 
-    internal static async Task<bool> SupportsProjectConfigReadAsync(string nativeExecutablePath,
-        CancellationToken token)
+    internal static Task<bool> SupportsProjectConfigReadAsync(string nativeExecutablePath,
+        CancellationToken token) => ReadCapabilityAsync(nativeExecutablePath, SchemaCapability.ProjectConfigRead, token);
+
+    internal static Task<bool> SupportsServiceTierSelectionAsync(string nativeExecutablePath,
+        CancellationToken token) => ReadCapabilityAsync(nativeExecutablePath, SchemaCapability.ServiceTierSelection, token);
+
+    internal static Task<bool> SupportsStandardTierSelectionAsync(string nativeExecutablePath,
+        CancellationToken token) => ReadCapabilityAsync(nativeExecutablePath, SchemaCapability.StandardTierSelection, token);
+
+    private static async Task<bool> ReadCapabilityAsync(string nativeExecutablePath,
+        SchemaCapability capability, CancellationToken token)
     {
         token.ThrowIfCancellationRequested();
         ExecutableIdentity identity;
@@ -34,17 +44,18 @@ internal static class CodexProtocolCapabilities
 
         // Share unfinished reads; caller cancellation does not cancel another
         // caller's probe. The owned generator always has its own 15-second limit.
-        var probe = Cache.GetOrAdd(identity, _ => new Lazy<Task<bool?>>(
-            () => ProbeAsync(executable, identity), LazyThreadSafetyMode.ExecutionAndPublication));
+        var key = (identity, capability);
+        var probe = Cache.GetOrAdd(key, _ => new Lazy<Task<bool?>>(
+            () => ProbeAsync(executable, identity, capability), LazyThreadSafetyMode.ExecutionAndPublication));
         var result = await probe.Value.WaitAsync(token).ConfigureAwait(false);
         if (result is null)
-            Cache.TryRemove(new KeyValuePair<ExecutableIdentity, Lazy<Task<bool?>>>(identity, probe));
+            Cache.TryRemove(new KeyValuePair<(ExecutableIdentity, SchemaCapability), Lazy<Task<bool?>>>(key, probe));
         // Missing capability and an unavailable schema both fail closed. Only
         // completed schema evidence is cached, so transient failures can recover.
         return result == true;
     }
 
-    private static async Task<bool?> ProbeAsync(string executable, ExecutableIdentity identity)
+    private static async Task<bool?> ProbeAsync(string executable, ExecutableIdentity identity, SchemaCapability capability)
     {
         string? outputDirectory = null;
         Process? process = null;
@@ -77,6 +88,27 @@ internal static class CodexProtocolCapabilities
             await process.WaitForExitAsync(timeout.Token).ConfigureAwait(false);
             await Task.WhenAll(stdoutDrain, stderrDrain).WaitAsync(timeout.Token).ConfigureAwait(false);
             if (process.ExitCode != 0 || !MatchesExecutableIdentity(executable, identity)) return null;
+
+            if (capability == SchemaCapability.ServiceTierSelection)
+            {
+                foreach (var schemaName in new[] { "ThreadStartParams", "ThreadStartResponse", "TurnStartParams" })
+                {
+                    var supported = await ReadStringPropertyAsync(outputDirectory, schemaName, "serviceTier", timeout.Token)
+                        .ConfigureAwait(false);
+                    if (supported != true) return supported;
+                }
+                return MatchesExecutableIdentity(executable, identity) ? true : null;
+            }
+
+            if (capability == SchemaCapability.StandardTierSelection)
+            {
+                var responseSupported = await ReadStringPropertyAsync(outputDirectory, "ThreadStartResponse", "serviceTier",
+                    timeout.Token).ConfigureAwait(false);
+                if (responseSupported != true) return responseSupported;
+                var turnSupported = await ReadStringPropertyAsync(outputDirectory, "TurnStartParams", "serviceTierForTurn",
+                    timeout.Token, requireStandardDescription: true).ConfigureAwait(false);
+                return MatchesExecutableIdentity(executable, identity) ? turnSupported : null;
+            }
 
             // Both historical and current generators place v2 parameter schemas
             // here. Never search unrelated files or parse generated server output.
@@ -142,6 +174,44 @@ internal static class CodexProtocolCapabilities
             }
             if (outputDirectory is not null) DeleteOwnedDirectory(outputDirectory);
         }
+    }
+
+    private static async Task<bool?> ReadStringPropertyAsync(string directory, string schemaName,
+        string propertyName, CancellationToken token, bool requireStandardDescription = false)
+    {
+        var schemaPath = Path.Combine(directory, "v2", schemaName + ".json");
+        var schemaFile = new FileInfo(schemaPath);
+        if (!schemaFile.Exists || schemaFile.Length is <= 0 or > MaximumSchemaBytes
+            || (schemaFile.Attributes & FileAttributes.ReparsePoint) != 0
+            || (new DirectoryInfo(schemaFile.DirectoryName!).Attributes & FileAttributes.ReparsePoint) != 0)
+            return null;
+        await using var stream = new FileStream(schemaPath, FileMode.Open, FileAccess.Read, FileShare.Read,
+            4096, FileOptions.Asynchronous | FileOptions.SequentialScan);
+        using var document = await JsonDocument.ParseAsync(stream, new JsonDocumentOptions { MaxDepth = 32 }, token)
+            .ConfigureAwait(false);
+        var root = document.RootElement;
+        if (root.ValueKind != JsonValueKind.Object
+            || !root.TryGetProperty("title", out var title) || title.ValueKind != JsonValueKind.String
+            || title.GetString() != schemaName
+            || !root.TryGetProperty("type", out var rootType) || rootType.ValueKind != JsonValueKind.String
+            || rootType.GetString() != "object"
+            || !root.TryGetProperty("properties", out var properties) || properties.ValueKind != JsonValueKind.Object)
+            return null;
+        if (!properties.TryGetProperty(propertyName, out var property)) return false;
+        if (property.ValueKind != JsonValueKind.Object || !property.TryGetProperty("type", out var type)) return null;
+        if (requireStandardDescription && (!property.TryGetProperty("description", out var description)
+            || description.ValueKind != JsonValueKind.String
+            || !description.GetString()!.Contains("\"default\"", StringComparison.Ordinal)
+            || !description.GetString()!.Contains("standard", StringComparison.OrdinalIgnoreCase))) return false;
+        if (type.ValueKind == JsonValueKind.String) return type.GetString() == "string" ? true : null;
+        if (type.ValueKind != JsonValueKind.Array || type.GetArrayLength() is < 1 or > 2) return null;
+        var supportsString = false;
+        foreach (var item in type.EnumerateArray())
+        {
+            if (item.ValueKind != JsonValueKind.String || item.GetString() is not ("string" or "null")) return null;
+            if (item.GetString() == "string") supportsString = true;
+        }
+        return supportsString ? true : null;
     }
 
     private static bool MatchesExecutableIdentity(string executable, ExecutableIdentity identity)

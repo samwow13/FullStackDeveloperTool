@@ -29,6 +29,37 @@ public partial class ApiLaunchProfileWindow : Window, IDashboardReplacementWindo
     private bool _previewExpanded;
     private bool _previewRunning;
     private int _previewVersion;
+    private Action? _clearDashboardResume;
+    private bool _dashboardResumePending;
+    private bool _dashboardResumeClose;
+    private int? _restoredCaretIndex;
+
+    internal void ConfigureDashboardResume(ApiLaunchProfileEditorResume? state, Action clearDashboardResume)
+    {
+        _clearDashboardResume = clearDashboardResume;
+        if (state is null) return;
+        CommandBox.Text = state.Command;
+        CommandBox.CaretIndex = Math.Clamp(state.CaretIndex, 0, CommandBox.Text.Length);
+        _restoredCaretIndex = CommandBox.CaretIndex;
+        _dashboardResumePending = true;
+        SetStatus("Launch profile draft restored. Review, then save when ready.");
+    }
+
+    internal ApiLaunchProfileEditorResume CaptureDashboardResume() =>
+        new(CommandBox.Text, _initialCommand, CommandBox.CaretIndex);
+
+    internal void MarkDashboardResumeCheckpointed()
+    {
+        _dashboardResumePending = true;
+        _dashboardResumeClose = true;
+    }
+
+    private void ClearDashboardResume()
+    {
+        if (!_dashboardResumePending) return;
+        _clearDashboardResume?.Invoke();
+        _dashboardResumePending = false;
+    }
 
     internal ApiLaunchProfileWindow(string serviceName, ServiceProfile profile, string directory,
         Func<ApiLaunchProfileDraft, Task> save)
@@ -47,7 +78,7 @@ public partial class ApiLaunchProfileWindow : Window, IDashboardReplacementWindo
         CommandBox.Text = _initialCommand;
         if (profile.ApiConfiguration is null)
         {
-            LegacyNotice.Text = "Saving enables encrypted launcher configuration. Existing .NET user-secrets may need import through Manage secrets. The original configured command is retained.";
+            LegacyNotice.Text = "Saving enables managed Local launches. The original configured command is retained.";
             LegacyNotice.ToolTip = SensitiveDataProtection.Redact(profile.StartCommand);
             LegacyNotice.Visibility = Visibility.Visible;
         }
@@ -60,14 +91,15 @@ public partial class ApiLaunchProfileWindow : Window, IDashboardReplacementWindo
     private void OnLoaded(object sender, RoutedEventArgs e)
     {
         CommandBox.Focus();
-        CommandBox.CaretIndex = CommandBox.Text.Length;
+        CommandBox.CaretIndex = _restoredCaretIndex ?? CommandBox.Text.Length;
+        _restoredCaretIndex = null;
     }
 
     private void CommandChanged(object sender, TextChangedEventArgs e) => UpdateDraft();
 
     private void UpdateDraft()
     {
-        if (!_initialized || _saving) return;
+        if (!_initialized || _saving || _saved) return;
         SaveButton.IsEnabled = true;
         if (_previewExpanded)
         {
@@ -130,6 +162,7 @@ public partial class ApiLaunchProfileWindow : Window, IDashboardReplacementWindo
     private async void SaveClick(object sender, RoutedEventArgs e)
     {
         if (_saving) return;
+        if (_saved) { Close(); return; }
         var command = CommandBox.Text.Trim();
         try
         {
@@ -143,18 +176,21 @@ public partial class ApiLaunchProfileWindow : Window, IDashboardReplacementWindo
             SetStatus("Saving launch profile…");
             await _save(new(command));
             _saved = true;
+            ClearDashboardResume();
             DialogResult = true;
         }
         catch (InvalidOperationException ex) { SetStatus(ex.Message, error: true); }
-        catch (Exception) { SetStatus("Launch profile could not be saved. Your draft is retained; check settings access and retry.", error: true); }
+        catch (Exception) { SetStatus(_saved
+            ? "Launch profile saved, but its old draft checkpoint could not be cleared. Retry closing to finish recovery cleanup."
+            : "Launch profile could not be saved. Your draft is retained; check settings access and retry.", error: true); }
         finally
         {
             _saving = false;
             if (!_closed)
             {
-                SaveButton.IsEnabled = true;
+                SaveButton.IsEnabled = !_saved;
                 CancelButton.IsEnabled = true;
-                CommandBox.IsEnabled = true;
+                CommandBox.IsEnabled = !_saved;
                 if (_previewExpanded) _ = RefreshPreviewAsync();
             }
         }
@@ -179,11 +215,21 @@ public partial class ApiLaunchProfileWindow : Window, IDashboardReplacementWindo
     private void OnClosing(object? sender, CancelEventArgs e)
     {
         if (_saving && !_saved) { e.Cancel = true; return; }
-        if (HasEdits && MessageBox.Show(this, "Discard unsaved launch changes?", "API launch profile",
+        if (!_dashboardResumeClose && HasEdits && MessageBox.Show(this, "Discard unsaved launch changes?", "API launch profile",
                 MessageBoxButton.YesNo, MessageBoxImage.Question, MessageBoxResult.No) != MessageBoxResult.Yes)
         {
             e.Cancel = true;
             return;
+        }
+        if (!_dashboardResumeClose)
+        {
+            try { ClearDashboardResume(); }
+            catch (Exception)
+            {
+                e.Cancel = true;
+                SetStatus("The old launch draft checkpoint could not be cleared. The editor remains open; retry closing after checking local storage access.", error: true);
+                return;
+            }
         }
         _closed = true;
         _previewTimer.Stop();

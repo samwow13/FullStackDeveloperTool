@@ -36,7 +36,7 @@ public sealed class ApiDatabaseConfiguration
         if (profile.IsConsole)
             throw new ApiSecretStoreException("Choose a web API service before changing its database.");
         if (profile.ApiConfiguration?.Environment is not (null or "Local"))
-            throw new ApiSecretStoreException("Change DB supports Local API configuration only. Select Local before changing its database.");
+            throw new ApiSecretStoreException("Change DB supports Local API configuration only. Stop the API and save its Local launch profile before changing its database.");
         if (!Uri.TryCreate(profile.Url, UriKind.Absolute, out var endpoint) ||
             endpoint.Scheme is not ("http" or "https") || !endpoint.IsLoopback ||
             !string.IsNullOrEmpty(endpoint.UserInfo))
@@ -92,7 +92,7 @@ public sealed class ApiDatabaseConfiguration
                 ReadDatabaseName(pair.Value));
         }
         if (connections.Count == 0 && !discoveryOnly)
-            throw new ApiSecretStoreException("No DefaultConnectionString or standard ConnectionStrings setting was found in this API's Local configuration. Add one in API configuration, then reopen Change DB.");
+            throw new ApiSecretStoreException("No DefaultConnectionString or standard ConnectionStrings setting was found in this API's Local configuration. Add one to appsettings.json or appsettings.Development.json, then reopen Change DB.");
         Connections = Array.AsReadOnly(connections.Values.OrderBy(setting => ApiDatabaseIdentifier.ConnectionKeyPriority(setting.Key))
             .ThenBy(setting => setting.Key, StringComparer.OrdinalIgnoreCase).ToArray());
         ValidateSnapshot();
@@ -105,11 +105,35 @@ public sealed class ApiDatabaseConfiguration
     public bool HasStagedLegacyValues => _snapshot.IsLegacyImport;
     public bool HasLegacyStore => _snapshot.HasLegacyStore;
 
+    /// <summary>A value-free identity for the reviewed providers and their captured revisions.</summary>
+    internal string GetDashboardResumeFingerprint()
+    {
+        // Once a protected save succeeds, the external legacy file is no longer a
+        // provider. A freshly opened protected review does not observe it either.
+        var legacyPath = Path.Combine(System.Environment.GetFolderPath(System.Environment.SpecialFolder.ApplicationData),
+            "Microsoft", "UserSecrets", _store.UserSecretsId, "secrets.json");
+        var selection = _hasSaved && _selection is null && _profile.ApiConfiguration?.Environment == "Local" ? "Local" : _selection;
+        var legacyLaunchPath = Path.Combine(WorkingDirectory, "Properties", "launchSettings.json");
+        var revisions = _fileRevisions.Where(pair => (!_snapshot.HasProtectedStore ||
+                !pair.Key.Equals(legacyPath, StringComparison.OrdinalIgnoreCase)) &&
+                (selection is null || !pair.Key.Equals(legacyLaunchPath, StringComparison.OrdinalIgnoreCase)))
+            .OrderBy(pair => pair.Key, StringComparer.OrdinalIgnoreCase)
+            .Select(pair => new { Path = pair.Key.ToUpperInvariant(), pair.Value }).ToArray();
+        var identity = new
+        {
+            _profileId, _profileDirectory, _startCommand, _url, _launchCommand,
+            Selection = selection,
+            _snapshot.Revision, _snapshot.HasProtectedStore, _snapshot.IsLegacyImport,
+            Files = revisions
+        };
+        return Convert.ToHexString(SHA256.HashData(JsonSerializer.SerializeToUtf8Bytes(identity)));
+    }
+
     public static ApiDatabaseConfiguration Load(ServiceProfile profile, string directory, string environment = "Local",
         bool importLegacyForReview = false)
     {
         if (environment != "Local")
-            throw new ApiSecretStoreException("Change DB supports Local API configuration only. Production configuration must be reviewed in API configuration.");
+            throw new ApiSecretStoreException("Change DB supports Local API configuration only.");
         try { return new(profile, directory, importLegacyForReview); }
         catch (Exception ex) when (IsFileError(ex))
         {
@@ -157,19 +181,19 @@ public sealed class ApiDatabaseConfiguration
         // The restart consumes the complete protected profile. Check every unchanged entry
         // before saving so a malformed unrelated override cannot turn Save into a failed preflight.
         if (_snapshot.NullKeys.Any(other => !other.Equals(key, StringComparison.OrdinalIgnoreCase)))
-            throw new ApiSecretStoreException("This Local profile contains other JSON null or container overrides that cannot be passed to the API. Repair them in API configuration before changing its database.");
+            throw new ApiSecretStoreException("This Local profile contains other JSON null or container overrides that cannot be passed to the API. Restore a valid encrypted Local configuration before changing its database.");
         foreach (var pair in _snapshot.Values)
         {
             ApiSecretStore.ValidateKey(pair.Key);
             if (pair.Key.Equals(key, StringComparison.OrdinalIgnoreCase)) continue;
             if (pair.Value.Contains('\0'))
-                throw new ApiSecretStoreException("This Local profile contains a value that cannot be passed to the API. Repair it in API configuration before changing its database.");
+                throw new ApiSecretStoreException("This Local profile contains a value that cannot be passed to the API. Restore a valid encrypted Local configuration before changing its database.");
             if (ApiDatabaseIdentifier.IsConnectionKey(pair.Key))
             {
                 try { _ = DatabaseConnectionSecurity.NormalizeApiConnectionString(pair.Value, _npgsqlMajorVersion); }
                 catch (ArgumentException)
                 {
-                    throw new ApiSecretStoreException("Another Local connection override is invalid or uses unsupported PostgreSQL security options. Repair it in API configuration before changing its database.");
+                    throw new ApiSecretStoreException("Another Local connection override is invalid or uses unsupported PostgreSQL security options. Restore a valid encrypted Local configuration before changing its database.");
                 }
             }
         }
@@ -238,7 +262,7 @@ public sealed class ApiDatabaseConfiguration
         }
         catch (Exception ex) when (IsFileError(ex))
         {
-            throw new ApiSecretStoreException("The API configuration could not be rechecked. Files were preserved; reload Change DB before saving.", isConflict: true);
+            throw new ApiSecretStoreException("The API configuration could not be rechecked. Files were preserved; close this editor and reopen Change DB before saving.", isConflict: true);
         }
     }
 
@@ -568,15 +592,15 @@ public sealed class ApiDatabaseConfiguration
     }
 
     private static string? Revision(byte[]? bytes) => bytes is null ? null : Convert.ToHexString(SHA256.HashData(bytes));
-    private static ApiSecretStoreException Changed() => new("The API project, launch settings or Local configuration changed after review. Reload Change DB and review the latest values before saving.", isConflict: true);
+    private static ApiSecretStoreException Changed() => new("The API project, launch settings or Local configuration changed after review. Close this editor and reopen Change DB to review the latest values before saving.", isConflict: true);
     private static ApiSecretStoreException InvalidJson() => new("The API appsettings files contain invalid or ambiguous connection settings. Repair their JSON before reopening Change DB.");
-    private static ApiSecretStoreException UnsupportedProviders() => new("This API's startup configuration is not supported by Change DB. Use API configuration and review its custom configuration providers before restarting.");
-    private static ApiSecretStoreException UnsupportedCommand() => new("This API uses launch arguments or a launch profile that Change DB cannot preserve safely. Review its command and enable managed Local API configuration before changing its database.");
+    private static ApiSecretStoreException UnsupportedProviders() => new("This API's startup configuration is not supported by Change DB. Review its custom configuration providers in the API project before restarting.");
+    private static ApiSecretStoreException UnsupportedCommand() => new("This API uses launch arguments or a launch profile that Change DB cannot preserve safely. Review its command and save a supported Local launch profile before changing its database.");
     private static bool IsFileError(Exception exception) => exception is IOException or UnauthorizedAccessException or
         System.Security.SecurityException or ArgumentException or NotSupportedException or DecoderFallbackException;
 }
 
-/// <summary>Secret text is retained only in the modal's in-memory review.</summary>
+/// <summary>Reviewed connection data; any resume checkpoint must use encrypted user storage.</summary>
 public sealed class ApiDatabaseConnectionSetting
 {
     internal ApiDatabaseConnectionSetting(string key, string value, string source, string? databaseName)

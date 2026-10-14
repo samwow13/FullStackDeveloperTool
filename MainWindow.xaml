@@ -695,6 +695,10 @@
                                       IsEnabled="{Binding PlacementTarget.DataContext.CanAddService, RelativeSource={RelativeSource AncestorType=ContextMenu}}"
                                       ToolTip="Clone more repositories into this project's workspace, then add their services."/>
                             <MenuItem Header="First Time Setup" Click="FirstTimeSetup_Click" Style="{StaticResource ServiceToolMenuItem}" ToolTip="Connect your agent and copy instructions for your existing AGENTS.md file."/>
+                            <MenuItem Header="Retry queue handoff" Click="RetryQueueHandoff_Click" Style="{StaticResource ServiceToolMenuItem}"
+                                      Visibility="{Binding PlacementTarget.DataContext.HasQueueHandoffFailure, RelativeSource={RelativeSource AncestorType=ContextMenu}, Converter={StaticResource BoolToVisibility}}"
+                                      IsEnabled="{Binding PlacementTarget.DataContext.CanRetryQueueHandoff, RelativeSource={RelativeSource AncestorType=ContextMenu}}"
+                                      ToolTip="Confirm queue ownership after a failed Launcher handoff. Keeps existing task identities and queue settings."/>
                             <MenuItem x:Name="HardResetCodexMenuItem" Header="Hard Reset Codex" Click="HardResetCodex_Click" Style="{StaticResource ServiceToolMenuItem}" ToolTip="Force close Codex and ChatGPT processes, then reopen desktop apps. Unsaved work and active chats may be interrupted."/>
                         </ContextMenu></Button.ContextMenu>
                     </Button>
@@ -904,10 +908,6 @@
                                                                 <Button Content="Launch profile…" Click="ApiSettingsLaunchProfile_Click" IsEnabled="{Binding CanConfigureApi}"
                                                                         CommandParameter="{Binding ElementName=ApiSettingsPopup}" HorizontalContentAlignment="Left" Padding="10,7" Margin="0,0,0,6"
                                                                         AutomationProperties.Name="View and edit API launch profile"/>
-                                                                <Button Content="Manage secrets &amp; settings…" Click="ApiSettingsSecrets_Click" IsEnabled="{Binding CanConfigureApi}"
-                                                                        CommandParameter="{Binding ElementName=ApiSettingsPopup}" HorizontalContentAlignment="Left" Padding="10,7" Margin="0,0,0,6"/>
-                                                                <Button Content="{Binding LocalButtonLabel}" Tag="Local" Click="ApiSettingsUseLocal_Click" IsEnabled="{Binding CanSwitchConfiguration}"
-                                                                        CommandParameter="{Binding ElementName=ApiSettingsPopup}" HorizontalContentAlignment="Left" Padding="10,7"/>
                                                                 </StackPanel>
                                                                 <Button Content="Change port…" Click="ServiceSettingsChangePort_Click" CommandParameter="{Binding ElementName=ApiSettingsPopup}"
                                                                         IsEnabled="{Binding CanChangeFrontendPort}" Visibility="{Binding IsFrontendService, Converter={StaticResource BoolToVisibility}}"
@@ -1203,12 +1203,28 @@
                         BorderBrush="{StaticResource BorderBrush}" BorderThickness="1" CornerRadius="7"
                         Visibility="{Binding HasWaitingAgentItems, Converter={StaticResource BoolToVisibility}}">
                     <DockPanel LastChildFill="True">
+                        <Button DockPanel.Dock="Right" Content="Stop queue" Click="StopWaitingAgentQueue_Click"
+                                Visibility="{Binding HasWaitingAgentQueue, Converter={StaticResource BoolToVisibility}}"
+                                IsEnabled="{Binding CanStopWaitingAgentQueue}" Padding="10,6" Margin="8,0,0,0"
+                                ToolTip="Keep unstarted prompts waiting. The current agent continues."/>
                         <Button DockPanel.Dock="Right" Content="{Binding WaitingAgentGoLabel}" Click="GoWaitingAgents_Click"
                                 IsEnabled="{Binding CanReleaseWaitingAgents}" Padding="14,6" Margin="8,0,0,0"
-                                ToolTip="Start all saved waiting prompts together" AutomationProperties.Name="Start waiting prompts"/>
+                                ToolTip="Queue saved prompts one at a time or push all agents together" AutomationProperties.Name="Choose how to start waiting prompts">
+                            <Button.ContextMenu>
+                                <ContextMenu Style="{StaticResource ServiceToolContextMenu}">
+                                    <MenuItem Header="Queue agents" Click="QueueWaitingAgents_Click" Style="{StaticResource ServiceToolMenuItem}"
+                                              ToolTip="Start in saved order, waiting for each agent to finish. Each prompt gets a separate Codex chat."
+                                              IsEnabled="{Binding PlacementTarget.DataContext.CanReleaseWaitingAgents, RelativeSource={RelativeSource AncestorType=ContextMenu}}"/>
+                                    <MenuItem Header="Push all agents" Click="PushWaitingAgents_Click" Style="{StaticResource ServiceToolMenuItem}"
+                                              ToolTip="Start all saved prompts together in separate Codex chats."
+                                              IsEnabled="{Binding PlacementTarget.DataContext.CanReleaseWaitingAgents, RelativeSource={RelativeSource AncestorType=ContextMenu}}"/>
+                                </ContextMenu>
+                            </Button.ContextMenu>
+                        </Button>
                         <Button DockPanel.Dock="Right" Content="Review…" Click="ReviewWaitingAgents_Click" Padding="10,6"
                                 IsEnabled="{Binding CanReviewWaitingAgents}" AutomationProperties.Name="Review waiting prompts"/>
-                        <TextBlock Text="{Binding WaitingAgentLabel}" Foreground="{StaticResource TextBrush}" FontSize="12"
+                        <TextBlock Text="{Binding WaitingAgentLabel}" ToolTip="{Binding WaitingAgentDetails}"
+                                   Foreground="{StaticResource TextBrush}" FontSize="12"
                                    VerticalAlignment="Center" Margin="0,0,10,0" AutomationProperties.LiveSetting="Polite"/>
                     </DockPanel>
                 </Border>
@@ -1240,15 +1256,23 @@
                     </Border>
                     <Grid Grid.Column="1" Background="{StaticResource SurfaceBrush}">
                         <ToggleButton x:Name="NextCommitSettingsToggle" Style="{StaticResource NextCommitSettingsButton}"
-                                      PreviewKeyDown="NextCommitSettingsToggle_PreviewKeyDown" ToolTip="Git commit settings"
-                                      AutomationProperties.Name="Git commit settings" AutomationProperties.HelpText="Review preview details and character count. Click outside or press Escape to close."/>
+                                      PreviewKeyDown="NextCommitSettingsToggle_PreviewKeyDown" ToolTip="Git settings and connections"
+                                      AutomationProperties.Name="Git settings and connections" AutomationProperties.HelpText="Change this repository's connection or review Git status. Click outside or press Escape to close."/>
                         <Popup x:Name="NextCommitSettingsMenu" PlacementTarget="{Binding ElementName=NextCommitSettingsToggle}" Placement="Bottom" VerticalOffset="6"
                                IsOpen="{Binding IsChecked, ElementName=NextCommitSettingsToggle, Mode=TwoWay}" StaysOpen="False" AllowsTransparency="True"
                                DataContext="{Binding PlacementTarget.DataContext, RelativeSource={RelativeSource Self}}" Opened="NextCommitSettingsMenu_Opened">
                             <Border Background="{StaticResource SurfaceBrush}" BorderBrush="{StaticResource BorderBrush}" BorderThickness="1" CornerRadius="8" Padding="14" Width="320"
                                     PreviewKeyDown="NextCommitSettingsMenu_PreviewKeyDown" KeyboardNavigation.TabNavigation="Cycle">
                                 <StackPanel>
-                                    <TextBlock Text="Git commit settings" Foreground="{StaticResource TextBrush}" FontWeight="SemiBold" Margin="0,0,0,12"/>
+                                    <TextBlock Text="Git settings" Foreground="{StaticResource TextBrush}" FontWeight="SemiBold" Margin="0,0,0,12"/>
+                                    <Button Content="Change connection…" Click="ChangeGitConnection_Click" HorizontalAlignment="Stretch"
+                                            IsEnabled="{Binding CanForceProjectGitRefresh}"
+                                            ToolTip="Choose another saved remote, add a GitHub or Azure DevOps destination, or change its provider and URL."/>
+                                    <TextBlock Text="{Binding NextCommitRepositoryStatus}" Foreground="{StaticResource TextBrush}" FontSize="12" TextWrapping="Wrap" Margin="0,12,0,0"
+                                               Visibility="{Binding HasNextCommitRepositoryStatus, Converter={StaticResource BoolToVisibility}}"/>
+                                    <Expander Header="Connection details" Foreground="{StaticResource MutedBrush}" FontSize="11" Margin="0,8,0,0">
+                                        <TextBlock Text="{Binding NextCommitActiveConnectionDetail}" Foreground="{StaticResource MutedBrush}" TextWrapping="Wrap" Margin="0,6,0,0"/>
+                                    </Expander>
                                     <TextBlock Text="{Binding NextCommitStatus}" Foreground="{StaticResource MutedBrush}" FontSize="11" TextWrapping="Wrap" Margin="0,8,0,0"/>
                                     <Button Content="Force refresh project Git" Click="ForceProjectGitRefresh_Click" HorizontalAlignment="Left" Margin="0,8,0,0"
                                             Visibility="{Binding HasNoNextCommitRepository, Converter={StaticResource BoolToVisibility}}"
@@ -1266,7 +1290,8 @@
                 </Grid>
                 <Grid Grid.Row="1" Margin="14,8,14,8">
                     <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="*"/></Grid.RowDefinitions>
-                    <Grid Margin="0,0,0,12" Visibility="{Binding HasNextCommitRepositoryChoices, Converter={StaticResource BoolToVisibility}}">
+                    <StackPanel Margin="0,0,0,12">
+                    <Grid Visibility="{Binding HasNextCommitRepositoryChoices, Converter={StaticResource BoolToVisibility}}">
                         <Grid.ColumnDefinitions><ColumnDefinition Width="Auto"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
                         <Label Content="_Repo" Target="{Binding ElementName=NextCommitRepositoryPicker}" Padding="0,0,8,0"
                                Foreground="{StaticResource MutedBrush}" FontSize="11" VerticalAlignment="Center"/>
@@ -1278,6 +1303,10 @@
                             </Style></ComboBox.ItemContainerStyle>
                         </ComboBox>
                     </Grid>
+                    <TextBlock Text="{Binding NextCommitRepositoryStatus}" Foreground="{StaticResource MutedBrush}" FontSize="11" TextWrapping="Wrap" Margin="0,5,0,0"
+                               ToolTip="{Binding NextCommitRepositoryDetail}" AutomationProperties.LiveSetting="Polite"
+                               Visibility="{Binding HasNextCommitRepositoryStatus, Converter={StaticResource BoolToVisibility}}"/>
+                    </StackPanel>
                     <StackPanel Grid.Row="1" Margin="0,8,0,16"
                                 Visibility="{Binding HasNoNextCommitRepository, Converter={StaticResource BoolToVisibility}}">
                         <TextBlock Text="Not a Git repository" Foreground="{StaticResource TextBrush}" FontSize="15" FontWeight="SemiBold"
@@ -1293,7 +1322,7 @@
                             <Grid Margin="8,0,8,0" MinHeight="24">
                                 <Grid.ColumnDefinitions><ColumnDefinition Width="Auto"/><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
                                 <Border Background="{StaticResource CardBrush}" Padding="6,0" VerticalAlignment="Center">
-                                <TextBlock Text="Git Comparison" Foreground="{StaticResource TextBrush}" FontWeight="SemiBold" VerticalAlignment="Center"/>
+                                <TextBlock Text="Release comparison" Foreground="{StaticResource TextBrush}" FontWeight="SemiBold" VerticalAlignment="Center"/>
                                 </Border>
                                 <TextBlock Grid.Column="1" Text="{Binding DashboardGitReleaseTargetLabel}" Foreground="{Binding DashboardGitReleaseTargetColor}"
                                            Background="{StaticResource CardBrush}" Padding="6,0" FontSize="11" VerticalAlignment="Center" HorizontalAlignment="Left" Margin="2,0,8,0" TextTrimming="CharacterEllipsis"
@@ -1324,12 +1353,12 @@
                                     <TextBlock Text="{Binding DashboardGitComparisonLabel}" Foreground="{StaticResource MutedBrush}" FontSize="11" TextWrapping="Wrap" Margin="0,5,0,10"/>
                                     <Grid>
                                         <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="*"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
-                                        <StackPanel><TextBlock Text="Changed files" Foreground="{StaticResource MutedBrush}" FontSize="10"/><TextBlock Text="{Binding DashboardGitChangedFiles}" Foreground="{StaticResource TextBrush}" FontWeight="SemiBold" FontSize="17" Margin="0,3,0,0"/></StackPanel>
+                                        <StackPanel ToolTip="Tracked files different from release. Untracked files appear separately below."><TextBlock Text="Changed files" Foreground="{StaticResource MutedBrush}" FontSize="10"/><TextBlock Text="{Binding DashboardGitChangedFiles}" Foreground="{StaticResource TextBrush}" FontWeight="SemiBold" FontSize="17" Margin="0,3,0,0"/></StackPanel>
                                         <StackPanel Grid.Column="1" Margin="8,0,0,0" ToolTip="{Binding DashboardGitLineTotalsTooltip}"><TextBlock Text="Lines added" Foreground="{StaticResource MutedBrush}" FontSize="10"/><TextBlock Text="{Binding DashboardGitAddedLines}" Foreground="{StaticResource AccentBrush}" FontWeight="SemiBold" FontSize="17" Margin="0,3,0,0"/></StackPanel>
                                         <StackPanel Grid.Column="2" Margin="8,0,0,0" ToolTip="{Binding DashboardGitLineTotalsTooltip}"><TextBlock Text="Lines removed" Foreground="{StaticResource MutedBrush}" FontSize="10"/><TextBlock Text="{Binding DashboardGitRemovedLines}" Foreground="#FFACA9" FontWeight="SemiBold" FontSize="17" Margin="0,3,0,0"/></StackPanel>
                                     </Grid>
                                     <TextBlock Text="{Binding DashboardGitComparisonDetail}" Foreground="{StaticResource MutedBrush}" FontSize="11" TextWrapping="Wrap" Margin="0,8,0,0"
-                                               ToolTip="Untracked and binary contents are excluded from line totals. Ahead/behind counts appear when nonzero."/>
+                                               ToolTip="Local uncommitted files include untracked files. Untracked and binary contents are excluded from line totals."/>
                                 </StackPanel>
                                 <StackPanel x:Name="DashboardGitComparisonLoadingPanel" HorizontalAlignment="Center" VerticalAlignment="Center"
                                             Visibility="{Binding IsDashboardGitComparisonLoading, Converter={StaticResource BoolToVisibility}}"

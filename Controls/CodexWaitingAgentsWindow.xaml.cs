@@ -19,13 +19,15 @@ public partial class CodexWaitingAgentsWindow : Window, IDashboardReplacementWin
     private int _previewLoads;
     private int _selectionVersion;
     private IReadOnlyList<WaitingRow> _rows = [];
+    private readonly IReadOnlySet<string> _queuedIds;
 
     public bool IsDashboardReplacementReady => !_reading && !_removing && !_reviewing && _previewLoads == 0;
     public bool IsDashboardReplacementClosePending => false;
     public event Action<CodexAgentWaitingItem>? SubmissionReviewRequested;
 
-    public CodexWaitingAgentsWindow()
+    public CodexWaitingAgentsWindow(IReadOnlySet<string>? queuedIds = null)
     {
+        _queuedIds = queuedIds ?? new HashSet<string>(StringComparer.Ordinal);
         WindowTheme.Attach(this);
         InitializeComponent();
         Width = Math.Min(Width, SystemParameters.WorkArea.Width);
@@ -46,13 +48,15 @@ public partial class CodexWaitingAgentsWindow : Window, IDashboardReplacementWin
         {
             var items = await Task.Run(_store.List);
             if (_closed) return;
-            _rows = items.Select(item => new WaitingRow(item)).ToArray();
+            _rows = items.Select(item => new WaitingRow(item, _queuedIds.Contains(item.Id))).ToArray();
             WaitingList.ItemsSource = _rows;
             WaitingList.SelectedItem = _rows.FirstOrDefault(row => row.Item.Id == selectedId) ?? _rows.FirstOrDefault();
             EmptyText.Visibility = _rows.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
             var waiting = _rows.Count(row => row.Item.IsWaiting);
-            var review = _rows.Count - waiting;
-            CountText.Text = $"{waiting} waiting" + (review == 0 ? "" : $" · {review} need submission review");
+            var review = _rows.Count(row => !row.Item.IsWaiting && !row.IsQueued);
+            var queued = _rows.Count(row => row.IsQueued);
+            CountText.Text = $"{waiting} waiting" + (queued == 0 ? "" : $" · {queued} queued") +
+                (review == 0 ? "" : $" · {review} need submission review");
             ClearStatus();
         }
         catch (Exception ex)
@@ -84,6 +88,7 @@ public partial class CodexWaitingAgentsWindow : Window, IDashboardReplacementWin
         PromptText.Text = request.Prompt;
         ContextText.Text = request.Context;
         SettingsText.Text = $"Model: {request.ModelId} · Thinking: {request.ReasoningEffort}\n" +
+            $"Fast: {(request.FastEnabled ? "On" : "Off")} · Ultrafast: {(request.UltraFastEnabled ? "On" : "Off")}\n" +
             $"Access: {(request.AccessMode == CodexAgentAccessMode.FullAccess ? "Full access" : "Workspace")} · " +
             $"Keep awake: {(request.KeepAwake ? "On" : "Off")}";
         FolderText.Text = request.Folder;
@@ -206,7 +211,9 @@ public partial class CodexWaitingAgentsWindow : Window, IDashboardReplacementWin
         RefreshButton.IsEnabled = ready;
         WaitingList.IsEnabled = !_reading && !_removing && !_reviewing;
         RemoveButton.Content = item is { IsWaiting: false } ? "Remove from list…" : "Remove selected";
-        RemoveButton.IsEnabled = ready && item is not null;
+        var queued = item is not null && _queuedIds.Contains(item.Id);
+        RemoveButton.IsEnabled = ready && item is not null && !queued;
+        RemoveButton.ToolTip = queued ? "Stop the queue on the dashboard before removing a queued prompt." : null;
         ReviewButton.Visibility = item is { IsWaiting: false } ? Visibility.Visible : Visibility.Collapsed;
         ReviewButton.IsEnabled = ready && item is { IsWaiting: false } && !string.IsNullOrWhiteSpace(item.AttemptId)
             && SubmissionReviewRequested is not null;
@@ -227,13 +234,14 @@ public partial class CodexWaitingAgentsWindow : Window, IDashboardReplacementWin
         StatusText.Visibility = Visibility.Collapsed;
     }
 
-    private sealed record WaitingRow(CodexAgentWaitingItem Item)
+    private sealed record WaitingRow(CodexAgentWaitingItem Item, bool IsQueued)
     {
         public string ProjectName => Item.Request.ProjectName;
         public string Folder => Item.Request.Folder;
         public string PromptTitle => Item.Request.Prompt.Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries)
             .FirstOrDefault(line => !string.IsNullOrWhiteSpace(line))?.Trim() ?? "Saved prompt";
-        public string StateLabel => Item.IsWaiting ? "Waiting" : "Review submission";
+        public string StateLabel => IsQueued ? (Item.IsWaiting ? "Queued" : "Current agent")
+            : Item.IsWaiting ? "Waiting" : "Review submission";
     }
 
     private sealed record SavedImage(CodexAgentChatImage Attachment, BitmapSource Preview)

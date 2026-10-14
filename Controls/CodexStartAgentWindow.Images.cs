@@ -23,6 +23,7 @@ public partial class CodexStartAgentWindow
         public string Caption => Attachment.Caption;
         public string ContextSummary => Attachment.BrowserContext is { } context
             ? context.IncludePageContext ? "Screenshot + page context" : "Screenshot · source excluded"
+            : Attachment.CaptureContext is not null ? "Screenshot + captured context"
             : string.IsNullOrWhiteSpace(Attachment.Caption) ? "Image" : Attachment.Caption;
     }
 
@@ -54,7 +55,7 @@ public partial class CodexStartAgentWindow
         UpdateControls();
     }
 
-    private bool CanPasteMessageImage => !PromptBox.IsReadOnly && !_pastingImage && !_closed;
+    private bool CanPasteMessageImage => !PromptBox.IsReadOnly && !_pastingImage && !_closed && !IsDictating;
 
     private static bool HasClipboardImage(IDataObject? data)
     {
@@ -197,7 +198,7 @@ public partial class CodexStartAgentWindow
 
     private void ReviewMessageImage_Click(object sender, RoutedEventArgs e)
     {
-        if (_closed || IsSubmitting || _receivingContextGathererDraft || _pastingImage ||
+        if (_closed || IsSubmitting || _receivingContextGathererDraft || _pastingImage || IsDictating ||
             sender is not Button { Tag: string id }) return;
         var item = _messageImages.FirstOrDefault(image => image.Id == id);
         if (item is null) return;

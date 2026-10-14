@@ -83,7 +83,7 @@ public partial class GitWorkspaceWindow
     {
         SetupStep.Choice => "Choose how to get started.",
         SetupStep.Local => "Your files stay local. Next, we'll connect an online repository.",
-        SetupStep.Connections => "Choose or manage your online connection.",
+        SetupStep.Connections => "Select the connection used for fetch, pull, and push in this repository. Add another destination to keep the original clone connection.",
         SetupStep.Provider => "Choose where your online repository lives.",
         SetupStep.Destination => _setupRoute == SetupRoute.New ? "Leave README, license and .gitignore unchecked, then copy its clone URL." : "Copy the HTTPS or SSH clone URL from your online repository.",
         SetupStep.Authentication => _setupProvider == GitHostingProvider.AzureDevOps && !IsSshTarget
@@ -219,7 +219,7 @@ public partial class GitWorkspaceWindow
             OpenSetup(_remoteDraftDirty ? _setupStep : _setupStep == SetupStep.Local ? SetupStep.Local : SetupStep.Choice);
             return;
         }
-        if (HasSyncRecovery) { ShowLocalWorkspace(); return; }
+        if (HasSyncRecovery && !_configOpen) { ShowLocalWorkspace(); return; }
         if (_remoteDraftDirty) { OpenSetup(_setupStep == SetupStep.Local ? SetupStep.Provider : _setupStep); return; }
         if (!verifyConnection && !_configOpen) { ShowLocalWorkspace(); return; }
         if (SelectedRemote is not { } remote)
@@ -235,7 +235,7 @@ public partial class GitWorkspaceWindow
         }
         if (!verifyConnection)
         {
-            if (_configOpen) OpenSetup(SetupStep.Connections);
+            if (_configOpen) OpenConnectionSettings();
             else ShowLocalWorkspace();
             return;
         }
@@ -266,15 +266,20 @@ public partial class GitWorkspaceWindow
 
     private void Config_Click(object sender, RoutedEventArgs e)
     {
-        if (_busy) return;
+        if (!IsIdle) return;
+        OpenConnectionSettings();
+    }
+    private void OpenConnectionSettings()
+    {
         _configOpen = true;
         OpenSetup(_remoteDraftDirty ? _setupStep : IsRepository && Remotes.Count > 0 ? SetupStep.Connections : SetupStep.Choice);
+        ConnectionPicker.GetBindingExpression(ItemsControl.ItemsSourceProperty)?.UpdateTarget();
         ConnectionPicker.SelectedItem = Remotes.FirstOrDefault(remote => remote.Name == SelectedRemote?.Name) ?? Remotes.FirstOrDefault();
     }
     private void Connection_Changed(object sender, SelectionChangedEventArgs e) => Changed();
     private async void UseConnection_Click(object sender, RoutedEventArgs e)
     {
-        if (_busy || Root is not { } root || !CanLeaveConnectionDraft()) return;
+        if (!IsIdle || Root is not { } root || !CanLeaveConnectionDraft()) return;
         if (ConnectionPicker.SelectedItem is not GitRemoteInfo remote)
         {
             SetStatus("Select a connection first.");
@@ -283,7 +288,7 @@ public partial class GitWorkspaceWindow
         if (!await SaveAgentConnectionSelectionAsync(root, remote)) return;
         _remoteDraftDirty = false;
         _preferredRemote = remote.Name;
-        await LoadGitWorkspaceAsync();
+        await LoadGitWorkspaceAsync(verifyConnection: false);
     }
     private void Reconnect_Click(object sender, RoutedEventArgs e)
     {

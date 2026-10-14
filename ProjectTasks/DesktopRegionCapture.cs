@@ -18,6 +18,9 @@ internal readonly record struct DesktopCaptureRectangle(int Left, int Top, int W
 internal sealed record DesktopCaptureFrame(
     BitmapSource Image, DesktopCaptureRectangle Bounds, DesktopCaptureRectangle Selection);
 
+internal sealed record DesktopCaptureResult(
+    BitmapSource Image, CodexAgentCaptureContext Context, DesktopCaptureResumeTarget? ResumeTarget);
+
 /// <summary>
 /// One explicitly armed Ctrl+drag capture. Hooks run on a dedicated message thread;
 /// screenshots and UI work never run inside a native input callback.
@@ -25,12 +28,13 @@ internal sealed record DesktopCaptureFrame(
 internal sealed partial class DesktopRegionCapture : IDisposable
 {
     private readonly Dispatcher _dispatcher;
+    private readonly HashSet<nint> _excludedWindowHandles;
     private readonly object _hookGate = new();
     private readonly HookProcedure _mouseProcedure;
     private readonly HookProcedure _keyboardProcedure;
     private readonly CancellationTokenSource _captureWork = new();
     private readonly CancellationToken _captureToken;
-    private readonly TaskCompletionSource<BitmapSource?> _result = new(TaskCreationOptions.RunContinuationsAsynchronously);
+    private readonly TaskCompletionSource<DesktopCaptureResult?> _result = new(TaskCreationOptions.RunContinuationsAsynchronously);
     private readonly TaskCompletionSource _threadExited = new(TaskCreationOptions.RunContinuationsAsynchronously);
     private readonly TaskCompletionSource<DesktopCaptureRectangle> _released = new(TaskCreationOptions.RunContinuationsAsynchronously);
     private Task? _captureTask;
@@ -54,9 +58,10 @@ internal sealed partial class DesktopRegionCapture : IDisposable
     private DateTime _drainDeadline;
     private DesktopLayout? _layout;
 
-    public DesktopRegionCapture(Dispatcher dispatcher)
+    public DesktopRegionCapture(Dispatcher dispatcher, IEnumerable<nint>? excludedWindowHandles = null)
     {
         _dispatcher = dispatcher ?? throw new ArgumentNullException(nameof(dispatcher));
+        _excludedWindowHandles = excludedWindowHandles?.Where(handle => handle != 0).ToHashSet() ?? [];
         _mouseProcedure = MouseHook;
         _keyboardProcedure = KeyboardHook;
         _captureToken = _captureWork.Token;
@@ -71,7 +76,7 @@ internal sealed partial class DesktopRegionCapture : IDisposable
     /// <summary>Hide an overlay promptly while the canceled gesture's input release is drained.</summary>
     public event Action? SelectionCanceled;
 
-    public async Task<BitmapSource?> CaptureAsync(CancellationToken cancellationToken = default)
+    public async Task<DesktopCaptureResult?> CaptureAsync(CancellationToken cancellationToken = default)
     {
         ObjectDisposedException.ThrowIf(Volatile.Read(ref _disposed) != 0, this);
         if (Interlocked.Exchange(ref _started, 1) != 0)
@@ -194,14 +199,15 @@ internal sealed partial class DesktopRegionCapture : IDisposable
                 GetAsyncKeyState(0x5B) >= 0 && GetAsyncKeyState(0x5C) >= 0)
             {
                 var window = WindowFromPoint(input.Point);
-                GetWindowThreadProcessId(window, out var processId);
-                if (processId == Environment.ProcessId)
+                // Leave controller controls and their owned popup windows usable.
+                // Disabled Launcher targets are resolved off-hook in physical z-order.
+                if (IsExcludedWindow(window))
                     return CallNextHookEx(IntPtr.Zero, code, message, data);
                 _selectionBegan = true;
                 _mouseOwned = true;
                 _startX = _currentX = input.Point.X;
                 _startY = _currentY = input.Point.Y;
-                _captureTask = PrepareCaptureAsync();
+                _captureTask = PrepareCaptureAsync(input.Point);
                 return new IntPtr(1);
             }
             if (_mouseOwned && (kind == MouseMove || kind == LeftUp || kind == LeftDown))
@@ -275,10 +281,66 @@ internal sealed partial class DesktopRegionCapture : IDisposable
         else _result.TrySetResult(null);
     }
 
-    private async Task PrepareCaptureAsync()
+    private bool IsExcludedWindow(nint window)
     {
+        if (_excludedWindowHandles.Count == 0) return false;
+        var root = GetAncestor(window, 2); // GA_ROOT
+        if (root != 0) window = root;
+        for (var depth = 0; window != 0 && depth < 16; depth++)
+        {
+            if (_excludedWindowHandles.Contains(window)) return true;
+            var owner = GetWindow(window, 4); // GW_OWNER includes controller dropdowns and menus.
+            if (owner == window) break;
+            window = owner;
+        }
+        return false;
+    }
+
+    private DesktopCaptureTarget? ResolveTargetAtPoint(NativePoint point)
+    {
+        using var awareness = new PhysicalDpiScope();
+        // Preserve Windows' ordinary hit testing for foreign apps, including
+        // transparent overlays. Only supplement the disabled Launcher windows
+        // that WindowFromPoint deliberately skips during a modal capture.
+        var normalHit = WindowFromPoint(point);
+        var root = GetAncestor(normalHit, 2); // GA_ROOT
+        if (root != 0) normalHit = root;
+        if (IsExcludedWindow(normalHit)) return null;
+        var window = GetTopWindow(0);
+        for (var count = 0; window != 0 && count < 512; count++, window = GetWindow(window, 2))
+        {
+            _captureToken.ThrowIfCancellationRequested();
+            if (window == normalHit) break;
+            var threadId = GetWindowThreadProcessId(window, out var processId);
+            // Read the native disabled state: a ShowDialog owner can have
+            // WPF IsEnabled=true while its HWND has WS_DISABLED set.
+            if (processId != Environment.ProcessId || threadId == 0 || IsWindowEnabled(window) ||
+                !IsWindowVisible(window) || IsIconic(window) || !GetWindowRect(window, out var bounds) ||
+                point.X < bounds.Left || point.X >= bounds.Right || point.Y < bounds.Top || point.Y >= bounds.Bottom)
+                continue;
+            if (DwmGetWindowAttribute(window, 14, out uint cloaked, sizeof(uint)) == 0 && cloaked != 0)
+                continue;
+            if (IsExcludedWindow(window)) return null;
+            return new DesktopCaptureTarget(window, processId, threadId);
+        }
+        if (normalHit == 0) return null;
+        var normalThread = GetWindowThreadProcessId(normalHit, out var normalProcess);
+        return normalThread != 0 && normalProcess != 0
+            ? new DesktopCaptureTarget(normalHit, normalProcess, normalThread) : null;
+    }
+
+    private async Task PrepareCaptureAsync(NativePoint point)
+    {
+        DesktopCaptureMetadataReader.ReadOperation? metadataRead = null;
+        DesktopCaptureResumeTarget? resumeTarget = null;
         try
         {
+            var target = await Task.Run(() => ResolveTargetAtPoint(point), _captureToken);
+            if (target is null)
+            {
+                Cancel();
+                return;
+            }
             await _dispatcher.InvokeAsync(() =>
             {
                 _captureToken.ThrowIfCancellationRequested();
@@ -288,7 +350,23 @@ internal sealed partial class DesktopRegionCapture : IDisposable
             await _dispatcher.InvokeAsync(() => { }, DispatcherPriority.ApplicationIdle, _captureToken);
             await Task.Delay(45, _captureToken);
             var layout = _layout ?? throw new InvalidOperationException();
-            var image = await Task.Run(() => CaptureDesktop(layout), _captureToken);
+            metadataRead = DesktopCaptureMetadataReader.BeginRead(target);
+            await metadataRead.WaitForObservationAsync(_captureToken);
+            var frame = await Task.Run(() =>
+            {
+                var resume = DesktopCaptureResumeTarget.TryObserve(target, _dispatcher);
+                try
+                {
+                    var pixels = CaptureDesktop(layout);
+                    return (Image: pixels, CapturedAtUtc: DateTimeOffset.UtcNow, ResumeTarget: resume);
+                }
+                catch { resume?.Dispose(); throw; }
+            }, _captureToken);
+            resumeTarget = frame.ResumeTarget;
+            var image = frame.Image;
+            metadataRead.NotifyFrameCaptured();
+            var metadata = await metadataRead.FinishAsync(_captureToken);
+            resumeTarget?.RememberBrowserTab(metadataRead.ObservedTab);
             _captureToken.ThrowIfCancellationRequested();
             await _dispatcher.InvokeAsync(() =>
             {
@@ -311,13 +389,33 @@ internal sealed partial class DesktopRegionCapture : IDisposable
             }, _captureToken);
             _captureToken.ThrowIfCancellationRequested();
             if (Volatile.Read(ref _cancelRequested) != 0) throw new OperationCanceledException(_captureToken);
-            _result.TrySetResult(cropped);
+            var context = metadata with
+            {
+                CapturedAtUtc = frame.CapturedAtUtc,
+                CropBounds = new(selected.Left, selected.Top, selected.Width, selected.Height),
+                OriginalImageWidth = cropped.PixelWidth,
+                OriginalImageHeight = cropped.PixelHeight,
+                SentImageWidth = cropped.PixelWidth,
+                SentImageHeight = cropped.PixelHeight
+            };
+            context.Validate();
+            if (resumeTarget is not null && !resumeTarget.IsCurrent())
+            {
+                resumeTarget.Dispose();
+                resumeTarget = null;
+            }
+            if (_result.TrySetResult(new(cropped, context, resumeTarget))) resumeTarget = null;
         }
         catch (OperationCanceledException) { }
         catch (Exception error)
         {
             Fail(error is InvalidOperationException && error.Message.StartsWith("Drag an area", StringComparison.Ordinal)
                 ? error.Message : "Desktop screenshot could not be captured. Keep the screen visible and choose another area.");
+        }
+        finally
+        {
+            resumeTarget?.Dispose();
+            metadataRead?.Abandon();
         }
     }
 

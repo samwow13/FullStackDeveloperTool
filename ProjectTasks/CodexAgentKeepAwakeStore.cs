@@ -186,9 +186,27 @@ public sealed class CodexAgentKeepAwakeStore
         using var command = AcquireCommand(projectId, threadId);
         var state = RequireOwner(ownerAttemptId, projectId, threadId);
         if (state.Phase is OwnerPhase.Suspended or OwnerPhase.Closed) return;
-        Save(state with { Phase = OwnerPhase.Closed, Status = state.IsEnabled
-            ? "Keep awake owner closed. Existing work may still be running."
-            : "Keep awake off. This Launcher agent owner has finished.", UpdatedAt = DateTimeOffset.UtcNow });
+        // Successful completion is sealed only by ContinueOrCloseIfDisabled.
+        // Unexpected disposal cannot become proof that later queued work may start.
+        Save(state with { Phase = OwnerPhase.Suspended,
+            Status = "Keep awake owner closed before completion could be confirmed. Existing work may still be running.",
+            UpdatedAt = DateTimeOffset.UtcNow });
+    }
+
+    internal bool HasFinishedSuccessfully(CodexAgentChatReceipt receipt)
+    {
+        var state = RequireOwner(receipt.AttemptId, receipt.Request.ProjectId, receipt.ThreadId!);
+        if (state.Phase == OwnerPhase.Suspended)
+            throw new InvalidOperationException(state.Status);
+        // The initial receipt may be complete while Keep Going turns still run.
+        // Wait for the exact owner to close successfully and release its claim.
+        if (OwnerAvailable(state)) return false;
+        // The owner may have completed between the state read and claim check.
+        state = RequireOwner(receipt.AttemptId, receipt.Request.ProjectId, receipt.ThreadId!);
+        if (state.Phase == OwnerPhase.Suspended)
+            throw new InvalidOperationException(state.Status);
+        if (state.Phase == OwnerPhase.Closed && !state.IsEnabled) return true;
+        throw new InvalidOperationException("The previous agent owner is unavailable. Review its chat before starting the remaining prompts.");
     }
 
     private OwnerState RequireOwner(string ownerAttemptId, string projectId, string threadId)

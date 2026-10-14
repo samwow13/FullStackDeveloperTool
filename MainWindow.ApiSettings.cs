@@ -35,20 +35,6 @@ public partial class MainWindow
         e.Handled = true;
     }
 
-    private void ApiSettingsSecrets_Click(object sender, RoutedEventArgs e)
-    {
-        CloseServiceMenu(sender);
-        ApiSecrets_Click(sender, e);
-        e.Handled = true;
-    }
-
-    private void ApiSettingsUseLocal_Click(object sender, RoutedEventArgs e)
-    {
-        CloseServiceMenu(sender);
-        UseApiConfiguration_Click(sender, e);
-        e.Handled = true;
-    }
-
     private void ApiSettingsClean_Click(object sender, RoutedEventArgs e)
     {
         CloseServiceMenu(sender);

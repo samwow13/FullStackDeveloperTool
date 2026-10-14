@@ -89,6 +89,8 @@ internal static class CodexAgentChatHost
             if (model is null || !model.SupportedReasoningEfforts.Any(item =>
                     string.Equals(item.Id, request.ReasoningEffort, StringComparison.Ordinal)))
                 throw new InvalidOperationException("The selected model or thinking level is no longer available. Refresh models before starting a new chat.");
+            var serviceTier = await ResolveServiceTierAsync(connection, request, model, receipt.Version >= 5,
+                startup.Token).ConfigureAwait(false);
 
             Save(CodexAgentChatState.Starting, "Checking command access before creating the new chat.");
             await CodexCommandAccessCheck.VerifyAsync(connection, request.Folder, request.AccessMode,
@@ -98,16 +100,23 @@ internal static class CodexAgentChatHost
             // Persist intent before writing the first mutating protocol request.
             threadCreationAttempted = true;
             Save(CodexAgentChatState.Starting, "Creating the new Codex chat.");
-            var response = await connection.RequestAsync("thread/start", new
+            var configuration = new Dictionary<string, object> { ["model_reasoning_effort"] = request.ReasoningEffort };
+            // The native request adapter does not accept default as an active
+            // top-level tier. An isolated thread config clears an inherited tier;
+            // every standard turn also uses its documented one-turn override.
+            if (serviceTier == "default") configuration["service_tier"] = "default";
+            var threadParameters = new Dictionary<string, object>
             {
-                cwd = request.Folder, model = request.ModelId,
-                sandbox = CodexAgentAccessPolicy.RequestedSandbox(request.AccessMode),
-                approvalPolicy = CodexAgentAccessPolicy.ApprovalPolicy, approvalsReviewer = "user",
-                config = new Dictionary<string, object> { ["model_reasoning_effort"] = request.ReasoningEffort }
-            }, startup.Token).ConfigureAwait(false);
+                ["cwd"] = request.Folder, ["model"] = request.ModelId,
+                ["sandbox"] = CodexAgentAccessPolicy.RequestedSandbox(request.AccessMode),
+                ["approvalPolicy"] = CodexAgentAccessPolicy.ApprovalPolicy, ["approvalsReviewer"] = "user",
+                ["config"] = configuration
+            };
+            if (serviceTier is not null && serviceTier != "default") threadParameters["serviceTier"] = serviceTier;
+            var response = await connection.RequestAsync("thread/start", threadParameters, startup.Token).ConfigureAwait(false);
             receipt = receipt with { ThreadId = RequiredString(RequiredObject(response, "thread"), "id") };
             Save(CodexAgentChatState.Starting, "Chat created. Checking its folder and model before sending.");
-            ValidateConfiguration(response, request);
+            ValidateConfiguration(response, request, serviceTier);
             await WaitForThreadStartedAsync(connection, receipt.ThreadId!, startup.Token).ConfigureAwait(false);
             keepAwake.Initialize(attemptId, request.ProjectId, receipt.ThreadId!, request.KeepAwake);
             keepAwakeInitialized = true;
@@ -118,12 +127,8 @@ internal static class CodexAgentChatHost
                 new { type = "text", text = preparedPrompt, text_elements = Array.Empty<object>() }
             };
             input.AddRange(stagedImagePaths.Select(path => (object)new { type = "localImage", path }));
-            var turnResponse = await connection.RequestAsync("turn/start", new
-            {
-                threadId = receipt.ThreadId, cwd = request.Folder,
-                model = request.ModelId, effort = request.ReasoningEffort,
-                input
-            }, startup.Token).ConfigureAwait(false);
+            var turnResponse = await connection.RequestAsync("turn/start",
+                TurnParameters(request, receipt.ThreadId!, input, serviceTier), startup.Token).ConfigureAwait(false);
             receipt = receipt with { TurnId = RequiredString(RequiredObject(turnResponse, "turn"), "id") };
             keepAwake.SetTurn(attemptId, request.ProjectId, receipt.ThreadId!, receipt.TurnId!, running: false);
             Save(CodexAgentChatState.Starting, "Codex acknowledged the prompt. Waiting for the exact turn to start.");
@@ -141,7 +146,7 @@ internal static class CodexAgentChatHost
                         if (terminal is { } exact)
                         {
                             Finish(exact);
-                            await ContinueIfEnabledAsync(connection, receipt, keepAwake).ConfigureAwait(false);
+                            await ContinueIfEnabledAsync(connection, receipt, keepAwake, serviceTier).ConfigureAwait(false);
                             return;
                         }
                         continue;
@@ -173,7 +178,7 @@ internal static class CodexAgentChatHost
                             if (savedTurn is { } exact) turn = exact;
                         }
                         Finish(turn);
-                        await ContinueIfEnabledAsync(connection, receipt, keepAwake).ConfigureAwait(false);
+                        await ContinueIfEnabledAsync(connection, receipt, keepAwake, serviceTier).ConfigureAwait(false);
                         return;
                     }
                 }
@@ -234,7 +239,7 @@ internal static class CodexAgentChatHost
     private static string MakePrompt(CodexAgentChatRequest request) => CodexAgentBrowserContext.BuildPrompt(request);
 
     private static async Task ContinueIfEnabledAsync(CodexAppServerConnection connection,
-        CodexAgentChatReceipt original, CodexAgentKeepAwakeStore keepAwake)
+        CodexAgentChatReceipt original, CodexAgentKeepAwakeStore keepAwake, string? serviceTier)
     {
         var projectId = original.Request.ProjectId;
         var threadId = original.ThreadId!;
@@ -269,12 +274,10 @@ internal static class CodexAgentChatHost
                         threadId, predecessorTurnId);
                     if (intent is null) return;
                     // Hold the exact-chat command gate through write and acknowledgment. An Off save cannot race the write.
-                    var response = await connection.RequestAsync("turn/start", new
-                    {
-                        threadId, cwd = original.Request.Folder, model = original.Request.ModelId,
-                        effort = original.Request.ReasoningEffort,
-                        input = new[] { new { type = "text", text = "Keep Going", text_elements = Array.Empty<object>() } }
-                    }, submission.Token, () => keepAwake.BeforeSubmissionUnderCommand(intent)).ConfigureAwait(false);
+                    var input = new[] { new { type = "text", text = "Keep Going", text_elements = Array.Empty<object>() } };
+                    var response = await connection.RequestAsync("turn/start",
+                        TurnParameters(original.Request, threadId, input, serviceTier), submission.Token,
+                        () => keepAwake.BeforeSubmissionUnderCommand(intent)).ConfigureAwait(false);
                     var accepted = RequiredObject(response, "turn");
                     continuationTurnId = RequiredString(accepted, "id");
                     if (RequiredString(accepted, "status") != "inProgress")
@@ -475,7 +478,48 @@ internal static class CodexAgentChatHost
         return children.Values.All(settled => settled);
     }
 
-    private static void ValidateConfiguration(JsonElement response, CodexAgentChatRequest request)
+    private static async Task<string?> ResolveServiceTierAsync(CodexAppServerConnection connection,
+        CodexAgentChatRequest request, CodexModelOption model, bool requireStandard, CancellationToken token)
+    {
+        if (request.FastEnabled && request.UltraFastEnabled)
+            throw new InvalidOperationException("Choose Fast or Ultra fast before starting a chat. Both speeds cannot be enabled together.");
+        if (request.UltraFastEnabled && !model.SupportsUltraFast)
+            throw new InvalidOperationException("Ultra fast is no longer offered for this model and account. Refresh models before starting a new chat.");
+        if (request.FastEnabled && !model.SupportsFast)
+            throw new InvalidOperationException("Fast is no longer offered for this model and account. Refresh models before starting a new chat.");
+        if (!request.FastEnabled && !request.UltraFastEnabled)
+        {
+            if (await CodexProtocolCapabilities.SupportsStandardTierSelectionAsync(connection.NativeExecutablePath, token)
+                .ConfigureAwait(false)) return "default";
+            // Only a legacy receipt can retain pre-toggle inherited behavior.
+            // A fresh Off selection must not silently inherit Fast or Ultrafast
+            // after an unavailable schema or on an older unsupported CLI.
+            if (requireStandard)
+                throw new InvalidOperationException("This Codex installation could not confirm standard speed selection. Update Codex or try again before starting a chat with both speed toggles off. No chat or prompt was submitted.");
+            return null;
+        }
+        if (!await CodexProtocolCapabilities.SupportsServiceTierSelectionAsync(connection.NativeExecutablePath, token)
+                .ConfigureAwait(false))
+            throw new InvalidOperationException("This Codex installation could not confirm speed selection support. Update Codex before starting a chat with Fast or Ultra fast. No chat or prompt was submitted.");
+        // The installed Codex adapter normalizes catalog priority to the native
+        // fast wire value. These names identify the same Fast tier.
+        return request.UltraFastEnabled ? "ultrafast" : model.FastServiceTier == "priority" ? "fast" : model.FastServiceTier;
+    }
+
+    private static Dictionary<string, object> TurnParameters(CodexAgentChatRequest request, string threadId,
+        object input, string? serviceTier)
+    {
+        var parameters = new Dictionary<string, object>
+        {
+            ["threadId"] = threadId, ["cwd"] = request.Folder,
+            ["model"] = request.ModelId, ["effort"] = request.ReasoningEffort, ["input"] = input
+        };
+        if (serviceTier == "default") parameters["serviceTierForTurn"] = "default";
+        else if (serviceTier is not null) parameters["serviceTier"] = serviceTier;
+        return parameters;
+    }
+
+    private static void ValidateConfiguration(JsonElement response, CodexAgentChatRequest request, string? serviceTier)
     {
         var cwd = RequiredString(response, "cwd");
         if (!Path.IsPathFullyQualified(cwd)
@@ -486,6 +530,16 @@ internal static class CodexAgentChatHost
             || !MatchesOptionalConfiguration(response, "approvalsReviewer", "user")
             || RequiredString(RequiredObject(response, "sandbox"), "type") != CodexAgentAccessPolicy.EffectiveSandbox(request.AccessMode))
             throw new InvalidOperationException("Codex did not confirm the requested folder, model, thinking level, access mode, and noninteractive approval policy. No prompt was sent.");
+        if (serviceTier is not null)
+        {
+            if (!response.TryGetProperty("serviceTier", out var confirmed)
+                || !(serviceTier == "default"
+                    ? confirmed.ValueKind == JsonValueKind.Null
+                        || confirmed.ValueKind == JsonValueKind.String && confirmed.GetString() == "default"
+                    : confirmed.ValueKind == JsonValueKind.String &&
+                        (confirmed.GetString() == serviceTier || serviceTier == "fast" && confirmed.GetString() == "priority")))
+                throw new InvalidOperationException("Codex did not confirm the requested speed. No prompt was sent.");
+        }
     }
 
     private static bool MatchesOptionalConfiguration(JsonElement response, string name, string expected,

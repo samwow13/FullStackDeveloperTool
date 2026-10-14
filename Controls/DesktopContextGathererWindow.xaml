@@ -7,6 +7,7 @@
         Background="{StaticResource BackgroundBrush}" Foreground="{StaticResource TextBrush}"
         Icon="pack://application:,,,/Assets/launcher.ico"
         Loaded="Window_Loaded" Closing="Window_Closing" Closed="Window_Closed" PreviewKeyDown="Window_PreviewKeyDown">
+    <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
     <Grid Margin="16">
         <Grid.RowDefinitions>
             <RowDefinition Height="Auto"/><RowDefinition Height="*"/><RowDefinition Height="Auto"/>
@@ -14,13 +15,34 @@
         </Grid.RowDefinitions>
         <StackPanel>
             <TextBlock x:Name="Heading" Text="Choose an area" FontSize="18" FontWeight="SemiBold" Foreground="{StaticResource TextBrush}"/>
-            <TextBlock x:Name="Instructions" Text="Go to any app. Hold Ctrl, then left-drag around the area you want to capture."
-                       TextWrapping="Wrap" Foreground="{StaticResource MutedBrush}" Margin="0,6,0,8"/>
+            <DockPanel Margin="0,10,0,10">
+                <Label Content="_Capture view" Target="{Binding ElementName=CaptureViewChoice}" Padding="0,0,10,0"
+                       Foreground="{StaticResource MutedBrush}" VerticalAlignment="Center"/>
+                <ComboBox x:Name="CaptureViewChoice" DisplayMemberPath="Label" SelectionChanged="CaptureView_Changed"
+                          MinHeight="30" MinWidth="155" HorizontalAlignment="Left"
+                          ToolTip="Choose Launcher or Prompt window, then hold Ctrl and drag to capture."
+                          AutomationProperties.Name="Capture view"/>
+            </DockPanel>
         </StackPanel>
-        <Border x:Name="PreviewPanel" Grid.Row="1" Visibility="Collapsed" Background="#0B1119"
-                BorderBrush="{StaticResource BorderBrush}" BorderThickness="1" CornerRadius="8" Padding="8" MinHeight="120">
-            <Image x:Name="CapturePreview" Stretch="Uniform" AutomationProperties.Name="Screenshot preview"/>
-        </Border>
+        <Grid x:Name="PreviewPanel" Grid.Row="1" Visibility="Collapsed" Height="390">
+            <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="12"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+            <Border Background="#0B1119" BorderBrush="{StaticResource BorderBrush}" BorderThickness="1"
+                    CornerRadius="8" Padding="8" MinHeight="80">
+                <Image x:Name="CapturePreview" Stretch="Uniform" AutomationProperties.Name="Screenshot preview"/>
+            </Border>
+            <Grid Grid.Column="2">
+                <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="*"/></Grid.RowDefinitions>
+                <TextBlock x:Name="MetadataHeading" Text="Captured context · JSON" FontSize="12" FontWeight="SemiBold"
+                           Foreground="{StaticResource TextBrush}" Margin="0,0,0,5"/>
+                <RichTextBox x:Name="MetadataJson" Grid.Row="1" IsReadOnly="True" IsReadOnlyCaretVisible="True"
+                         IsUndoEnabled="False" SpellCheck.IsEnabled="False" Padding="6"
+                         BorderBrush="{StaticResource BorderBrush}" BorderThickness="1"
+                         SelectionBrush="#367060" SelectionOpacity="0.65"
+                         VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Auto" MinHeight="75"
+                         FontFamily="Consolas" FontSize="11" Foreground="{StaticResource TextBrush}" Background="#0B1119"
+                         AutomationProperties.Name="Captured screenshot context JSON"/>
+            </Grid>
+        </Grid>
         <StackPanel Grid.Row="2" x:Name="GalleryPanel" Visibility="Collapsed" Margin="0,12,0,0">
             <TextBlock x:Name="GallerySummary" Foreground="{StaticResource MutedBrush}" FontSize="12" Margin="0,0,0,6"/>
             <ScrollViewer HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Disabled" MaxHeight="126">
@@ -51,13 +73,13 @@
                    FontSize="12" Margin="0,10,0,0" AutomationProperties.LiveSetting="Polite"/>
         <StackPanel Grid.Row="4" Margin="0,12,0,0">
             <WrapPanel x:Name="Actions" HorizontalAlignment="Right">
-                <Button x:Name="PauseButton" Content="Pause selection" Click="Pause_Click" Margin="0,0,7,5" Padding="11,7"/>
+                <Button x:Name="PauseButton" Content="Pause capture" Click="Pause_Click" Margin="0,0,7,5" Padding="11,7"/>
                 <Button x:Name="RetakeButton" Content="Retake" Click="Retake_Click" Visibility="Collapsed" Margin="0,0,7,5" Padding="11,7"/>
                 <Button x:Name="DiscardButton" Content="Discard this capture" Click="Discard_Click" Visibility="Collapsed" Margin="0,0,7,5" Padding="11,7"/>
-                <Button x:Name="CaptureButton" Content="Add another" Click="Capture_Click" Visibility="Collapsed" Margin="0,0,7,5" Padding="11,7"/>
-                <Button x:Name="ConfirmButton" Content="Confirm screenshot" Click="Confirm_Click" Style="{StaticResource PrimaryButton}"
-                        Visibility="Collapsed" Margin="0,0,0,5" Padding="11,7"/>
-                <Button x:Name="ContinueButton" Content="Continue to prompt" Click="Continue_Click" Style="{StaticResource PrimaryButton}"
+                <Button x:Name="CaptureButton" Content="Resume capture" Click="Capture_Click" Visibility="Collapsed" Margin="0,0,7,5" Padding="11,7"
+                        ToolTip="Hold Ctrl and left-drag to capture. Each new screenshot accepts the previous one."/>
+                <Button x:Name="ContinueButton" Content="Continue" Click="Continue_Click" Style="{StaticResource PrimaryButton}"
+                        ToolTip="Accept the latest screenshot and continue to your prompt"
                         Visibility="Collapsed" Margin="0,0,0,5" Padding="11,7"/>
             </WrapPanel>
             <DockPanel x:Name="ClosingActions" Margin="0,3,0,0">
@@ -69,7 +91,7 @@
             <Border x:Name="DiscardConfirmation" Visibility="Collapsed" Background="{StaticResource CardBrush}"
                     BorderBrush="{StaticResource BorderBrush}" BorderThickness="1" CornerRadius="7" Padding="10" Margin="0,8,0,0">
                 <StackPanel>
-                    <TextBlock Text="Discard every confirmed screenshot in this gather?" TextWrapping="Wrap" Foreground="{StaticResource TextBrush}"/>
+                    <TextBlock Text="Discard every screenshot in this gather?" TextWrapping="Wrap" Foreground="{StaticResource TextBrush}"/>
                     <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,8,0,0">
                         <Button Content="Keep screenshots" Click="KeepBatch_Click" Margin="0,0,7,0" Padding="9,5"/>
                         <Button Content="Discard batch" Click="ConfirmDiscardBatch_Click" Style="{StaticResource DangerButton}" Padding="9,5"/>
@@ -78,4 +100,5 @@
             </Border>
         </StackPanel>
     </Grid>
+    </ScrollViewer>
 </Window>

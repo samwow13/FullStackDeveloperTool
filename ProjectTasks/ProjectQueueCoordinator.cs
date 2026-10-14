@@ -44,6 +44,16 @@ public sealed class ProjectQueueCoordinator
     /// <summary>Completes only after outstanding attempts are held and saved.</summary>
     public Task Ready => _ready.Task;
 
+    /// <summary>Drains a claim already in flight after the host freezes new dispatch.</summary>
+    internal async Task DrainDispatchForDashboardHandoffAsync(CancellationToken cancellationToken)
+    {
+        // The host must set its pending-handoff flag before calling this barrier,
+        // and must not hold its dashboard lock while waiting for this gate.
+        await _gate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try { cancellationToken.ThrowIfCancellationRequested(); }
+        finally { _gate.Release(); }
+    }
+
     /// <summary>Run on the independent queue host, never on the WPF dispatcher.</summary>
     public async Task RunAsync(CancellationToken cancellationToken = default)
     {

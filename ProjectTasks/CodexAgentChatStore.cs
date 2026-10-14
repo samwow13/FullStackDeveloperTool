@@ -8,9 +8,11 @@ public sealed record CodexAgentChatRequest(string ProjectId, string ProjectName,
     public IReadOnlyList<CodexAgentChatImage> Images { get; init; } = [];
     public CodexAgentAccessMode AccessMode { get; init; } = CodexAgentAccessMode.Workspace;
     public bool KeepAwake { get; init; }
+    public bool UltraFastEnabled { get; init; }
+    public bool FastEnabled { get; init; }
 }
 
-/// <summary>An image and optional browser evidence frozen with one explicit agent chat submission.</summary>
+/// <summary>An image and optional capture evidence frozen with one explicit agent chat submission.</summary>
 public sealed record CodexAgentChatImage
 {
     public const int MaximumCount = 12;
@@ -22,13 +24,17 @@ public sealed record CodexAgentChatImage
     public string DataBase64 { get; init; } = "";
     [System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
     public CodexAgentBrowserContext? BrowserContext { get; init; }
+    [System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
+    public CodexAgentCaptureContext? CaptureContext { get; init; }
 }
 
 public enum CodexAgentChatState { Prepared, Starting, Running, Completed, Failed, Interrupted, Unconfirmed }
 
 public sealed record CodexAgentChatReceipt
 {
-    public int Version { get; init; } = 3;
+    // Version 5 also freezes Fast and Ultrafast. Older owners must reject it rather than
+    // silently dispatch a different service tier or drop reviewed capture context.
+    public int Version { get; init; } = 5;
     public string AttemptId { get; init; } = "";
     public CodexAgentChatRequest Request { get; init; } = new("", "", "", "", "", "", "");
     public CodexAgentChatState State { get; init; }
@@ -88,7 +94,7 @@ internal sealed class CodexAgentChatStore
         var bytes = CodexAgentStorage.Read(ReceiptPath(attemptId), MaximumReceiptBytes)
             ?? throw new InvalidOperationException("The saved agent chat receipt is unavailable. Review recent tasks in Codex before sending again.");
         var receipt = CodexAgentStorage.Deserialize<CodexAgentChatReceipt>(bytes);
-        if (receipt.Version is not (1 or 2 or 3) || receipt.AttemptId != attemptId || !Enum.IsDefined(receipt.State)
+        if (receipt.Version is not (1 or 2 or 3 or 4 or 5) || receipt.AttemptId != attemptId || !Enum.IsDefined(receipt.State)
             || receipt.Summary is null || receipt.Summary.Length > 4_000
             || receipt.ThreadId?.Length > 200 || receipt.TurnId?.Length > 200)
             throw new InvalidOperationException("The saved agent chat receipt is invalid or unsupported. Review recent tasks in Codex before sending again.");
@@ -97,6 +103,10 @@ internal sealed class CodexAgentChatStore
             throw new InvalidOperationException("The saved agent chat receipt has unsupported image data. The existing receipt was preserved.");
         if (receipt.Version < 3 && receipt.Request.Images.Any(image => image.BrowserContext is not null))
             throw new InvalidOperationException("The saved agent chat receipt has unsupported browser context. The existing receipt was preserved.");
+        if (receipt.Version < 4 && receipt.Request.Images.Any(image => image.CaptureContext is not null))
+            throw new InvalidOperationException("The saved agent chat receipt has unsupported desktop capture context. The existing receipt was preserved.");
+        if (receipt.Version < 5 && (receipt.Request.UltraFastEnabled || receipt.Request.FastEnabled))
+            throw new InvalidOperationException("The saved agent chat receipt has unsupported speed settings. The existing receipt was preserved.");
         return receipt with { Request = FreezeRequest(receipt.Request) };
     }
 
@@ -105,12 +115,15 @@ internal sealed class CodexAgentChatStore
 
     private static byte[] SerializeReceipt(CodexAgentChatReceipt receipt)
     {
-        if (receipt.Version is not (1 or 2 or 3))
+        if (receipt.Version is not (1 or 2 or 3 or 4 or 5))
             throw new InvalidOperationException("The agent chat receipt version is unsupported. The existing receipt was preserved.");
         ValidateRequest(receipt.Request);
         if (receipt.Version == 1 && receipt.Request.Images.Count != 0 ||
-            receipt.Version < 3 && receipt.Request.Images.Any(image => image.BrowserContext is not null))
+            receipt.Version < 3 && receipt.Request.Images.Any(image => image.BrowserContext is not null) ||
+            receipt.Version < 4 && receipt.Request.Images.Any(image => image.CaptureContext is not null))
             throw new InvalidOperationException("The agent chat receipt version cannot preserve its attachments. The existing receipt was preserved.");
+        if (receipt.Version < 5 && (receipt.Request.UltraFastEnabled || receipt.Request.FastEnabled))
+            throw new InvalidOperationException("The agent chat receipt version cannot preserve its speed settings. The existing receipt was preserved.");
         var bytes = CodexAgentStorage.Serialize(receipt);
         if (bytes.Length > MaximumReceiptBytes)
             throw new InvalidOperationException("The agent chat receipt exceeds its supported size. Remove an image or shorten the message.");
@@ -127,7 +140,8 @@ internal sealed class CodexAgentChatStore
             throw new ArgumentException("An attached image cannot be empty.");
         return request with { Images = Array.AsReadOnly(images.Select(image => image with
         {
-            BrowserContext = image.BrowserContext is { } context ? context with { } : null
+            BrowserContext = image.BrowserContext is { } context ? context with { } : null,
+            CaptureContext = image.CaptureContext is { } capture ? capture with { } : null
         }).ToArray()) };
     }
 
@@ -198,6 +212,8 @@ internal sealed class CodexAgentChatStore
         CodexAgentStorage.RequireText(request.ModelId, 200, "Select an available Codex model.");
         CodexAgentStorage.RequireText(request.ReasoningEffort, 100, "Select an available thinking level.");
         if (!Enum.IsDefined(request.AccessMode)) throw new ArgumentException("Choose a supported agent access mode.");
+        if (request.FastEnabled && request.UltraFastEnabled)
+            throw new ArgumentException("Choose either Fast or Ultrafast, not both.");
         CodexAgentImageStaging.ValidateImages(request.Images);
     }
 }

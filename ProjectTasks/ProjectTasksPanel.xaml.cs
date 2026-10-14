@@ -20,6 +20,22 @@ public partial class ProjectTasksPanel : UserControl
         Unloaded += Panel_Unloaded;
     }
 
+    internal NotesPanelResumeState CaptureReplacementResumeState() =>
+        new(PanelScroller.VerticalOffset, QueueSettingsToggle.IsChecked == true);
+
+    internal void RestoreReplacementResumeState(NotesPanelResumeState state)
+    {
+        Dispatcher.BeginInvoke(new Action(() =>
+        {
+            if (double.IsFinite(state.VerticalOffset) && state.VerticalOffset >= 0)
+                PanelScroller.ScrollToVerticalOffset(state.VerticalOffset);
+            QueueSettingsToggle.IsChecked = state.QueueSettingsOpen;
+        }), System.Windows.Threading.DispatcherPriority.Loaded);
+    }
+
+    internal void ResumeLargeEditor() => Dispatcher.BeginInvoke(new Action(OpenLargeEditor),
+        System.Windows.Threading.DispatcherPriority.ContextIdle);
+
     private static CustomPopupPlacement[] PlaceQueueSettingsPopup(Size popupSize, Size targetSize, Point offset) =>
     [
         new(new Point(targetSize.Width - popupSize.Width, targetSize.Height + 7), PopupPrimaryAxis.Vertical),

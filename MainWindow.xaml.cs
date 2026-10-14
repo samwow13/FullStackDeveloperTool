@@ -18,6 +18,7 @@ namespace FullStackLauncher;
 public partial class MainWindow : Window, INotifyPropertyChanged
 {
     private readonly SettingsStore _store = new();
+    private readonly DashboardResumeStore _dashboardResumeStore;
     private readonly LauncherSettings _settings;
     private readonly Dictionary<string, List<ServiceViewModel>> _runners = [];
     private readonly DispatcherTimer _timer = new() { Interval = TimeSpan.FromSeconds(3) };
@@ -95,6 +96,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     public MainWindow()
     {
         FullStackLauncher.Services.WindowTheme.Attach(this);
+        _dashboardResumeStore = new(_store.SettingsPath);
         _settings = _store.Load();
         foreach (var project in _settings.Projects)
         {
@@ -146,6 +148,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
             if (SelectedProject is null) await RefreshAsync(fresh: true);
         }
         finally { _checkingStartupServices = false; UpdateActions(); }
+        var queueResumeFailure = await CompleteQueueHandoffAsync() ? null : Notice;
         var detected = _runners.Values.SelectMany(project => project).Count(service => service.IsRunning);
         Notice = detected > 0 ? $"Detected {detected} running app(s). Existing apps are ready to manage."
             : "Ready. Select a service to get started.";
@@ -159,6 +162,8 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         await RestartExistingMonitorAsync();
         await RefreshDeveloperToolsAsync();
         await RefreshAsync();
+        await RestoreDashboardDraftCheckpointAsync();
+        if (queueResumeFailure != null) Notice = queueResumeFailure;
     }
 
     private List<ServiceViewModel> GetRunners(ProjectProfile project)
@@ -314,6 +319,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         Changed(nameof(CanChangeProject)); Changed(nameof(CanEditDetails)); Changed(nameof(CanSaveProjectEdits));
         Changed(nameof(CanRemoveProject)); Changed(nameof(CanCancelProjectEdits));
         Changed(nameof(CanAddService)); Changed(nameof(CanStartAgent));
+        Changed(nameof(CanRetryQueueHandoff));
         Changed(nameof(CanChangeBatchSelection));
         Changed(nameof(ProductionNotice)); Changed(nameof(HasProductionNotice));
         NotifyStartAllChanged();
@@ -327,54 +333,6 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         Changed(nameof(CanStartBatch));
         Changed(nameof(CanRestartBatch));
         Changed(nameof(StartAllDescription));
-    }
-
-    private void ApiSecrets_Click(object sender, RoutedEventArgs e)
-    {
-        if (ServiceFrom(sender) is not { CanConfigureApi: true } service || _closing || _batchBusy) return;
-        ApiSecretsWindow editor;
-        try
-        {
-            editor = new ApiSecretsWindow(service.Directory, service.Name, service.SelectedConfiguration == "Prod") { Owner = this };
-            editor.ShowDialog();
-        }
-        catch (ApiSecretStoreException ex) { Notice = ex.Message; return; }
-        catch (Exception) { Notice = "The API configuration editor could not be opened. Check the configured API folder and reopen the launcher."; return; }
-        if (editor.SavedChanges)
-        {
-            foreach (var other in _runners.Values.SelectMany(list => list).Where(item => item.Directory.Equals(service.Directory, StringComparison.OrdinalIgnoreCase)))
-            {
-                var applied = other.Runner.AppliedConfigurationEnvironment;
-                if ((applied == "Prod" && editor.SavedProdChanges) || (applied != "Prod" && editor.SavedLocalChanges))
-                    other.Runner.ConfigurationNeedsRestart = true;
-                other.Update();
-                _ = other.RefreshApiDatabaseDiscoveryAsync(force: true);
-            }
-            Notice = "API configuration saved. Restart the API to apply its selected configuration, or choose Use Local & restart in API settings.";
-            UpdateActions();
-        }
-    }
-
-    private async void UseApiConfiguration_Click(object sender, RoutedEventArgs e)
-    {
-        if (ServiceFrom(sender) is not { CanSwitchConfiguration: true } service || _closing || _batchBusy ||
-            sender is not Button { Tag: string environment } || environment is not ("Local" or "Prod")) return;
-        await RunActionAsync(service, async runner =>
-        {
-            // Complete validation while the current API is still running; saving can fail without stopping it.
-            var configuration = await Task.Run(() => ApiLaunchConfiguration.Prepare(service.Profile, service.Directory, environment));
-            var previous = service.Profile.ApiConfiguration;
-            service.Profile.ApiConfiguration = new() { Environment = environment, LaunchCommand = previous?.LaunchCommand };
-            try { _store.Save(_settings); }
-            catch
-            {
-                service.Profile.ApiConfiguration = previous;
-                throw new InvalidOperationException("The API configuration selection could not be saved. The running API was left unchanged. Reopen the launcher if settings changed elsewhere.");
-            }
-            service.Update();
-            UpdateActions();
-            await runner.ApplyConfigurationAsync(configuration);
-        }, $"Applying {environment} configuration");
     }
 
     private async Task<bool> RunActionAsync(ServiceViewModel service, Func<ServiceRunner, Task> action, string verb)
@@ -805,14 +763,15 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         _settings.SelectedProjectId = _settings.Projects.FirstOrDefault(project => project.IsArchived == ShowArchivedProjects)?.Id;
         try { _store.Save(_settings); }
         catch (Exception ex) { _settings.Projects.Insert(index, selected); _settings.SelectedProjectId = previousSelection; ShowSaveError(ex); return; }
-        _startAgentDrafts.Remove(selected.Id);
+        var startAgentCheckpointUpdated = ForgetStartAgentDashboardResumeProject(selected.Id, _store.ResolveRoot(selected));
         if (_runners.Remove(selected.Id, out var old)) foreach (var service in old) service.Runner.Dispose();
         Projects.Remove(selected);
         _refreshingProjectList = true;
         try { ProjectItems.Remove(ProjectItems.First(item => item.Profile == selected)); }
         finally { _refreshingProjectList = false; }
         await RefreshProjectListAsync(saveSelection: false);
-        Notice = $"Removed the saved profile for {selected.Name}.";
+        Notice = startAgentCheckpointUpdated ? $"Removed the saved profile for {selected.Name}."
+            : $"Removed the saved profile for {selected.Name}. Its previous Start Agent checkpoint could not be updated and remains saved.";
     }
 
     private void SetSectionVisibility(string property, bool visible)

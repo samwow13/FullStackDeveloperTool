@@ -6,7 +6,8 @@ namespace FullStackLauncher.ProjectTasks;
 
 public sealed record CodexAgentWaitingItem
 {
-    public int Version { get; init; } = 1;
+    // Version 3 also freezes Fast and Ultrafast for later explicit dispatch.
+    public int Version { get; init; } = 3;
     public string Id { get; init; } = "";
     public CodexAgentChatRequest Request { get; init; } = new("", "", "", "", "", "", "");
     public DateTimeOffset CreatedAt { get; init; }
@@ -17,7 +18,7 @@ public sealed record CodexAgentWaitingItem
 }
 
 /// <summary>Stores independent manual prompts without preparing or starting a Codex chat.</summary>
-public sealed class CodexAgentWaitingStore
+public sealed partial class CodexAgentWaitingStore
 {
     private const int MaximumItemBytes = 64_000_000;
     private const int MaximumItems = 100;
@@ -69,8 +70,7 @@ public sealed class CodexAgentWaitingStore
                     ValidateReceipt(item, receipt);
                     if (receipt.IsAccepted || receipt.TerminalConfirmed)
                     {
-                        RemoveSettled(item);
-                        continue;
+                        if (RemoveSettled(item)) continue;
                     }
                     item = item with { Summary = receipt.Summary };
                 }
@@ -89,6 +89,8 @@ public sealed class CodexAgentWaitingStore
 
     public void Remove(string id)
     {
+        using var queueGate = AcquireQueueGate();
+        RequireNotQueued(id);
         using var gate = CodexAgentStorage.AcquireLock(ItemPath(id) + ".lock");
         var item = Read(id, required: true)!;
         if (!item.IsWaiting)
@@ -99,6 +101,8 @@ public sealed class CodexAgentWaitingStore
     /// <summary>Called only after explicit human confirmation; hides a released entry without changing its receipt or resending it.</summary>
     public void Dismiss(string id)
     {
+        using var queueGate = AcquireQueueGate();
+        RequireNotQueued(id);
         using var gate = CodexAgentStorage.AcquireLock(ItemPath(id) + ".lock");
         var item = Read(id, required: true)!;
         if (item.IsWaiting)
@@ -111,10 +115,17 @@ public sealed class CodexAgentWaitingStore
     }
 
     /// <summary>Explicitly releases one waiting prompt. A repeated call never launches another owner.</summary>
-    public async Task<CodexAgentChatReceipt> ReleaseAsync(string id, CancellationToken cancellationToken = default)
+    public Task<CodexAgentChatReceipt> ReleaseAsync(string id, CancellationToken cancellationToken = default) =>
+        ReleaseCoreAsync(id, null, cancellationToken);
+
+    internal Task<CodexAgentChatReceipt> ReleaseQueuedAsync(CodexAgentWaitingQueue queue) =>
+        ReleaseCoreAsync(queue.Current.WaitingId, queue, CancellationToken.None);
+
+    private async Task<CodexAgentChatReceipt> ReleaseCoreAsync(string id, CodexAgentWaitingQueue? queue,
+        CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();
-        var reservation = await Task.Run(() => Reserve(id), cancellationToken).ConfigureAwait(false);
+        var reservation = await Task.Run(() => Reserve(id, queue), cancellationToken).ConfigureAwait(false);
         var item = reservation.Item;
         if (!reservation.NewlyReserved)
         {
@@ -149,12 +160,22 @@ public sealed class CodexAgentWaitingStore
         }
     }
 
-    private (CodexAgentWaitingItem Item, bool NewlyReserved) Reserve(string id)
+    private (CodexAgentWaitingItem Item, bool NewlyReserved) Reserve(string id, CodexAgentWaitingQueue? queue)
     {
+        using var queueGate = AcquireQueueGate();
+        if (queue is null) RequireNotQueued(id);
+        else
+        {
+            RequireCurrentQueue(queue);
+            if (!queue.DispatchStarted || queue.Current.WaitingId != id)
+                throw new InvalidOperationException("The queue has not reserved this prompt for dispatch.");
+        }
         using var gate = CodexAgentStorage.AcquireLock(ItemPath(id) + ".lock");
         var item = Read(id, required: true)!;
+        if (queue is not null) ValidateQueueItem(queue.Current, item);
         if (!item.IsWaiting) return (item, false);
-        item = item with { AttemptId = Guid.NewGuid().ToString("N"), Summary = "Go requested. Checking the saved prompt before starting." };
+        item = item with { AttemptId = queue?.Current.AttemptId ?? Guid.NewGuid().ToString("N"),
+            Summary = "Go requested. Checking the saved prompt before starting." };
         // Save intent before receipt creation or process launch. A crash never
         // returns this prompt to waiting or creates a replacement attempt.
         CodexAgentStorage.WriteAtomic(ItemPath(id), Serialize(item));
@@ -163,12 +184,13 @@ public sealed class CodexAgentWaitingStore
 
     private void RememberResult(CodexAgentWaitingItem item, CodexAgentChatReceipt receipt)
     {
+        using var queueGate = AcquireQueueGate();
         using var gate = CodexAgentStorage.AcquireLock(ItemPath(item.Id) + ".lock");
         var current = Read(item.Id, required: false);
         if (current is null) return;
         if (current.AttemptId != item.AttemptId)
             throw new InvalidOperationException("The waiting prompt's submission identity changed. Its saved request was preserved.");
-        if (receipt.IsAccepted || receipt.TerminalConfirmed) DeleteBookkeeping(item.Id);
+        if ((receipt.IsAccepted || receipt.TerminalConfirmed) && !QueueOwns(item.Id)) DeleteBookkeeping(item.Id);
         else CodexAgentStorage.WriteAtomic(ItemPath(item.Id), Serialize(current with { Summary = receipt.Summary }));
     }
 
@@ -188,22 +210,30 @@ public sealed class CodexAgentWaitingStore
         catch (Exception) { /* The durable attempt identity remains authoritative. */ }
     }
 
-    private void RemoveSettled(CodexAgentWaitingItem item)
+    private bool RemoveSettled(CodexAgentWaitingItem item)
     {
         try
         {
+            using var queueGate = AcquireQueueGate();
+            if (QueueOwns(item.Id)) return false;
             using var gate = CodexAgentStorage.AcquireLock(ItemPath(item.Id) + ".lock");
             var current = Read(item.Id, required: false);
-            if (current is null || current.AttemptId != item.AttemptId) return;
+            if (current is null) return true;
+            if (current.AttemptId != item.AttemptId) return false;
             var receipt = _client.ReadReceipt(item.AttemptId!);
             ValidateReceipt(item, receipt);
-            if (receipt.IsAccepted || receipt.TerminalConfirmed) DeleteBookkeeping(item.Id);
+            if (receipt.IsAccepted || receipt.TerminalConfirmed)
+            {
+                DeleteBookkeeping(item.Id);
+                return true;
+            }
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or InvalidOperationException or ArgumentException)
         {
             // A busy release or failed cleanup does not change receipt evidence.
             // The next explicit list read can remove this settled bookkeeping.
         }
+        return false;
     }
 
     private void ValidateReceipt(CodexAgentWaitingItem item, CodexAgentChatReceipt receipt)
@@ -239,11 +269,15 @@ public sealed class CodexAgentWaitingStore
 
     private static void Validate(CodexAgentWaitingItem item)
     {
-        if (item.Version != 1 || !Guid.TryParseExact(item.Id, "N", out _) || item.CreatedAt == default ||
+        if (item.Version is not (1 or 2 or 3) || !Guid.TryParseExact(item.Id, "N", out _) || item.CreatedAt == default ||
             item.AttemptId is { } attemptId && !Guid.TryParseExact(attemptId, "N", out _) ||
             item.Summary is null || item.Summary.Length > 4_000)
             throw new InvalidOperationException("The saved waiting prompt is invalid or unsupported. The existing file was preserved.");
         CodexAgentChatStore.ValidateRequest(item.Request);
+        if (item.Version < 2 && item.Request.Images.Any(image => image.CaptureContext is not null))
+            throw new InvalidOperationException("The saved waiting prompt version cannot preserve its desktop capture context. The existing file was preserved.");
+        if (item.Version < 3 && (item.Request.UltraFastEnabled || item.Request.FastEnabled))
+            throw new InvalidOperationException("The saved waiting prompt version cannot preserve its speed settings. The existing file was preserved.");
     }
 
     private IEnumerable<string> ItemFiles() => Directory.EnumerateFiles(_directory, "*.json", SearchOption.TopDirectoryOnly)

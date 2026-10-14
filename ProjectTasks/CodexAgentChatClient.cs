@@ -86,6 +86,18 @@ public sealed class CodexAgentChatClient
         return receipt;
     }
 
+    /// <summary>Only exact successful completion, including owned continuations, releases the next waiting agent.</summary>
+    internal bool HasFinishedSuccessfully(string attemptId) => HasFinishedSuccessfully(ReadReceipt(attemptId));
+
+    internal bool HasFinishedSuccessfully(CodexAgentChatReceipt receipt)
+    {
+        if (receipt.State is CodexAgentChatState.Failed or CodexAgentChatState.Interrupted or CodexAgentChatState.Unconfirmed)
+            throw new InvalidOperationException(receipt.Summary);
+        if (receipt.State != CodexAgentChatState.Completed || !receipt.TerminalConfirmed || !receipt.IsAccepted)
+            return false;
+        return new CodexAgentKeepAwakeStore().HasFinishedSuccessfully(receipt);
+    }
+
     public CodexAgentChatReceipt? FindPendingReceipt(string projectId)
     {
         CodexAgentStorage.RequireText(projectId, 200, "Select a project before checking agent chats.");

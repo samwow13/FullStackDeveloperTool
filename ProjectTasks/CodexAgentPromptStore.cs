@@ -10,6 +10,8 @@ public sealed record CodexAgentPromptPreferences(
     string ProjectId, string Context, string ModelId, string ReasoningEffort, string Revision)
 {
     public CodexAgentAccessMode? AccessMode { get; init; }
+    public bool UltraFastEnabled { get; init; }
+    public bool FastEnabled { get; init; }
 }
 
 /// <summary>Private prompt preferences, separate from settings and the automatic queue.</summary>
@@ -24,13 +26,20 @@ public sealed class CodexAgentPromptStore
         var bytes = CodexAgentStorage.Read(_path, 4 * 1024 * 1024);
         var data = Parse(bytes);
         return new(projectId, data.Contexts.GetValueOrDefault(projectId, ""), data.ModelId,
-            data.ReasoningEffort, Revision(bytes)) { AccessMode = data.AccessMode };
+            data.ReasoningEffort, Revision(bytes))
+        {
+            AccessMode = data.AccessMode,
+            UltraFastEnabled = data.UltraFastEnabled,
+            FastEnabled = data.FastEnabled
+        };
     }
 
     public CodexAgentPromptPreferences Save(CodexAgentPromptPreferences preferences)
     {
         ArgumentNullException.ThrowIfNull(preferences);
         CodexAgentStorage.RequireText(preferences.ProjectId, 200, "Select a project before saving agent context.");
+        if (preferences.FastEnabled && preferences.UltraFastEnabled)
+            throw new ArgumentException("Choose either Fast or Ultrafast, not both.");
         if (preferences.Context is null || preferences.Context.Length > MaximumContextCharacters
             || preferences.ModelId is null || preferences.ModelId.Length > 200
             || preferences.ReasoningEffort is null || preferences.ReasoningEffort.Length > 100
@@ -46,7 +55,9 @@ public sealed class CodexAgentPromptStore
         data.ModelId = preferences.ModelId;
         data.ReasoningEffort = preferences.ReasoningEffort;
         data.AccessMode = preferences.AccessMode;
-        data.Version = 2;
+        data.UltraFastEnabled = preferences.UltraFastEnabled;
+        data.FastEnabled = preferences.FastEnabled;
+        data.Version = 3;
         var saved = CodexAgentStorage.Serialize(data);
         if (saved.Length > 4 * 1024 * 1024)
             throw new InvalidOperationException("Saved agent context is too large. Shorten project context before saving.");
@@ -58,10 +69,12 @@ public sealed class CodexAgentPromptStore
     {
         if (bytes is null) return new();
         var data = CodexAgentStorage.Deserialize<PreferenceData>(bytes);
-        if (data.Version is not (1 or 2) || data.Contexts is null || data.Contexts.Count > 10_000
+        if (data.Version is not (1 or 2 or 3) || data.Contexts is null || data.Contexts.Count > 10_000
             || data.ModelId is null || data.ModelId.Length > 200
             || data.ReasoningEffort is null || data.ReasoningEffort.Length > 100
             || (data.AccessMode is { } mode && !Enum.IsDefined(mode))
+            || data.Version < 3 && (data.UltraFastEnabled || data.FastEnabled)
+            || data.FastEnabled && data.UltraFastEnabled
             || data.Contexts.Any(pair => string.IsNullOrWhiteSpace(pair.Key) || pair.Key.Length > 200
                 || pair.Value is null || pair.Value.Length > MaximumContextCharacters))
             throw new InvalidOperationException("Saved agent prompt preferences are invalid or unsupported. The existing file was preserved.");
@@ -76,6 +89,8 @@ public sealed class CodexAgentPromptStore
         public string ModelId { get; set; } = "";
         public string ReasoningEffort { get; set; } = "";
         public CodexAgentAccessMode? AccessMode { get; set; }
+        public bool UltraFastEnabled { get; set; }
+        public bool FastEnabled { get; set; }
         public Dictionary<string, string> Contexts { get; set; } = new(StringComparer.Ordinal);
     }
 }

@@ -15,7 +15,7 @@ public partial class MainWindow
         "Keep the computer and display awake while this dashboard is open, including when minimized. " +
         "Gently nudge the pointer after about one minute without input. " +
         "New queued tasks require this switch and their queue to be enabled. " +
-        "Uncheck to hold later queued tasks; started tasks continue. Closing the dashboard stops queued tasks and returns cleared items to Notes.\n\n" + (_longRunningTaskMode?.Status ?? "Off.");
+        "Uncheck to hold later queued tasks; started tasks continue. Manual close stops queued tasks and returns cleared items to Notes. Automatic replacement preserves compatible queue work.\n\n" + (_longRunningTaskMode?.Status ?? "Off.");
 
     private void InitializeLongRunningTaskMode()
     {
@@ -94,7 +94,7 @@ public partial class MainWindow
         if (enabled)
         {
             _longRunningTaskMode!.SetEnabled(true);
-            try { _queueDashboardPermit!.SetEnabled(true); }
+            try { _queueDashboardPermit!.SetEnabled(CanResumeQueueDispatch); }
             catch
             {
                 _longRunningTaskMode.SetEnabled(false);

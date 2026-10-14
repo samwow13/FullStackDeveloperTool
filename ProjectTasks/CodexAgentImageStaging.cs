@@ -21,6 +21,7 @@ internal static partial class CodexAgentImageStaging
                 throw new ArgumentException("An attached image caption must be at most 240 characters.");
             if (image.MimeType is not ("image/png" or "image/jpeg"))
                 throw new ArgumentException("Attached images must be PNG or JPEG.");
+            image.CaptureContext?.Validate();
             if (image.BrowserContext is { } context)
             {
                 context.Validate();
@@ -36,6 +37,9 @@ internal static partial class CodexAgentImageStaging
             if (totalBytes > CodexAgentChatImage.MaximumTotalBytes)
                 throw new ArgumentException("Attached images must total no more than 24 MB.");
         }
+        // Reject oversized metadata before saving Wait/receipt records, retaining
+        // the full reviewed JSON rather than shortening it during submission.
+        _ = CodexAgentBrowserContext.BuildCaptureReference(images);
     }
 
     internal static IReadOnlyList<string> Stage(CodexAgentChatReceipt receipt)

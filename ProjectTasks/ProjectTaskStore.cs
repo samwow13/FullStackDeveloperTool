@@ -65,6 +65,10 @@ public sealed class ProjectTaskStore
     // An MCP submission must not replace the baseline used by open note drafts.
     internal ProjectTaskStore CreateIndependentInstance() => new(StorePath, true);
 
+    /// <summary>An independent path-scoped view for guarded read-only inspection.</summary>
+    internal static ProjectTaskStore FromStorePathForRead(string storePath) =>
+        new(Path.GetFullPath(storePath), true);
+
     public ProjectTaskData Load()
     {
         lock (_gate)

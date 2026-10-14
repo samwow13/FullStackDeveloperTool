@@ -24,9 +24,9 @@ public partial class GitWorkspaceWindow
             ? $"Suggested release source: {selectedRemote.Name}/{suggested} · auto-detected"
             : "Release source: choose a remote branch in Config.";
     public string ReleaseSourceTooltip => _powerDetails?.ReleaseBranch is { Length: > 0 }
-        ? "Saved release source for this repository and remote URL. Merge Locally shows it immediately, then asks you to refresh before the conflict preview."
+        ? "Saved release branch for comparisons and Merge Locally. Fetch after online integration to update comparison totals. Merge Locally asks you to refresh before the conflict preview."
         : (_powerDetails?.ReleaseBranchDetectionDetail ?? "Load a repository and active remote to detect a release source.")
-            + " Confirm the source in the branch chooser before saving, merging, or testing.";
+            + " Confirm the source in the branch chooser to enable release comparison, merging, or conflict testing.";
     public string PowerAvailabilityText => _powerReadError ?? (!IsRepository ? "Select or initialize a repository first."
         : _sharedRefreshing ? "Background Git refresh is running. Wait for it to finish before merging."
         : _cacheRefreshFailed ? "Force refresh to confirm current Git state before merging."

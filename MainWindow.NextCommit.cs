@@ -55,13 +55,19 @@ public partial class MainWindow
     public CommitMessagePresentation NextCommitPresentation => _nextCommitPresentation;
     public string NextCommitStatus => _nextCommitStatus;
     public string NextCommitActiveConnectionLabel => SelectedNextCommitRepository is { } selected
-        ? (_nextCommitConnectionUnavailable ? null : selected.ActiveConnection?.HeaderLabel) ?? "Git - Connection unavailable"
-        : "Git";
+        ? (_nextCommitConnectionUnavailable ? null : selected.ActiveConnection?.HeaderLabel) ?? "Git · Connection unavailable"
+        : HasNoNextCommitRepository ? "Git · No repository" : "Git";
     public string NextCommitActiveConnectionColor => !_nextCommitConnectionUnavailable
         ? SelectedNextCommitRepository?.ActiveConnection?.Foreground ?? "#B8C6D9" : "#B8C6D9";
     public string NextCommitActiveConnectionDetail => !_nextCommitConnectionUnavailable
         ? SelectedNextCommitRepository?.ActiveConnection?.Detail ?? "Open Git Config to review this repository's connection."
         : "Connection information could not be read. Open Git Config to review this repository.";
+    public string NextCommitRepositoryStatus => _nextCommitConnectionUnavailable ? "Repository status unavailable"
+        : SelectedNextCommitRepository?.ActiveConnection?.RepositoryStatus ?? "Repository status unavailable";
+    public string NextCommitRepositoryDetail => _nextCommitConnectionUnavailable
+        ? "Repository information could not be refreshed. Open Git to review this repository."
+        : SelectedNextCommitRepository?.ActiveConnection?.RepositoryDetail ?? "Repository information could not be read. Open Git to review this repository.";
+    public bool HasNextCommitRepositoryStatus => SelectedNextCommitRepository is not null;
     public bool HasNoNextCommitRepository => _nextCommitHasNoRepository;
     public bool HasNextCommitGitContent => !HasNoNextCommitRepository;
     public bool HasNextCommitStatusNotice => !HasNoNextCommitRepository && _nextCommitStatus != NextCommitLiveStatus;
@@ -282,6 +288,7 @@ public partial class MainWindow
         SynchronizeDashboardGitScope();
         foreach (var name in new[] { nameof(NextCommitMessage), nameof(NextCommitPresentation), nameof(NextCommitStatus), nameof(HasNoNextCommitRepository), nameof(HasNextCommitGitContent), nameof(HasNextCommitStatusNotice), nameof(NextCommitDraftHint), nameof(HasNextCommitDraftHint),
             nameof(NextCommitActiveConnectionLabel), nameof(NextCommitActiveConnectionColor), nameof(NextCommitActiveConnectionDetail),
+            nameof(NextCommitRepositoryStatus), nameof(NextCommitRepositoryDetail), nameof(HasNextCommitRepositoryStatus),
             nameof(NextCommitOverLimit), nameof(NextCommitCharacterCount),
             nameof(NextCommitLimitStatus), nameof(GitCommitButtonLabel) }) Changed(name);
     }
@@ -382,7 +389,7 @@ public partial class MainWindow
     public sealed record NextCommitRepository(string RepositoryId, string RepositoryRoot, string? Branch, string? ConnectionId, string? RemoteName,
         string? Label = null, int? PendingUpdateCount = null, GitActiveConnectionInfo? ActiveConnection = null)
     {
-        public string DisplayName => $"{Label ?? System.IO.Path.GetFileName(RepositoryRoot)} · {Branch ?? "branch unavailable"}"
+        public string DisplayName => $"{Label ?? System.IO.Path.GetFileName(RepositoryRoot)} · {ActiveConnection?.BranchLabel ?? (string.IsNullOrWhiteSpace(Branch) ? "Branch unavailable" : $"Branch: {Branch}")}"
             + (PendingUpdateCount is > 0 ? $" · {PendingUpdateCount:N0} pending" : "");
     }
 

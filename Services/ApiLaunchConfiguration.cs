@@ -58,9 +58,9 @@ public sealed class ApiLaunchConfiguration
         var store = new ApiSecretStore(directory);
         var selected = store.Load(environment == "Prod");
         if (!selected.HasProtectedStore && selected.HasLegacyStore)
-            throw new InvalidOperationException("Import and save this profile's existing .NET user-secrets in API configuration before using Local or Prod. Direct dotnet commands continue using the original files.");
+            throw new InvalidOperationException("This managed API profile needs a saved encrypted configuration before starting. Existing .NET user-secrets remain available to direct dotnet commands.");
         if (selected.NullKeys.Count > 0)
-            throw new InvalidOperationException("This profile contains JSON null or container overrides that cannot be passed through the process environment. Remove them or save text values before starting the API.");
+            throw new InvalidOperationException("This saved profile contains JSON null or container overrides that cannot be passed through the process environment. Restore a valid encrypted configuration before starting the API.");
         ApiSecretSnapshot? inactive = null;
         try { inactive = store.Load(environment != "Prod"); }
         catch (ApiSecretStoreException) { /* An invalid inactive store must not prevent recovery to a valid profile. */ }
@@ -68,7 +68,7 @@ public sealed class ApiLaunchConfiguration
         if (environment == "Prod")
         {
             if (selected.Values.Count == 0)
-                throw new InvalidOperationException("Add and save Prod configuration values before switching to Prod.");
+                throw new InvalidOperationException("This Prod profile has no saved configuration values. Restore a valid encrypted Prod configuration before starting.");
             // A saved local database connection must never become a production fallback.
             // Each production connection is an explicit choice, even when its name matches Local.
             var connectionKeys = (local?.Values.Keys ?? [])
@@ -79,7 +79,7 @@ public sealed class ApiLaunchConfiguration
             foreach (var key in connectionKeys)
             {
                 if (!selected.Values.TryGetValue(key, out var value) || string.IsNullOrWhiteSpace(value))
-                    throw new InvalidOperationException("Save a non-empty Prod value for every connection string declared in API settings or configured in Local before switching to Prod.");
+                    throw new InvalidOperationException("This Prod profile requires a saved nonempty override for every connection string declared in appsettings or configured in Local. Restore a valid encrypted Prod configuration before starting.");
             }
         }
 

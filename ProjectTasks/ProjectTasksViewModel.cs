@@ -200,7 +200,20 @@ public sealed partial class ProjectTasksViewModel : INotifyPropertyChanged, IDis
         !string.IsNullOrWhiteSpace(receipt.ThreadId) && !string.IsNullOrWhiteSpace(receipt.TurnId);
     public string DraftStatus => HasDrafts ? $"{_drafts.Count} unsaved draft(s) across projects. Save all drafts before leaving." : "All note changes saved locally.";
     public string EditorHeading => SelectedNote == null ? "New note" : "Edit note";
-    private ProjectTaskNote? EditorStoredNote => _data.Notes.FirstOrDefault(note => note.Id == _selectedNote?.Id);
+    private ProjectTaskNote? EditorStoredNote
+    {
+        get
+        {
+            var note = _data.Notes.FirstOrDefault(note => note.Id == _selectedNote?.Id);
+            if (note != null || _project == null) return note;
+            var draft = _drafts.GetValueOrDefault(DraftKey(_project.Id, _selectedNote?.Id));
+            return draft?.OriginalAgentSource == null ? null : new()
+            {
+                Id = draft.NoteId ?? "", ProjectId = draft.ProjectId, Name = draft.Name, Prompt = draft.Prompt,
+                AgentSource = draft.OriginalAgentSource, CreatedAt = draft.OriginalNoteCreatedAt ?? DateTimeOffset.UtcNow
+            };
+        }
+    }
     public bool HasAgentSource => EditorStoredNote?.AgentSource != null;
     public string EditorAgentOrigin => EditorStoredNote is { AgentSource: { } source } note
         ? $"AI written · {note.CreatedAt.ToLocalTime():g} · {source.Author}"
@@ -416,7 +429,15 @@ public sealed partial class ProjectTasksViewModel : INotifyPropertyChanged, IDis
                 return;
             }
         }
-        else _drafts[key] = new(_project.Id, _selectedNote?.Id, _editorName, _editorPrompt, images);
+        else
+        {
+            var previous = _drafts.GetValueOrDefault(key);
+            _drafts[key] = new(_project.Id, _selectedNote?.Id, _editorName, _editorPrompt, images,
+                previous?.OriginalNoteFingerprint ?? NoteFingerprint(original),
+                previous?.OriginalNoteUpdatedAt ?? original?.UpdatedAt,
+                previous?.RecoveredFromNoteId, previous?.OriginalAgentSource ?? original?.AgentSource,
+                previous?.OriginalNoteCreatedAt ?? original?.CreatedAt);
+        }
         RefreshBindings();
     }
 
@@ -592,11 +613,20 @@ public sealed partial class ProjectTasksViewModel : INotifyPropertyChanged, IDis
         if (name.Length == 0) name = draft.Prompt.Split('\n').Select(x => x.Trim()).First(x => x.Length > 0);
         if (name.Length > 160) name = name[..160];
         var note = draft.NoteId == null ? null : data.Notes.FirstOrDefault(x => x.Id == draft.NoteId && x.ProjectId == draft.ProjectId);
+        if (note != null && draft.OriginalNoteFingerprint != null &&
+            NoteFingerprint(note) != draft.OriginalNoteFingerprint)
+            throw new InvalidOperationException("This note changed after editing began. Reload to retain your draft separately, then review and save it as a new note.");
         // An explicit save of a recovered draft creates a new note if another
         // writer deleted its original. Reload never restores or saves it silently.
         if (note == null)
         {
-            note = new() { ProjectId = draft.ProjectId, Order = data.Notes.Where(x => x.ProjectId == draft.ProjectId).Select(x => x.Order).DefaultIfEmpty(-1).Max() + 1 };
+            note = new()
+            {
+                ProjectId = draft.ProjectId,
+                Order = data.Notes.Where(x => x.ProjectId == draft.ProjectId).Select(x => x.Order).DefaultIfEmpty(-1).Max() + 1,
+                AgentSource = draft.OriginalAgentSource,
+                CreatedAt = draft.OriginalNoteCreatedAt ?? DateTimeOffset.UtcNow
+            };
             data.Notes.Add(note);
         }
         note.Name = name;
@@ -1056,7 +1086,7 @@ public sealed partial class ProjectTasksViewModel : INotifyPropertyChanged, IDis
 
     public async Task RefreshOwnerStatusAsync()
     {
-        if (_disposed || _queueCommandBusy) return;
+        if (_disposed || _queueCommandBusy || _replacementOwnerRequestsSuspended) return;
         // A transient file read failure blocks saves until Load succeeds. Keep
         // the existing file and drafts intact while retrying at a bounded rate.
         if (!_store.CanSave && DateTimeOffset.UtcNow >= _nextBlockedStoreReloadAt)
@@ -1087,8 +1117,15 @@ public sealed partial class ProjectTasksViewModel : INotifyPropertyChanged, IDis
                 }
             }
             var previousOwnerMessage = _ownerMessage;
-            var reply = await QueueOwnerClient.SendAsync(_store.StorePath, "status", projectId,
-                cancellationToken: _lifetime.Token);
+            if (_replacementOwnerRequestsSuspended) return;
+            QueueOwnerReply reply;
+            _ownerRequestCount++;
+            try
+            {
+                reply = await QueueOwnerClient.SendAsync(_store.StorePath, "status", projectId,
+                    cancellationToken: _lifetime.Token);
+            }
+            finally { _ownerRequestCount--; }
             if (_disposed || _project?.Id != projectId) return;
             _ownerMessage = reply.Success || reply.Message.StartsWith("An older queue owner", StringComparison.Ordinal)
                 ? reply.Message : "";
@@ -1330,9 +1367,10 @@ public sealed partial class ProjectTasksViewModel : INotifyPropertyChanged, IDis
     private void Reload()
     {
         _data = LoadTaskData();
+        RecoverConflictingNoteDrafts();
         RebuildRows(_selectedNote?.Id, _selectedQueue?.Id);
         Feedback = _store.LoadWarning ?? _aiRetentionMessage ?? (HasDrafts
-            ? "Reloaded saved notes; your unsaved drafts are retained. Review them before saving over newer edits. Drafts whose notes were deleted are recovered locally and save as new notes."
+            ? "Reloaded saved notes; unsaved drafts are retained. Drafts whose notes changed or were deleted save as separate new notes after review."
             : "Notes and queue reloaded from local storage.");
     }
 
@@ -1371,7 +1409,9 @@ public sealed partial class ProjectTasksViewModel : INotifyPropertyChanged, IDis
                     !queuedNoteIds.Contains(x.Id)).OrderBy(x => x.Order).ThenBy(x => x.CreatedAt))
                     Notes.Add(new(note.Id, note.ProjectId, note.Name, note.Prompt, note.IsCompleted, false, false, note.Images.Count, note.AgentSource != null, note.CreatedAt, note.AgentSource?.Author));
                 foreach (var draft in _drafts.Values.Where(x => x.ProjectId == _project.Id && x.NoteId != null && !_data.Notes.Any(n => n.Id == x.NoteId)))
-                    Notes.Add(new(draft.NoteId!, draft.ProjectId, string.IsNullOrWhiteSpace(draft.Name) ? "Recovered note draft" : draft.Name, draft.Prompt, false, false, true, draft.Images.Count));
+                    Notes.Add(new(draft.NoteId!, draft.ProjectId, string.IsNullOrWhiteSpace(draft.Name) ? "Recovered note draft" : draft.Name,
+                        draft.Prompt, false, false, true, draft.Images.Count, draft.OriginalAgentSource != null,
+                        draft.OriginalNoteCreatedAt, draft.OriginalAgentSource?.Author));
                 foreach (var item in _data.QueueItems.Where(x => x.ProjectId == _project.Id).OrderBy(x => x.Order))
                 {
                     var note = _data.Notes.FirstOrDefault(x => x.Id == item.NoteId);
@@ -1579,7 +1619,10 @@ public sealed partial class ProjectTasksViewModel : INotifyPropertyChanged, IDis
     private void Changed([CallerMemberName] string? name = null) => PropertyChanged?.Invoke(this, new(name));
     public event PropertyChangedEventHandler? PropertyChanged;
     public void Dispose() { _disposed = true; _lifetime.Cancel(); _lifetime.Dispose(); }
-    private sealed record NoteDraft(string ProjectId, string? NoteId, string Name, string Prompt, List<ProjectTaskNoteImage> Images);
+    private sealed record NoteDraft(string ProjectId, string? NoteId, string Name, string Prompt,
+        List<ProjectTaskNoteImage> Images, string? OriginalNoteFingerprint = null,
+        DateTimeOffset? OriginalNoteUpdatedAt = null, string? RecoveredFromNoteId = null,
+        AgentFollowUpNoteSource? OriginalAgentSource = null, DateTimeOffset? OriginalNoteCreatedAt = null);
 }
 
 public sealed record NoteRow(string Id, string ProjectId, string Name, string Prompt, bool IsCompleted, bool IsQueued, bool IsDraftOnly = false, int ImageCount = 0, bool IsAgentSuggestion = false, DateTimeOffset? CreatedAt = null, string? Author = null)

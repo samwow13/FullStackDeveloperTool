@@ -56,6 +56,8 @@
 **/api-secrets/
 **/api-secrets*.dat*
 **/azure-devops-tokens/
+**/dashboard-resume.dat*
+**/*.dashboard-resume.dat*
 **/*.pfx
 **/*.p12
 **/*.key

@@ -52,31 +52,28 @@ public partial class MainWindow
     public bool AnimateDashboardGitComparisonLoading => IsDashboardGitComparisonLoading
         && !_closed && DashboardGitComparisonLoadingPanel?.IsVisible == true && SystemParameters.ClientAreaAnimation;
     private string? DashboardGitReleaseTarget => _dashboardGitSelectedWatch?.Comparison is { } read
-        ? read.ReleaseBranch ?? read.SuggestedReleaseBranch : null;
+        ? read.ReleaseBranch : null;
     public string DashboardGitReleaseTargetLabel => IsDashboardGitComparisonLoading ? ""
-        : DashboardGitReleaseTarget is { Length: > 0 } branch ? branch : "no target release yet";
+        : DashboardGitReleaseTarget is { Length: > 0 } branch ? branch : "choose release";
     public string DashboardGitReleaseTargetColor => DashboardGitReleaseTarget is { Length: > 0 } ? "#77DFC3" : "#A9B9CF";
     public string DashboardGitReleaseTargetTooltip => _dashboardGitSelectedWatch?.Comparison is { } read
         ? read.ReleaseBranch is { Length: > 0 } branch
-            ? $"Saved release source: {read.Scope.RemoteName}/{branch}."
-            : read.ReleaseBranchDetectionDetail ?? "No release source found. Choose one in Git Config."
+            ? $"Comparison target: {read.Scope.RemoteName}/{branch}. Fetch after online integration to update these totals."
+            : read.SuggestedReleaseBranch is { Length: > 0 } suggested
+                ? $"Suggested release: {read.Scope.RemoteName}/{suggested}. Confirm the release branch in Git Config to compare changes."
+                : read.ReleaseBranchDetectionDetail ?? "Choose a release branch in Git Config to compare changes."
         : "Load a repository and active connection to find its release source.";
 
-    public string DashboardGitComparisonLabel => _dashboardGitSelectedWatch?.Comparison?.Comparison is { IsLocalComparison: true }
-        ? "Local changes · since last local commit"
-        : _dashboardGitSelectedWatch?.Comparison is { Available: true } read
-        ? $"{read.Scope.RemoteName}/{read.Scope.Branch} · last fetched"
-        : "Local changes · remote comparison unavailable";
+    public string DashboardGitComparisonLabel => _dashboardGitSelectedWatch?.Comparison?.Comparison is { Available: true } comparison
+        ? $"vs {comparison.Remote}/{comparison.Branch} · last fetched"
+        : "Release comparison";
     public string DashboardGitChangedFiles => _dashboardGitSelectedWatch?.Comparison?.Comparison is { LineTotalsAvailable: true } comparison
-        ? $"{comparison.ChangedFiles + comparison.UntrackedFiles:N0}"
-        : _dashboardGitSelectedWatch?.Comparison?.Snapshot is { } snapshot ? $"{snapshot.Changes.Count:N0}" : "—";
+        ? $"{comparison.ChangedFiles:N0}" : "—";
     public string DashboardGitAddedLines => _dashboardGitSelectedWatch?.Comparison?.Comparison is { LineTotalsAvailable: true } comparison
         ? $"+{comparison.AddedLines:N0}" : "—";
     public string DashboardGitRemovedLines => _dashboardGitSelectedWatch?.Comparison?.Comparison is { LineTotalsAvailable: true } comparison
         ? $"−{comparison.DeletedLines:N0}" : "—";
-    public string DashboardGitLineTotalsTooltip => _dashboardGitSelectedWatch?.Comparison?.Comparison is { IsLocalComparison: true }
-        ? "Tracked text compared with the last local commit (HEAD). Includes staged and unstaged edits; untracked and binary contents excluded."
-        : "Tracked text compared with the last fetched remote branch. Includes local commits and edits; untracked and binary contents excluded.";
+    public string DashboardGitLineTotalsTooltip => "Net tracked changes against the last fetched release branch, including local commits and edits. Changes already matching release do not count. Fetch after online integration to update totals. Untracked files and binary contents are excluded from line totals.";
     public string DashboardGitComparisonDetail
     {
         get
@@ -86,11 +83,8 @@ public partial class MainWindow
             if (_dashboardGitSelectedWatch is not { } watch) return "Choose a repository and active connection in Git.";
             if (watch.Comparison is not { } read) return "Reading local Git comparison…";
             if (read.Comparison is not { LineTotalsAvailable: true } comparison)
-                return read.UnavailableReason ?? read.Comparison?.UnavailableReason ?? "Remote comparison unavailable. Open Git to review setup.";
+                return read.UnavailableReason ?? read.Comparison?.UnavailableReason ?? "Choose a release branch in Git Config, then fetch to compare changes.";
             var detail = $"{read.UncommittedFiles:N0} uncommitted";
-            if (!comparison.Available) detail += " · remote branch unavailable";
-            else if (comparison.Ahead > 0 || comparison.Behind > 0)
-                detail += $" · {comparison.Ahead:N0} ahead / {comparison.Behind:N0} behind";
             if (comparison.UntrackedFiles > 0) detail += $" · {comparison.UntrackedFiles:N0} untracked";
             if (comparison.BinaryFiles > 0) detail += $" · {comparison.BinaryFiles:N0} binary";
             return detail;

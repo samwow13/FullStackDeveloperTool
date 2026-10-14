@@ -33,6 +33,7 @@ public partial class MainWindow
                 service.IsStoppedForPortEdit,
                 port => SaveFrontendPortAsync(project, service, originalProfile, directory, stopRevision, port))
             { Owner = this };
+            RegisterServiceEditorResume(editor, project, service);
             editor.ShowDialog();
         }
         catch (Exception)

@@ -73,6 +73,7 @@ public partial class MainWindow
 
     private void CancelProjectEdits()
     {
+        if (!ForgetOwnedInlineProjectResume()) return;
         EditError = "";
         SetProjectEditMode(false);
         Notice = "Project edits canceled.";
@@ -145,6 +146,7 @@ public partial class MainWindow
         }
         if (!HasProjectEdits)
         {
+            if (!ForgetOwnedInlineProjectResume()) return false;
             SetProjectEditMode(false);
             EditModeToggle.Focus();
             return true;
@@ -221,6 +223,8 @@ public partial class MainWindow
                 : $"Saved {selected.Name}.";
             if (proxyChanges.UpdatedFileCount > 0)
                 Notice += " Angular's local API proxy was updated. Start the linked frontend to load the new API port.";
+            if (!ForgetOwnedInlineProjectResume())
+                Notice += " Project changes were saved, but the older resume copy could not be cleared. Check local storage access.";
             EditModeToggle.Focus();
             return true;
         }
@@ -254,14 +258,20 @@ public partial class MainWindow
         OpenProjectDetails();
     }
 
-    private async Task<bool> ResolveProjectEditsForCloseAsync()
+    private async Task<bool> ResolveProjectEditsForCloseAsync(bool automaticReplacement = false)
     {
-        if (!IsEditing || !HasProjectEdits) return true;
+        if (automaticReplacement)
+        {
+            SaveInlineProjectResume();
+            return true;
+        }
+        if (!IsEditing) return true;
+        if (!HasProjectEdits) return ForgetOwnedInlineProjectResume();
         var result = MessageBox.Show(this, "Save your project name, service names and port changes before closing?",
             "Unsaved project edits", MessageBoxButton.YesNoCancel, MessageBoxImage.Question, MessageBoxResult.Cancel);
         if (result == MessageBoxResult.Cancel) return false;
         if (result == MessageBoxResult.Yes) return await SaveProjectEditsAsync();
         CancelProjectEdits();
-        return true;
+        return !IsEditing;
     }
 }

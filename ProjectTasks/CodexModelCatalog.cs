@@ -12,7 +12,12 @@ public sealed record CodexModelOption(
     string DisplayName,
     string DefaultReasoningEffort,
     IReadOnlyList<CodexReasoningEffortOption> SupportedReasoningEfforts,
-    bool IsDefault = false);
+    bool IsDefault = false,
+    bool SupportsUltraFast = false,
+    string? FastServiceTier = null)
+{
+    public bool SupportsFast => FastServiceTier is not null;
+}
 
 /// <summary>Explicit model discovery through an owned App Server connection; never dispatches work.</summary>
 public sealed class CodexModelCatalog
@@ -50,6 +55,7 @@ public sealed class CodexModelCatalog
     internal static async Task<IReadOnlyList<CodexModelOption>> LoadAsync(
         CodexAppServerConnection connection, CancellationToken token)
     {
+        var speedRequirements = await ReadSpeedRequirementsAsync(connection, token).ConfigureAwait(false);
         var models = new List<CodexModelOption>();
         var modelIds = new HashSet<string>(StringComparer.Ordinal);
         var cursors = new HashSet<string>(StringComparer.Ordinal);
@@ -66,7 +72,7 @@ public sealed class CodexModelCatalog
             {
                 if (entry.ValueKind != JsonValueKind.Object) throw new InvalidOperationException(IncompatibleMessage);
                 if (entry.TryGetProperty("hidden", out var hidden) && hidden.ValueKind == JsonValueKind.True) continue;
-                var model = ParseModel(entry);
+                var model = ParseModel(entry, speedRequirements);
                 if (modelIds.Add(model.Id)) models.Add(model);
             }
             cursor = ReadOptionalString(result, "nextCursor");
@@ -80,7 +86,7 @@ public sealed class CodexModelCatalog
         }
         throw new InvalidOperationException("Codex returned too many model pages. Update Codex, then refresh models.");
     }
-    private static CodexModelOption ParseModel(JsonElement entry)
+    private static CodexModelOption ParseModel(JsonElement entry, (bool Fast, bool UltraFast) speedRequirements)
     {
         var id = ReadRequiredString(entry, "model");
         var name = ReadRequiredString(entry, "displayName");
@@ -100,7 +106,79 @@ public sealed class CodexModelCatalog
             throw new InvalidOperationException(IncompatibleMessage);
 
         var isDefault = entry.TryGetProperty("isDefault", out var value) && value.ValueKind == JsonValueKind.True;
-        return new CodexModelOption(id, name, defaultEffort, efforts.AsReadOnly(), isDefault);
+        var tiers = ReadServiceTiers(entry);
+        var fastTier = !speedRequirements.Fast ? null : tiers.Contains("priority") ? "priority" : tiers.Contains("fast") ? "fast" : null;
+        return new CodexModelOption(id, name, defaultEffort, efforts.AsReadOnly(), isDefault,
+            speedRequirements.UltraFast && tiers.Contains("ultrafast"), fastTier);
+    }
+
+    private static async Task<(bool Fast, bool UltraFast)> ReadSpeedRequirementsAsync(
+        CodexAppServerConnection connection, CancellationToken token)
+    {
+        JsonElement response;
+        try
+        {
+            response = await connection.RequestAsync("configRequirements/read", new { }, token).ConfigureAwait(false);
+        }
+        catch (CodexRequestException ex) when (ex.IsMethodUnavailable)
+        {
+            // Older Fast catalogs remain usable. Ultrafast requires a successful
+            // requirements read before this client can expose its higher usage.
+            return (true, false);
+        }
+        if (response.ValueKind != JsonValueKind.Object
+            || !response.TryGetProperty("requirements", out var requirements))
+            throw new InvalidOperationException(IncompatibleMessage);
+        var independentModes = false;
+        if (response.TryGetProperty("supportsIndependentSpeedModes", out var independent)
+            && independent.ValueKind != JsonValueKind.Null)
+        {
+            if (independent.ValueKind is not (JsonValueKind.True or JsonValueKind.False))
+                throw new InvalidOperationException(IncompatibleMessage);
+            independentModes = independent.GetBoolean();
+        }
+        if (requirements.ValueKind == JsonValueKind.Null) return (true, true);
+        if (requirements.ValueKind != JsonValueKind.Object) throw new InvalidOperationException(IncompatibleMessage);
+        if (!requirements.TryGetProperty("featureRequirements", out var features) || features.ValueKind == JsonValueKind.Null)
+            return (true, true);
+        if (features.ValueKind != JsonValueKind.Object) throw new InvalidOperationException(IncompatibleMessage);
+        var fastAllowed = ReadOptionalFeatureRequirement(features, "fast_mode") != false;
+        var ultraAllowed = ReadOptionalFeatureRequirement(features, "ultrafast_mode") != false;
+        // Match the native app: older servers use Fast as the shared speed gate;
+        // independent-mode servers can allow Ultrafast while Fast is disabled.
+        return (fastAllowed, ultraAllowed && (independentModes || fastAllowed));
+    }
+
+    private static bool? ReadOptionalFeatureRequirement(JsonElement features, string name)
+    {
+        if (!features.TryGetProperty(name, out var value)) return null;
+        if (value.ValueKind is not (JsonValueKind.True or JsonValueKind.False))
+            throw new InvalidOperationException(IncompatibleMessage);
+        return value.GetBoolean();
+    }
+
+    private static HashSet<string> ReadServiceTiers(JsonElement entry)
+    {
+        var tiers = new HashSet<string>(StringComparer.Ordinal);
+        if (entry.TryGetProperty("serviceTiers", out var offered))
+        {
+            if (offered.ValueKind != JsonValueKind.Array) throw new InvalidOperationException(IncompatibleMessage);
+            foreach (var tier in offered.EnumerateArray()) tiers.Add(ReadRequiredString(tier, "id"));
+            // A modern catalog's explicit empty list is authoritative. Never
+            // restore a tier that it removed by consulting deprecated metadata.
+            return tiers;
+        }
+        if (entry.TryGetProperty("additionalSpeedTiers", out var legacy))
+        {
+            if (legacy.ValueKind != JsonValueKind.Array) throw new InvalidOperationException(IncompatibleMessage);
+            foreach (var tier in legacy.EnumerateArray())
+            {
+                if (tier.ValueKind != JsonValueKind.String || string.IsNullOrWhiteSpace(tier.GetString()))
+                    throw new InvalidOperationException(IncompatibleMessage);
+                tiers.Add(tier.GetString()!);
+            }
+        }
+        return tiers;
     }
 
     private static string ReadRequiredString(JsonElement element, string name) =>

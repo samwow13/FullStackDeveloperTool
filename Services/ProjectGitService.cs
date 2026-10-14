@@ -539,6 +539,17 @@ public sealed class ProjectGitService
                 catch (GitCommandExitUnconfirmedException) { throw; }
                 catch (OperationCanceledException) when (current.IsCancellationRequested) { throw; }
                 catch (Exception exception) { powerError = FailureMessage(exception); }
+                if (comparison is { Available: true } && powerError is not null)
+                {
+                    comparison = null;
+                    comparisonError = powerError;
+                }
+                else if (comparison is { Available: true } && power is not null
+                    && !string.Equals(comparison.Branch, power.ReleaseBranch, StringComparison.Ordinal))
+                {
+                    comparison = null;
+                    comparisonError = "The release branch changed while reading Git details. Refresh to obtain current totals.";
+                }
                 return "";
             }, token).ConfigureAwait(false);
         }

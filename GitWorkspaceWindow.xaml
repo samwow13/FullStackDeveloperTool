@@ -103,7 +103,7 @@
                     <StackPanel Margin="0,0,8,0">
                         <TextBlock Text="{Binding ComparisonLabel}" FontWeight="SemiBold" TextWrapping="Wrap" Margin="0,0,0,10"/>
                         <Grid><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="12"/><ColumnDefinition Width="*"/><ColumnDefinition Width="12"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
-                            <Border Style="{StaticResource Card}"><StackPanel><TextBlock Text="Changed files" Style="{StaticResource Hint}"/><TextBlock Text="{Binding ChangedFilesLabel}" Style="{StaticResource Metric}"/></StackPanel></Border>
+                            <Border Style="{StaticResource Card}" ToolTip="Tracked files different from release. Untracked files appear separately below."><StackPanel><TextBlock Text="Changed files" Style="{StaticResource Hint}"/><TextBlock Text="{Binding ChangedFilesLabel}" Style="{StaticResource Metric}"/></StackPanel></Border>
                             <Border Grid.Column="2" Style="{StaticResource Card}" ToolTip="{Binding LineTotalsTooltip}"><StackPanel><TextBlock Text="Lines added" Style="{StaticResource Hint}"/><TextBlock Text="{Binding AddedLinesLabel}" Style="{StaticResource Metric}" Foreground="{StaticResource AccentBrush}"/></StackPanel></Border>
                             <Border Grid.Column="4" Style="{StaticResource Card}" ToolTip="{Binding LineTotalsTooltip}"><StackPanel><TextBlock Text="Lines removed" Style="{StaticResource Hint}"/><TextBlock Text="{Binding RemovedLinesLabel}" Style="{StaticResource Metric}" Foreground="#FFACA9"/></StackPanel></Border>
                         </Grid>
@@ -187,7 +187,7 @@
                             </StackPanel>
                         </Border>
                         <WrapPanel>
-                            <Button Content="Fetch" Click="Fetch_Click" IsEnabled="{Binding HasRemote}" Style="{StaticResource Action}" ToolTip="Fetch branches and refresh the remote comparison."/>
+                            <Button Content="Fetch" Click="Fetch_Click" IsEnabled="{Binding HasRemote}" Style="{StaticResource Action}" ToolTip="Fetch branches and update release comparison after online integration."/>
                             <Button Content="Pull" Click="Pull_Click" IsEnabled="{Binding CanPull}" Style="{StaticResource Action}" ToolTip="Pull the selected remote branch with fast-forward only. Requires a clean working tree."/>
                             <Button Content="Push" Click="Push_Click" IsEnabled="{Binding CanSync}" Style="{StaticResource Action}" ToolTip="Push existing commits to the selected remote."/>
                         </WrapPanel>
@@ -269,26 +269,29 @@
                             </StackPanel>
                         </StackPanel>
                         <StackPanel Visibility="{Binding ConnectionsStepVisibility}">
+                            <TextBlock Text="{Binding ActiveConnectionLabel}" Foreground="{Binding ActiveConnectionColor}" TextWrapping="Wrap" Margin="0,0,0,12"
+                                       ToolTip="{Binding ActiveConnectionDetail}" AutomationProperties.LiveSetting="Polite"/>
                             <Label Content="Connections for this _repository" Target="{Binding ElementName=ConnectionPicker}" Padding="0,0,0,8"/>
                             <ListBox x:Name="ConnectionPicker" ItemsSource="{Binding Remotes}" SelectionMode="Single" SelectionChanged="Connection_Changed" MinHeight="100" MaxHeight="220" Background="#111923" BorderBrush="{StaticResource BorderBrush}" BorderThickness="1" Padding="5" AutomationProperties.Name="Connections for this repository">
                                 <ListBox.ItemTemplate>
                                     <DataTemplate>
                                         <StackPanel>
                                             <TextBlock Text="{Binding Name}" FontWeight="SemiBold" TextWrapping="Wrap"/>
-                                            <TextBlock Text="{Binding FetchUrl}" Style="{StaticResource Hint}" FontSize="12" Margin="0,4,0,0"/>
+                                            <TextBlock Style="{StaticResource Hint}" FontSize="12" Margin="0,4,0,0"><Run Text="Fetch / pull: "/><Run Text="{Binding FetchUrl}"/></TextBlock>
+                                            <TextBlock Style="{StaticResource Hint}" FontSize="12" Margin="0,2,0,0"><Run Text="Push: "/><Run Text="{Binding PushUrl}"/></TextBlock>
                                         </StackPanel>
                                     </DataTemplate>
                                 </ListBox.ItemTemplate>
                             </ListBox>
                             <WrapPanel>
                                 <Button Content="_Use selected connection" Click="UseConnection_Click" Style="{StaticResource Action}"/>
-                                <Button Content="_Reconnect selected…" Click="Reconnect_Click" Style="{StaticResource Action}"/>
+                                <Button Content="Change _provider or URL…" Click="Reconnect_Click" Style="{StaticResource Action}" ToolTip="Review a different provider or destination for the selected connection."/>
                                 <Button Content="_Add connection…" Click="AddConnection_Click" Style="{StaticResource Action}"/>
                                 <Button Content="After-push _link…" Click="PostPushLinkConfig_Click" Style="{StaticResource Action}" ToolTip="Customize the link opened in Chrome after a successful push on the selected connection."/>
                             </WrapPanel>
                             <WrapPanel Margin="0,12,0,0">
                                 <TextBlock Text="{Binding ReleaseSourceLabel}" ToolTip="{Binding ReleaseSourceTooltip}" TextWrapping="Wrap" Foreground="{StaticResource AccentBrush}" VerticalAlignment="Center" Margin="0,0,12,8"/>
-                                <Button Content="Change release _branch…" Click="ChangeReleaseBranch_Click" IsEnabled="{Binding CanChangeReleaseBranch}" Style="{StaticResource Action}" ToolTip="Choose the release source for the active remote. Saving this choice does not merge or push." ToolTipService.ShowOnDisabled="True" AutomationProperties.Name="Change release branch in Config"/>
+                                <Button Content="Change release _branch…" Click="ChangeReleaseBranch_Click" IsEnabled="{Binding CanChangeReleaseBranch}" Style="{StaticResource Action}" ToolTip="Choose the release branch for comparison totals and Merge Locally. Saving this choice does not merge or push." ToolTipService.ShowOnDisabled="True" AutomationProperties.Name="Change release branch in Config"/>
                             </WrapPanel>
                         </StackPanel>
                         <StackPanel Visibility="{Binding ProviderStepVisibility}" MaxWidth="540" HorizontalAlignment="Left">

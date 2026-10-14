@@ -1,5 +1,7 @@
 using System.IO;
 using System.Windows;
+using System.Windows.Controls;
+using System.Windows.Controls.Primitives;
 using FullStackLauncher.Controls;
 using FullStackLauncher.ProjectTasks;
 using FullStackLauncher.Services;
@@ -17,22 +19,28 @@ public partial class MainWindow
     private CodexWaitingAgentsWindow? _waitingAgentsWindow;
 
     public int WaitingAgentCount => _waitingAgents.Count(item => item.IsWaiting);
-    public bool HasWaitingAgentItems => _waitingAgents.Count > 0 || _waitingAgentError is not null || _releasingWaitingAgents;
-    public string WaitingAgentLabel => _waitingAgentError is not null ? "Waiting prompts need attention"
+    public bool HasWaitingAgentItems => _waitingAgents.Count > 0 || _waitingAgentError is not null ||
+        _waitingAgentQueueError is not null || _releasingWaitingAgents || HasWaitingAgentQueue;
+    public string WaitingAgentLabel => _waitingAgentQueueError is not null ? "Saved queue needs attention"
+        : _waitingAgentError is not null ? "Waiting prompts need attention"
+        : HasWaitingAgentQueue ? _waitingAgentQueueStatus
         : _releasingWaitingAgents ? "Starting waiting prompts…"
         : $"Waiting prompts ({WaitingAgentCount})" +
           (_waitingAgents.Count > WaitingAgentCount ? $" · {_waitingAgents.Count - WaitingAgentCount} to review" : "");
-    public string WaitingAgentGoLabel => _releasingWaitingAgents ? "Starting…" : $"Go ({WaitingAgentCount})";
+    public string WaitingAgentGoLabel => _releasingWaitingAgents ? "Starting…" : $"Go ({WaitingAgentCount}) ▾";
+    public string WaitingAgentDetails => _waitingAgentQueueError ?? _waitingAgentError ?? _waitingAgentQueue?.Summary ?? "";
     public bool CanReleaseWaitingAgents => WaitingAgentCount > 0 && _waitingAgentError is null &&
-        !_loadingWaitingAgents && !_releasingWaitingAgents && !_closed && !_closing && !_closeRequested &&
+        _waitingAgentQueueLoaded && _waitingAgentQueueError is null &&
+        !_loadingWaitingAgents && !_releasingWaitingAgents && !HasWaitingAgentQueue && !_closed && !_closing && !_closeRequested &&
         !_savingProjectEdits && _startAgentWindow is null && _waitingAgentsWindow is null;
     public bool CanReviewWaitingAgents => !_closed && !_closing && !_closeRequested &&
-        !_releasingWaitingAgents && _startAgentWindow is null && _waitingAgentsWindow is null;
+        !_releasingWaitingAgents && !_loadingWaitingAgentQueue && _startAgentWindow is null && _waitingAgentsWindow is null;
 
     private void InitializeWaitingAgents()
     {
-        Loaded += async (_, _) => await RefreshWaitingAgentsAsync();
-        Activated += async (_, _) => await RefreshWaitingAgentsAsync();
+        Loaded += async (_, _) => { await RestoreWaitingAgentQueueAsync(); await RefreshWaitingAgentsAsync(); };
+        Activated += async (_, _) => { await RestoreWaitingAgentQueueAsync(); await RefreshWaitingAgentsAsync(); };
+        Closed += (_, _) => _waitingAgentQueueCancellation?.Cancel();
     }
 
     private async Task RefreshWaitingAgentsAsync()
@@ -75,27 +83,38 @@ public partial class MainWindow
     private void UpdateWaitingAgentActions()
     {
         foreach (var name in new[] { nameof(WaitingAgentCount), nameof(HasWaitingAgentItems), nameof(WaitingAgentLabel),
-                     nameof(WaitingAgentGoLabel), nameof(CanReleaseWaitingAgents), nameof(CanReviewWaitingAgents), nameof(CanStartAgent) })
+                     nameof(WaitingAgentGoLabel), nameof(CanReleaseWaitingAgents), nameof(CanReviewWaitingAgents), nameof(CanStartAgent),
+                     nameof(HasWaitingAgentQueue), nameof(CanStopWaitingAgentQueue), nameof(WaitingAgentDetails) })
             Changed(name);
     }
 
-    private async void GoWaitingAgents_Click(object sender, RoutedEventArgs e)
+    private void GoWaitingAgents_Click(object sender, RoutedEventArgs e)
+    {
+        if (!CanReleaseWaitingAgents || sender is not Button { ContextMenu: { } menu } button) return;
+        menu.PlacementTarget = button;
+        menu.Placement = PlacementMode.Bottom;
+        menu.IsOpen = true;
+    }
+
+    private void ValidateWaitingAgentProject(CodexAgentWaitingItem item)
+    {
+        var project = Projects.FirstOrDefault(project => project.Id == item.Request.ProjectId);
+        if (project is null ||
+            !string.Equals(Path.TrimEndingDirectorySeparator(Path.GetFullPath(_store.ResolveRoot(project))),
+                Path.TrimEndingDirectorySeparator(Path.GetFullPath(item.Request.Folder)), StringComparison.OrdinalIgnoreCase))
+            throw new InvalidOperationException($"The saved project folder for {item.Request.ProjectName} changed or was removed. Review its waiting prompt before starting.");
+    }
+
+    private async void PushWaitingAgents_Click(object sender, RoutedEventArgs e)
     {
         if (!CanReleaseWaitingAgents) return;
-        // Freeze the configured roots before yielding, just as Start Agent captures its project.
+        // Keep other releases disabled through the batch's submission checks.
         _releasingWaitingAgents = true;
         UpdateWaitingAgentActions();
         try
         {
-            var roots = Projects.ToDictionary(project => project.Id, project => _store.ResolveRoot(project), StringComparer.Ordinal);
             var batch = (await Task.Run(() => _waitingAgentStore.List())).Where(item => item.IsWaiting).ToArray();
-            foreach (var item in batch)
-            {
-                if (!roots.TryGetValue(item.Request.ProjectId, out var root) ||
-                    !string.Equals(Path.TrimEndingDirectorySeparator(Path.GetFullPath(root)),
-                        Path.TrimEndingDirectorySeparator(Path.GetFullPath(item.Request.Folder)), StringComparison.OrdinalIgnoreCase))
-                    throw new InvalidOperationException($"The saved project folder for {item.Request.ProjectName} changed or was removed. Review its waiting prompt before starting.");
-            }
+            foreach (var item in batch) ValidateWaitingAgentProject(item);
             if (batch.Length == 0) return;
             Notice = $"Starting {batch.Length} waiting prompt(s)…";
             // Start all independent chat owners together; do not await one turn before releasing another.
@@ -130,7 +149,7 @@ public partial class MainWindow
         if (!CanReviewWaitingAgents) return;
         try
         {
-            var window = new CodexWaitingAgentsWindow { Owner = this };
+            var window = new CodexWaitingAgentsWindow(_waitingAgentQueueIds) { Owner = this };
             _waitingAgentsWindow = window;
             window.SubmissionReviewRequested += ReviewWaitingAgentSubmission;
             UpdateWaitingAgentActions();
@@ -156,7 +175,9 @@ public partial class MainWindow
         var draft = _startAgentDrafts.GetValueOrDefault(item.Request.ProjectId);
         var window = new CodexStartAgentWindow(item.Request.ProjectId, item.Request.ProjectName,
             item.Request.Folder, draft?.Text ?? "", item.AttemptId, draft?.Images, draft?.KeepAwake ?? false,
-            inspectSubmission: true) { Owner = _waitingAgentsWindow ?? (Window)this };
+            inspectSubmission: true, draftUltraFastEnabled: draft?.UltraFastEnabled,
+            draftFastEnabled: draft?.FastEnabled)
+        { Owner = _waitingAgentsWindow ?? (Window)this };
         _startAgentWindow = window;
         UpdateWaitingAgentActions();
         try { window.ShowDialog(); }
@@ -164,9 +185,10 @@ public partial class MainWindow
         {
             // Keep only the returned unsent draft; a saved or sent message must not reappear.
             if (!string.IsNullOrEmpty(window.Draft) || window.UnsentDraftImages.Count > 0 ||
-                window.RecoveryAttemptId is not null || (window.DraftKeepAwake && !window.SentSuccessfully))
+                window.RecoveryAttemptId is not null ||
+                ((window.DraftKeepAwake || window.DraftUltraFastEnabled || window.DraftFastEnabled) && !window.SentSuccessfully))
                 _startAgentDrafts[item.Request.ProjectId] = new(window.Draft, window.RecoveryAttemptId,
-                    window.UnsentDraftImages, window.DraftKeepAwake);
+                    window.UnsentDraftImages, window.DraftKeepAwake, window.DraftUltraFastEnabled, window.DraftFastEnabled);
             else _startAgentDrafts.Remove(item.Request.ProjectId);
             _startAgentWindow = null;
             UpdateWaitingAgentActions();

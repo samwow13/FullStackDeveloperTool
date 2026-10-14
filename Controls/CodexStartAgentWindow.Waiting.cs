@@ -20,6 +20,7 @@ public partial class CodexStartAgentWindow
         ShowStatus("Saving prompt to Waiting…");
         UpdateControls();
         var saved = false;
+        var readyForNextCapture = false;
         try
         {
             await StopContextGathererAsync();
@@ -29,9 +30,15 @@ public partial class CodexStartAgentWindow
             WaitingSavedCount++;
             saved = true;
             PromptBox.Clear();
+            var undoEnabled = PromptBox.IsUndoEnabled;
+            PromptBox.IsUndoEnabled = false;
+            PromptBox.IsUndoEnabled = undoEnabled;
+            PromptBox.CaretIndex = 0;
+            PromptBox.ScrollToHome();
             ClearMessageImages();
-            KeepAwakeChoice.IsChecked = false;
-            ShowStatus("Prompt saved to Waiting. Prepare another, or close and choose Go on the main screen.");
+            // Keep the chosen model, thinking, access, speed, and Keep awake for the next prompt.
+            ShowStatus("Saved to Waiting. Capture screenshots for the next prompt, or close Context Gatherer to type.");
+            readyForNextCapture = true;
         }
         catch (Exception ex)
         {
@@ -55,6 +62,18 @@ public partial class CodexStartAgentWindow
             catch (Exception ex)
             {
                 if (!_closed) ShowStatus("Prompt saved to Waiting. Close this window to refresh the waiting list. " +
+                    SensitiveDataProtection.Redact(ex.Message), error: true);
+                return;
+            }
+        }
+        // The frozen waiting entry is already durable. Only a fully reset draft
+        // opens a fresh gather; capture failure or cancellation cannot undo it.
+        if (readyForNextCapture && !_closed)
+        {
+            try { await OpenContextGathererAsync(); }
+            catch (Exception ex)
+            {
+                if (!_closed) ShowStatus("Prompt saved to Waiting. Context Gatherer could not reopen. " +
                     SensitiveDataProtection.Redact(ex.Message), error: true);
             }
         }

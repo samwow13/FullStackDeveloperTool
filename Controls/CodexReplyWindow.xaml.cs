@@ -8,7 +8,7 @@ using FullStackLauncher.Services;
 
 namespace FullStackLauncher.Controls;
 
-/// <summary>A fixed chat inbox, durable receipts, and an in-memory unsent draft.</summary>
+/// <summary>A fixed chat inbox, durable receipts, and an unsent draft preserved during replacement.</summary>
 public partial class CodexReplyWindow : Window, IDashboardReplacementWindow
 {
     public bool IsDashboardReplacementReady => !_sending;
@@ -24,6 +24,23 @@ public partial class CodexReplyWindow : Window, IDashboardReplacementWindow
     public string Draft => ResponseBox.Text;
     public string ReplyId { get; private set; }
     public bool RetryLocked { get; private set; }
+    public string ThreadId => _threadId;
+    public string ChatDisplayTitle => ChatTitle.Text;
+    public string AgentMessageText => AgentMessage.Text;
+    public int DraftSelectionStart => ResponseBox.SelectionStart;
+    public int DraftSelectionLength => ResponseBox.SelectionLength;
+    public double DraftVerticalOffset => ResponseBox.VerticalOffset;
+
+    internal void RestoreEditorState(int selectionStart, int selectionLength, double verticalOffset)
+    {
+        Loaded += (_, _) =>
+        {
+            var start = Math.Clamp(selectionStart, 0, ResponseBox.Text.Length);
+            ResponseBox.Select(start, Math.Clamp(selectionLength, 0, ResponseBox.Text.Length - start));
+            if (double.IsFinite(verticalOffset) && verticalOffset >= 0)
+                ResponseBox.ScrollToVerticalOffset(verticalOffset);
+        };
+    }
 
     public CodexReplyWindow(string threadId, string title, string draft, string replyId, bool retryLocked,
         string agentMessage = "")

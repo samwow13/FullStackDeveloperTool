@@ -294,7 +294,7 @@ public partial class MainWindow
             owner._gitProjectConnectionLease = null;
             owner.SetSavingProjectEdits(false);
             if (owner._closeRequested || owner._closing || owner._closed) return;
-            try { owner._queueDashboardPermit?.SetEnabled(owner.LongRunningTaskEnabled); }
+            try { owner._queueDashboardPermit?.SetEnabled(owner.CanResumeQueueDispatch); }
             catch (Exception ex)
             {
                 owner.Notice = $"Queue starts remain paused: {SensitiveDataProtection.Redact(ex.Message)}";

@@ -18,6 +18,36 @@ public partial class ServicePortWindow : Window, IDashboardReplacementWindow
     private bool _saving;
     private bool _saved;
     private bool _closed;
+    private Action? _clearDashboardResume;
+    private bool _dashboardResumePending;
+    private bool _dashboardResumeClose;
+    private int? _restoredCaretIndex;
+
+    internal void ConfigureDashboardResume(ServicePortEditorResume? state, Action clearDashboardResume)
+    {
+        _clearDashboardResume = clearDashboardResume;
+        if (state is null) return;
+        PortBox.Text = state.Port;
+        PortBox.CaretIndex = Math.Clamp(state.CaretIndex, 0, PortBox.Text.Length);
+        _restoredCaretIndex = PortBox.CaretIndex;
+        _dashboardResumePending = true;
+        SetStatus("Port draft restored. " + StatusText.Text, error: !_editable);
+    }
+
+    internal ServicePortEditorResume CaptureDashboardResume() => new(PortBox.Text, _initialPort, PortBox.CaretIndex);
+
+    internal void MarkDashboardResumeCheckpointed()
+    {
+        _dashboardResumePending = true;
+        _dashboardResumeClose = true;
+    }
+
+    private void ClearDashboardResume()
+    {
+        if (!_dashboardResumePending) return;
+        _clearDashboardResume?.Invoke();
+        _dashboardResumePending = false;
+    }
 
     internal ServicePortWindow(string serviceName, int? port, string? unavailableReason,
         bool stopped, Func<string, Task> save)
@@ -41,12 +71,15 @@ public partial class ServicePortWindow : Window, IDashboardReplacementWindow
     {
         if (!_editable) { CancelButton.Focus(); return; }
         PortBox.Focus();
-        PortBox.SelectAll();
+        if (_restoredCaretIndex is { } caret) PortBox.CaretIndex = caret;
+        else PortBox.SelectAll();
+        _restoredCaretIndex = null;
     }
 
     private async void SaveClick(object sender, RoutedEventArgs e)
     {
         if (_saving || !_editable) return;
+        if (_saved) { Close(); return; }
         try
         {
             var portText = PortBox.Text.Trim();
@@ -56,6 +89,7 @@ public partial class ServicePortWindow : Window, IDashboardReplacementWindow
             if (port.ToString(CultureInfo.InvariantCulture) == _initialPort)
             {
                 _saved = true;
+                ClearDashboardResume();
                 DialogResult = true;
                 return;
             }
@@ -66,18 +100,21 @@ public partial class ServicePortWindow : Window, IDashboardReplacementWindow
             SetStatus("Saving port…");
             await _save(portText);
             _saved = true;
+            ClearDashboardResume();
             DialogResult = true;
         }
         catch (InvalidOperationException ex) { SetStatus(ex.Message, error: true); }
-        catch (Exception) { SetStatus("The port could not be saved. Your draft is retained; check settings access and retry.", error: true); }
+        catch (Exception) { SetStatus(_saved
+            ? "Port saved, but its old draft checkpoint could not be cleared. Retry closing to finish recovery cleanup."
+            : "The port could not be saved. Your draft is retained; check settings access and retry.", error: true); }
         finally
         {
             _saving = false;
             if (!_closed)
             {
-                SaveButton.IsEnabled = _editable;
+                SaveButton.IsEnabled = _editable && !_saved;
                 CancelButton.IsEnabled = true;
-                PortBox.IsEnabled = _editable;
+                PortBox.IsEnabled = _editable && !_saved;
                 PortBox.Focus();
             }
         }
@@ -102,12 +139,22 @@ public partial class ServicePortWindow : Window, IDashboardReplacementWindow
     private void OnClosing(object? sender, CancelEventArgs e)
     {
         if (_saving && !_saved) { e.Cancel = true; return; }
-        if (!_saved && PortBox.Text.Trim() != _initialPort && MessageBox.Show(this,
+        if (!_dashboardResumeClose && !_saved && PortBox.Text.Trim() != _initialPort && MessageBox.Show(this,
                 "Discard unsaved port changes?", "Change port", MessageBoxButton.YesNo,
                 MessageBoxImage.Question, MessageBoxResult.No) != MessageBoxResult.Yes)
         {
             e.Cancel = true;
             return;
+        }
+        if (!_dashboardResumeClose)
+        {
+            try { ClearDashboardResume(); }
+            catch (Exception)
+            {
+                e.Cancel = true;
+                SetStatus("The old port draft checkpoint could not be cleared. The editor remains open; retry closing after checking local storage access.", error: true);
+                return;
+            }
         }
         _closed = true;
     }

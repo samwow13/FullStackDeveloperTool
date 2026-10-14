@@ -11,8 +11,8 @@ namespace FullStackLauncher.Services;
 /// </summary>
 public sealed class CodexActivityProjectReceiptReader
 {
-    // Match the chat store's bounded version-3 envelope: 24 MB of images plus
-    // escaped browser evidence. Large attachments do not change identity trust.
+    // Match the chat store's bounded version-5 envelope: 24 MB of images plus
+    // escaped browser/capture evidence. Attachments do not change identity trust.
     private const int MaximumChatReceiptBytes = 64_000_000;
     private const int MaximumTaskFileBytes = 64 * 1024 * 1024;
     private const int MaximumChatFiles = 4096;
@@ -150,7 +150,7 @@ public sealed class CodexActivityProjectReceiptReader
     private static ReceiptIdentity[] ReadChatReceipt(JsonElement root, string attemptId)
     {
         RequireUniqueProperties(root);
-        if (Required(root, "version", JsonValueKind.Number).GetInt32() is not (1 or 2 or 3) ||
+        if (Required(root, "version", JsonValueKind.Number).GetInt32() is not (1 or 2 or 3 or 4 or 5) ||
             Required(root, "attemptId", JsonValueKind.String).GetString() != attemptId) throw new InvalidDataException();
         var request = Required(root, "request", JsonValueKind.Object);
         RequireUniqueProperties(request);

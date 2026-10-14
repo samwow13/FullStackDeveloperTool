@@ -17,7 +17,7 @@ namespace FullStackLauncher.ProjectTasks;
 /// saved queue alone: the coordinator first persists crash recovery, then
 /// accepts explicit commands and dispatches only queues already enabled.
 /// </summary>
-internal sealed class QueueOwnerHost : IDisposable
+internal sealed partial class QueueOwnerHost : IDisposable
 {
     private const uint Continuous = 0x80000000;
     private const uint SystemRequired = 0x00000001;
@@ -185,8 +185,12 @@ internal sealed class QueueOwnerHost : IDisposable
                 {
                     var request = JsonSerializer.Deserialize<QueueOwnerRequest>(line, JsonOptions)
                         ?? throw new ArgumentException("The queue command is empty.");
+                    using var handoffPeer = request.Command?.StartsWith("handoff-", StringComparison.Ordinal) == true
+                        ? DashboardReplacementPeer.VerifyAndPin(pipe.SafePipeHandle,
+                            request.DashboardProcessId, request.DashboardProcessStartedAtUtcTicks) : null;
                     reply = await ApplyCommandAsync(request, cancellationToken);
                 }
+                catch (IOException ex) { reply = new(false, ex.Message); }
                 catch (Exception ex) when (ex is ArgumentException or JsonException)
                 {
                     reply = new(false, "The queue command was invalid.");
@@ -211,7 +215,14 @@ internal sealed class QueueOwnerHost : IDisposable
         await _commandGate.WaitAsync(cancellationToken);
         try
         {
-            BindDashboard(request.DashboardProcessId, request.DashboardProcessStartedAtUtcTicks);
+            if (request.Command?.StartsWith("handoff-", StringComparison.Ordinal) == true)
+            {
+                var handoff = ApplyDashboardHandoff(request);
+                if (request.Command == "handoff-prepare" && handoff.Success)
+                    await _coordinator.DrainDispatchForDashboardHandoffAsync(cancellationToken);
+                return handoff;
+            }
+            BindDashboardForRequest(request);
             switch (request.Command)
             {
                 case "shutdown":
@@ -327,6 +338,7 @@ internal sealed class QueueOwnerHost : IDisposable
     {
         lock (_dashboardSync)
         {
+            if (_dashboardHandoff != null) return false; // Active turns continue; new dispatch waits for verified startup.
             if (_dashboardProcessId is null || _dashboardExitConfirmed || _dashboard is null) return false;
             try { return !_dashboard.HasExited; }
             catch (Exception ex) when (ex is InvalidOperationException or System.ComponentModel.Win32Exception)
@@ -341,10 +353,10 @@ internal sealed class QueueOwnerHost : IDisposable
         while (!cancellationToken.IsCancellationRequested)
         {
             await Task.Delay(TimeSpan.FromSeconds(_dashboardStopFailed ? 30 : 3), cancellationToken);
-            if (!DashboardHasExited()) continue;
             await _commandGate.WaitAsync(cancellationToken);
             try
             {
+                if (ReconcileDashboardHandoff()) continue;
                 if (!DashboardHasExited()) continue; // A replacement may have adopted this owner.
                 await _coordinator.ShutdownAsync(cancellationToken);
                 _lifetime.Cancel();
@@ -457,7 +469,7 @@ internal sealed class QueueOwnerHost : IDisposable
         _statusTimer.Stop();
         if (_awake) SetThreadExecutionState(Continuous);
         _tray?.Dispose();
-        lock (_dashboardSync) _dashboard?.Dispose();
+        lock (_dashboardSync) { _dashboard?.Dispose(); _dashboardHandoff?.Dispose(); }
         _commandGate.Dispose();
         _lifetime.Dispose();
         if (_instance != null)

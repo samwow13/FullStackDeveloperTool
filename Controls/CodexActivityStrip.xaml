@@ -256,8 +256,18 @@
                 </ControlTemplate>
             </Setter.Value></Setter>
         </Style>
-        <Style x:Key="CrewForceClearMenuItem" TargetType="MenuItem" BasedOn="{StaticResource CrewViewMenuItem}">
-            <Setter Property="Foreground" Value="#F0D6A5"/>
+        <Style x:Key="CrewClearButton" TargetType="Button" BasedOn="{StaticResource {x:Type Button}}">
+            <Setter Property="Width" Value="26"/>
+            <Setter Property="Height" Value="24"/>
+            <Setter Property="Padding" Value="0"/>
+            <Setter Property="FontFamily" Value="Segoe UI Emoji"/>
+            <Setter Property="FontSize" Value="16"/>
+            <Setter Property="FontWeight" Value="Normal"/>
+            <Setter Property="Foreground" Value="#FFD166"/>
+            <Setter Property="Background" Value="{StaticResource BackgroundBrush}"/>
+            <Setter Property="BorderBrush" Value="#42546B"/>
+            <Setter Property="VerticalAlignment" Value="Center"/>
+            <Setter Property="ToolTipService.ShowOnDisabled" Value="True"/>
         </Style>
         <Style x:Key="CrewViewMenu" TargetType="ContextMenu">
             <Setter Property="Foreground" Value="{StaticResource TextBrush}"/>
@@ -486,10 +496,23 @@
                     ToolTip="{Binding MuteAllDescription, ElementName=Crew}"
                     ToolTipService.ShowOnDisabled="True"/>
         </StackPanel>
-        <Border Grid.Column="1" Background="{StaticResource BackgroundBrush}" BorderBrush="#42546B" BorderThickness="1" CornerRadius="5"
-                Padding="8,2" Margin="12,0,0,0" HorizontalAlignment="Right" VerticalAlignment="Center">
-            <controls:CodexAccountUsageView Snapshot="{Binding AccountUsage, ElementName=Crew}"/>
-        </Border>
+        <StackPanel Grid.Column="1" Orientation="Horizontal" Background="{StaticResource BackgroundBrush}"
+                    Margin="12,0,0,0" HorizontalAlignment="Right" VerticalAlignment="Center">
+            <Button x:Name="ClearAllButton" Style="{StaticResource CrewClearButton}" Content="👋"
+                    Click="Clear_Click" IsEnabled="{Binding CanClear, ElementName=Crew}"
+                    AutomationProperties.Name="Clear all finished chats"
+                    ToolTip="Clear all finished or interrupted chats from this view. Active chats stay visible. Chat and queue history are preserved."/>
+            <Button x:Name="ForceClearAllButton" Style="{StaticResource CrewClearButton}" Content="👋" Margin="4,0,0,0"
+                    Foreground="#FF6B6B" BorderBrush="#854848" Background="#271B21"
+                    Click="ForceClear_Click" IsEnabled="{Binding CanForceClear, ElementName=Crew}"
+                    AutomationProperties.Name="Force Clear all"
+                    AutomationProperties.HelpText="{Binding ActivityDetail, ElementName=Crew}"
+                    ToolTip="Force Clear all tracked chats across projects, including running or waiting entries. Old turns stay hidden across launcher restarts; new chats and turns can appear. Codex tasks keep running, and chat and queue history are preserved."/>
+            <Border Background="{StaticResource BackgroundBrush}" BorderBrush="#42546B" BorderThickness="1" CornerRadius="5"
+                    Padding="8,2" Margin="6,0,0,0" VerticalAlignment="Center">
+                <controls:CodexAccountUsageView Snapshot="{Binding AccountUsage, ElementName=Crew}"/>
+            </Border>
+        </StackPanel>
         <Button x:Name="SettingsButton" Grid.Column="2" Content="&#xE713;" FontFamily="Segoe MDL2 Assets"
                 DataContext="{Binding ElementName=Crew}" Click="Settings_Click" PreviewKeyDown="Settings_PreviewKeyDown"
                 Width="28" Height="24" Padding="0" FontSize="13" Margin="6,0,0,0" VerticalAlignment="Center"
@@ -501,6 +524,11 @@
                              Opened="SettingsMenu_Opened" Closed="SettingsMenu_Closed" PreviewKeyDown="SettingsMenu_PreviewKeyDown">
                     <MenuItem x:Name="WatcherMenuItem" Header="Codex Watcher" Click="Watcher_Click" Style="{StaticResource CrewViewMenuItem}"
                               AutomationProperties.Name="Open Codex Watcher" ToolTip="Open Codex watcher, alerts, and watched-project settings."/>
+                    <MenuItem Header="Unsent replies" Style="{StaticResource CrewViewMenuItem}"
+                              Visibility="{Binding HasSavedReplyDrafts, Converter={StaticResource BoolToVisibility}}"
+                              SubmenuOpened="ReplyDraftsMenu_Opened">
+                        <MenuItem Header="Saved replies" IsEnabled="False" Style="{StaticResource CrewViewMenuItem}"/>
+                    </MenuItem>
                     <MenuItem x:Name="ViewOptionsItem" Header="View" Style="{StaticResource CrewViewMenuItem}"
                               AutomationProperties.Name="View, choose chats visible at once" AutomationProperties.HelpText="{Binding ViewDescription}"
                               ToolTip="{Binding ViewDescription}">
@@ -514,16 +542,6 @@
                     <Separator/>
                     <MenuItem x:Name="KeepAwakeAgentsItem" Header="Keep awake agents" Style="{StaticResource CrewViewMenuItem}"
                               ToolTip="Switch off continuation for enabled agents, including chats hidden with Wave or Clear."
-                              ToolTipService.ShowOnDisabled="True"/>
-                    <Separator/>
-                    <MenuItem Header="Clear" Click="Clear_Click" IsEnabled="{Binding CanClear}" Style="{StaticResource CrewViewMenuItem}"
-                              AutomationProperties.Name="Clear recent finished chats"
-                              ToolTip="Dismiss recent finished or interrupted chat families from this view. Active chats and their subagents stay visible. Chats and queue history are preserved."
-                              ToolTipService.ShowOnDisabled="True"/>
-                    <MenuItem Header="Force Clear" Click="ForceClear_Click" IsEnabled="{Binding CanForceClear}" Style="{StaticResource CrewForceClearMenuItem}"
-                              AutomationProperties.Name="Force clear all tracked chats and watch for new work"
-                              AutomationProperties.HelpText="{Binding ActivityDetail}"
-                              ToolTip="Reset this view, including entries marked running or waiting. Old turns stay hidden across launcher restarts; new chats and new turns can appear. This does not stop Codex tasks or change queues."
                               ToolTipService.ShowOnDisabled="True"/>
                     <Separator/>
                     <MenuItem x:Name="BubbleEnabledItem" Header="Automatic thought bubbles" IsCheckable="True" StaysOpenOnClick="True"

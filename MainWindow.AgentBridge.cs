@@ -102,8 +102,24 @@ public partial class MainWindow
     {
         if (_closing || _closed || _closeRequested)
             return AgentBridgeResponse.Failure("Launcher dashboard is closing. Reconnect after it opens again.");
+        if (request.Action == "dashboard_handoff_capabilities")
+        {
+            // Read-only negotiation, before activity subscriptions or close work.
+            using var source = System.Diagnostics.Process.GetCurrentProcess();
+            return AgentBridgeResponse.Success(new
+            {
+                version = 1,
+                sourceProcessId = source.Id,
+                sourceProcessStartedAtUtcTicks = source.StartTime.ToUniversalTime().Ticks,
+                queueHandoffProtocol = ProjectTasks.QueueOwnerClient.ProtocolVersion,
+                autosaveAndResume = true,
+                preservesQueueAndLoopIntent = true,
+                taskStoreIdentity = ProjectTasks.QueueOwnerClient.IdentityFor(new ProjectTasks.ProjectTaskStore().StorePath)
+            });
+        }
         if (request.Action == "replace_dashboard")
-            return await CloseDashboardAsync(automaticReplacement: true, cancellationToken)
+            return await CloseDashboardAsync(automaticReplacement: true, cancellationToken,
+                request.ReplacementProcessId, request.ReplacementProcessStartedAtUtcTicks)
                 ? AgentBridgeResponse.Success(new { status = "closed" })
                 : AgentBridgeResponse.Failure(Notice);
         SubscribeAgentActivity();

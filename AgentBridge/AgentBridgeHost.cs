@@ -1,4 +1,5 @@
 using System.IO;
+using System.Diagnostics;
 using System.IO.Pipes;
 using System.Text;
 using System.Text.Json;
@@ -67,6 +68,19 @@ internal sealed class AgentBridgeHost : IDisposable
                 else
                 {
                     var request = JsonSerializer.Deserialize<AgentBridgeRequest>(line, AgentBridgeProtocol.Json);
+                    Process? replacementPeer = null;
+                    try
+                    {
+                        if (request?.Action == "replace_dashboard")
+                            replacementPeer = Services.DashboardReplacementPeer.VerifyAndPin(pipe.SafePipeHandle,
+                                request.ReplacementProcessId, request.ReplacementProcessStartedAtUtcTicks);
+                    }
+                    catch (IOException ex)
+                    {
+                        await writer.WriteLineAsync(JsonSerializer.Serialize(AgentBridgeResponse.Failure(ex.Message), AgentBridgeProtocol.Json));
+                        return;
+                    }
+                    using var replacement = replacementPeer;
                     if (request?.Action == "replace_dashboard")
                     {
                         // Cancel before the replacement client's overall startup deadline,

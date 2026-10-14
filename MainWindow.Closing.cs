@@ -19,11 +19,17 @@ public partial class MainWindow
     }
 
     private async Task<bool> CloseDashboardAsync(bool automaticReplacement,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default,
+        int? replacementProcessId = null, long? replacementProcessStartedAtUtcTicks = null)
     {
         if (_closed) return true;
         if (_closeRequested || _closing) return false;
         cancellationToken.ThrowIfCancellationRequested();
+        if (!automaticReplacement && _queueHandoffRetryBusy)
+        {
+            Notice = "Notes queue handoff recovery is in progress. Close the launcher again when it finishes.";
+            return false;
+        }
         if (!automaticReplacement && _resettingCodex)
         {
             Notice = "Codex reset is in progress. Close the launcher again when it finishes.";
@@ -48,6 +54,8 @@ public partial class MainWindow
         ServiceRunner[] runners = [];
         var closeFailed = false;
         var interactionSuspended = false;
+        ProjectTasks.QueueOwnerClient.QueueOwnerDashboardHandoff? queueHandoff = null;
+        var queueRollbackConfirmed = true;
         UpdateActions();
         try
         {
@@ -63,11 +71,11 @@ public partial class MainWindow
             }
             _resolvingCloseDrafts = true;
             UpdateActions();
-            try { if (!await ResolveProjectEditsForCloseAsync()) return false; }
+            try { if (!await ResolveProjectEditsForCloseAsync(automaticReplacement)) return false; }
             finally { _resolvingCloseDrafts = false; UpdateActions(); }
-            if (_projectTasksWindow?.PrepareToClose() == false) return false;
-            if (!CodexCrewPanel.PrepareReplyDraftsForClose()) return false;
-            if (!PrepareStartAgentDraftsForClose()) return false;
+            if (_projectTasksWindow?.PrepareToClose(automaticReplacement) == false) return false;
+            if (!CodexCrewPanel.PrepareReplyDraftsForClose(automaticReplacement)) return false;
+            if (!PrepareStartAgentDraftsForClose(automaticReplacement)) return false;
             cancellationToken.ThrowIfCancellationRequested();
             // Inspect idle services across every project. Busy services remain in
             // the choice without waiting for a potentially long maintenance command.
@@ -101,6 +109,7 @@ public partial class MainWindow
                 closeWatcher = choice == MessageBoxResult.Yes;
             }
             cancellationToken.ThrowIfCancellationRequested();
+            if (!automaticReplacement) _dashboardResumeStore.Remove(DashboardResumeSection);
             _closing = true;
             IsEnabled = false;
             if (_projectTasksWindow != null) _projectTasksWindow.IsEnabled = false;
@@ -110,8 +119,20 @@ public partial class MainWindow
             await Dispatcher.Yield(DispatcherPriority.Background);
             // Prevent a late queue request from starting work during close cleanup.
             _queueDashboardPermit?.SetEnabled(false);
-            Notice = "Stopping queued tasks and clearing queues…";
-            await ProjectTasks.QueueOwnerClient.ShutdownForDashboardAsync(cancellationToken);
+            if (automaticReplacement)
+            {
+                Notice = "Keeping Notes queue work for the replacement Launcher…";
+                if (_projectTasksWindow != null)
+                    await _projectTasksWindow.SuspendOwnerPollingForReplacementAsync(cancellationToken);
+                queueHandoff = ProjectTasks.QueueOwnerClient.CreateDashboardHandoff(
+                    replacementProcessId, replacementProcessStartedAtUtcTicks);
+                await queueHandoff.PrepareAsync(cancellationToken);
+            }
+            else
+            {
+                Notice = "Stopping Notes queues…";
+                await ProjectTasks.QueueOwnerClient.ShutdownForDashboardAsync(cancellationToken);
+            }
             await StopGitConnectionWarmupAsync();
             await StopDashboardGitComparisonAsync();
             if (closeWatcher)
@@ -140,6 +161,8 @@ public partial class MainWindow
                 if (failures.Length > 0)
                     throw new InvalidOperationException(string.Join(Environment.NewLine,
                         failures.Select(item => $"{item.Service.Name}: {item.Service.Runner.Snapshot.Detail}")));
+                await StopCodexAccountUsageAsync();
+                cancellationToken.ThrowIfCancellationRequested();
                 await Task.Run(() => { foreach (var runner in runners) runner.Dispose(); });
             }
             else
@@ -147,13 +170,25 @@ public partial class MainWindow
                 // Prepare every run before releasing any ownership handles. Failure
                 // keeps the dashboard open with its service controls available.
                 await Task.WhenAll(runners.Select(runner => runner.PrepareKeepRunningAsync()));
+                // Finish fallible async cleanup while every service handle is still
+                // retained. A failed transfer can then restore the original dashboard.
+                await StopCodexAccountUsageAsync();
                 // A timed-out replacement must retain dashboard ownership rather than
                 // detaching services after the new process has already given up.
                 cancellationToken.ThrowIfCancellationRequested();
-                await Task.Run(() => { foreach (var runner in runners) runner.DisposeKeepingServicesRunning(); });
+                if (queueHandoff != null) await queueHandoff.TransferAsync(cancellationToken);
+                await Task.Run(() =>
+                {
+                    // This is the commit boundary. Check cancellation and target
+                    // identity before releasing the first native ownership handle.
+                    cancellationToken.ThrowIfCancellationRequested();
+                    using var replacementPeer = automaticReplacement
+                        ? DashboardReplacementPeer.Pin(replacementProcessId!.Value, replacementProcessStartedAtUtcTicks!.Value) : null;
+                    foreach (var runner in runners) runner.DisposeKeepingServicesRunning();
+                });
             }
-            // Finish owned account-reader cleanup before OnMainWindowClose can terminate the process.
-            await StopCodexAccountUsageAsync();
+            // No awaited cleanup, cancellation or replacement validation may run
+            // after native service ownership has been irreversibly released.
             _closed = true;
             CodexCrewPanel.DiscardReplyDraftsAfterClose();
             _startAgentDrafts.Clear();
@@ -176,6 +211,18 @@ public partial class MainWindow
         {
             if (!_closed)
             {
+                if (queueHandoff != null)
+                {
+                    try { await queueHandoff.RollbackAsync(); }
+                    catch (Exception ex)
+                    {
+                        queueRollbackConfirmed = false;
+                        closeFailed = true;
+                        Notice = $"Queue ownership rollback could not be confirmed. New queue dispatch remains paused; existing work was preserved. {SensitiveDataProtection.Redact(ex.Message)}";
+                    }
+                    if (!queueHandoff.SourceOwnershipConfirmed) queueRollbackConfirmed = false;
+                    if (!queueRollbackConfirmed) SetQueueHandoffFailure(true);
+                }
                 if (interactionSuspended)
                 {
                     IsEnabled = true;
@@ -188,12 +235,20 @@ public partial class MainWindow
                 foreach (var service in _runners.Values.SelectMany(project => project)) service.Update();
                 _closing = false;
                 _closeRequested = false;
+                try { await RestartCodexAccountUsageAfterCanceledCloseAsync(); }
+                catch (Exception ex)
+                {
+                    closeFailed = true;
+                    Notice = $"Account usage refresh could not resume after canceled close: {SensitiveDataProtection.Redact(ex.Message)}";
+                }
+                _projectTasksWindow?.CancelReplacementPreparation();
+                CodexCrewPanel.CancelReplyReplacementPreparation();
                 PresentNextCommit();
                 if (resumeStatus) _timer.Start();
                 if (resumeConsole) _consoleTimer.Start();
                 if (resumeGitComparison) _dashboardGitTimer.Start();
                 _projectGitService.StartBackgroundRefresh();
-                if (LongRunningTaskEnabled)
+                if (CanResumeQueueDispatch && queueRollbackConfirmed)
                 {
                     try { _queueDashboardPermit?.SetEnabled(true); }
                     catch (InvalidOperationException ex) { closeFailed = true; Notice = ex.Message; }

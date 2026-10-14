@@ -12,9 +12,21 @@ namespace FullStackLauncher.Controls;
 public partial class CodexStartAgentWindow : Window, IDashboardReplacementWindow
 {
     private bool _replacementClosePending;
+    private bool _dashboardResumeClose;
+    private Action? _saveDashboardResume;
+    private string? _resumeModelId;
+    private string? _resumeReasoningEffort;
+    private CodexAgentAccessMode? _resumeAccessMode;
+    private bool _resumeContextConflict;
+    private int? _resumeCaretIndex;
+    private double _resumePromptScrollOffset;
     public bool IsDashboardReplacementReady => !IsSubmitting && !_savingContext && !_checkingStatus &&
-        !_closingContext && !_pastingImage && !_loadingAccess && !_changingContextGatherer && !_receivingContextGathererDraft;
+        !_closingContext && !_pastingImage && !_loadingAccess && !_changingContextGatherer && !_receivingContextGathererDraft &&
+        !_changingDictation && !_closingDictation;
     public bool IsDashboardReplacementClosePending => _replacementClosePending;
+    internal string ProjectId => _projectId;
+    internal string ProjectFolder => _folder;
+    internal bool WasClosedForDashboardReplacement => _dashboardResumeClose;
 
     private readonly string _projectId;
     private readonly string _projectName;
@@ -37,14 +49,23 @@ public partial class CodexStartAgentWindow : Window, IDashboardReplacementWindow
     private bool _loadingAccess;
     private bool _accessAvailable;
     private bool _showingFrozenAccess;
+    private bool _updatingSpeedChoices;
     private CodexAgentChatReceipt? _pendingReceipt;
     private string? _previousAttemptId;
     private ComposerDraft? _composerDraft;
+
+    private bool CanChooseAgentSettings => !IsSubmitting && !_checkingStatus && !_savingContext && !_pastingImage &&
+        !_changingContextGatherer && !_receivingContextGathererDraft && PendingAttemptId is null &&
+        _composerDraft is null && !_loadingModels && !_loadingAccess && !IsDictating;
 
     // Submitted messages are immutable receipts, not unsent drafts for the next chat.
     public string Draft => _composerDraft?.Text ?? (PendingAttemptId is null ? PromptBox.Text : "");
     public bool DraftKeepAwake => _composerDraft?.KeepAwake ??
         (PendingAttemptId is null && KeepAwakeChoice.IsChecked == true);
+    public bool DraftUltraFastEnabled => _composerDraft?.UltraFastEnabled ??
+        (PendingAttemptId is null && UltraFastChoice.IsChecked == true);
+    public bool DraftFastEnabled => _composerDraft?.FastEnabled ??
+        (PendingAttemptId is null && FastChoice.IsChecked == true);
     public IReadOnlyList<CodexAgentChatImage> UnsentDraftImages => _composerDraft?.Images ??
         (PendingAttemptId is null ? DraftImages : []);
     public string? RecoveryAttemptId => PendingAttemptId ?? _previousAttemptId;
@@ -57,7 +78,8 @@ public partial class CodexStartAgentWindow : Window, IDashboardReplacementWindow
 
     public CodexStartAgentWindow(string projectId, string projectName, string folder, string draft = "",
         string? pendingAttemptId = null, IReadOnlyList<CodexAgentChatImage>? draftImages = null,
-        bool keepAwake = false, bool inspectSubmission = false)
+        bool keepAwake = false, bool inspectSubmission = false,
+        bool? draftUltraFastEnabled = null, bool? draftFastEnabled = null)
     {
         FullStackLauncher.Services.WindowTheme.Attach(this);
         _projectId = projectId;
@@ -66,6 +88,9 @@ public partial class CodexStartAgentWindow : Window, IDashboardReplacementWindow
         _previousAttemptId = pendingAttemptId;
         InitializeComponent();
         InitializeContentSizing();
+        LocationChanged += (_, _) => SettingsPopup.IsOpen = false;
+        SizeChanged += (_, _) => SettingsPopup.IsOpen = false;
+        Deactivated += (_, _) => SettingsPopup.IsOpen = false;
         ProjectTitle.Text = projectName;
         ProjectTitle.ToolTip = folder;
         PromptBox.Text = draft;
@@ -88,12 +113,15 @@ public partial class CodexStartAgentWindow : Window, IDashboardReplacementWindow
             ShowStatus("Saved agent preferences could not be loaded. Your message is kept. " +
                 SensitiveDataProtection.Redact(ex.Message), error: true);
         }
+        UltraFastChoice.IsChecked = draftUltraFastEnabled ?? _preferences?.UltraFastEnabled ?? false;
+        FastChoice.IsChecked = draftFastEnabled ?? _preferences?.FastEnabled ?? false;
         _initializing = false;
         UpdateControls();
         Loaded += async (_, _) =>
         {
             PromptBox.Focus();
             PromptBox.CaretIndex = PromptBox.Text.Length;
+            RestoreDashboardResumeCursor();
             // Ordinary Start Agent opens a composer. Explicit submission review uses
             // the same recovery path, preserving the unsent composer separately.
             if (!_closed && _preferencesAvailable)
@@ -103,12 +131,19 @@ public partial class CodexStartAgentWindow : Window, IDashboardReplacementWindow
             }
             if (!_closed && inspectSubmission && pendingAttemptId is not null)
                 await InspectSubmissionAsync(pendingAttemptId);
+            if (!_closed && _resumeContextConflict)
+                ShowStatus("Saved project context changed while Launcher restarted. Your restored text is kept; reopen the composer before saving project context.", error: true);
+            if (!_closed && _dashboardResumeGatherer is not null && PendingAttemptId is null && _composerDraft is null)
+                await OpenContextGathererAsync();
         };
         Closed += (_, _) =>
         {
             _closed = true;
+            ReleaseDictationOnClose();
+            SettingsPopup.IsOpen = false;
             _lifetime.Cancel();
             _ = StopContextGathererAsync();
+            ForgetLastCaptureSource();
             _lifetime.Dispose();
         };
     }
@@ -117,8 +152,8 @@ public partial class CodexStartAgentWindow : Window, IDashboardReplacementWindow
     {
         if (_loadingModels || IsSubmitting || PendingAttemptId is not null || _composerDraft is not null) return;
         _loadingModels = true;
-        var wantedModel = (ModelChoice.SelectedItem as CodexModelOption)?.Id ?? _preferences?.ModelId ?? "";
-        var wantedEffort = (EffortChoice.SelectedItem as CodexReasoningEffortOption)?.Id ?? _preferences?.ReasoningEffort ?? "";
+        var wantedModel = (ModelChoice.SelectedItem as CodexModelOption)?.Id ?? _resumeModelId ?? _preferences?.ModelId ?? "";
+        var wantedEffort = (EffortChoice.SelectedItem as CodexReasoningEffortOption)?.Id ?? _resumeReasoningEffort ?? _preferences?.ReasoningEffort ?? "";
         ShowStatus("Loading Codex models…");
         UpdateControls();
         try
@@ -134,6 +169,11 @@ public partial class CodexStartAgentWindow : Window, IDashboardReplacementWindow
                     selected = models.FirstOrDefault(model => model.IsDefault) ?? models.FirstOrDefault();
                 ModelChoice.SelectedItem = selected;
                 SetEfforts(selected, wantedEffort);
+                if (selected is not null)
+                {
+                    _resumeModelId = null;
+                    _resumeReasoningEffort = null;
+                }
                 if (selected is null)
                     ShowStatus("Saved model is unavailable. Choose an available model.");
                 else
@@ -173,6 +213,21 @@ public partial class CodexStartAgentWindow : Window, IDashboardReplacementWindow
         if (!_initializing) UpdateControls();
     }
 
+    private void Speed_Changed(object sender, RoutedEventArgs e)
+    {
+        if (_initializing || _updatingSpeedChoices) return;
+        _updatingSpeedChoices = true;
+        try
+        {
+            if (ReferenceEquals(sender, UltraFastChoice) && UltraFastChoice.IsChecked == true)
+                FastChoice.IsChecked = false;
+            else if (ReferenceEquals(sender, FastChoice) && FastChoice.IsChecked == true)
+                UltraFastChoice.IsChecked = false;
+        }
+        finally { _updatingSpeedChoices = false; }
+        UpdateControls();
+    }
+
     private sealed record AgentAccessOption(CodexAgentAccessMode Mode, string Label);
 
     private async Task LoadAccessAsync()
@@ -182,7 +237,7 @@ public partial class CodexStartAgentWindow : Window, IDashboardReplacementWindow
         UpdateControls();
         try
         {
-            var mode = _preferences?.AccessMode ??
+            var mode = _resumeAccessMode ?? _preferences?.AccessMode ??
                 await CodexAgentAccessPolicy.LoadConfiguredDefaultAsync(_folder, _lifetime.Token);
             if (_closed) return;
             AccessChoice.SelectedItem = AccessChoice.Items.OfType<AgentAccessOption>().First(option => option.Mode == mode);
@@ -191,7 +246,7 @@ public partial class CodexStartAgentWindow : Window, IDashboardReplacementWindow
         catch (OperationCanceledException) when (_closed) { }
         catch (Exception ex)
         {
-            if (!_closed) ShowStatus("Agent access could not be loaded. Refresh to retry. " +
+            if (!_closed) ShowStatus("Agent access could not be loaded. Use Agent settings > Retry loading choices. " +
                 SensitiveDataProtection.Redact(ex.Message), error: true);
         }
         finally
@@ -224,30 +279,48 @@ public partial class CodexStartAgentWindow : Window, IDashboardReplacementWindow
     {
         if (_initializing) return;
         var locked = IsSubmitting || _checkingStatus || _savingContext || _pastingImage ||
-            _changingContextGatherer || _receivingContextGathererDraft ||
+            _changingContextGatherer || _receivingContextGathererDraft || _closingDictation ||
             PendingAttemptId is not null || _composerDraft is not null;
-        var canChoose = !locked && !_loadingModels && !_loadingAccess;
+        var canChoose = CanChooseAgentSettings;
         ModelChoice.IsEnabled = canChoose;
         EffortChoice.IsEnabled = canChoose;
+        var model = ModelChoice.SelectedItem as CodexModelOption;
+        var ultraFast = UltraFastChoice.IsChecked == true;
+        var fast = FastChoice.IsChecked == true;
+        UltraFastChoice.Visibility = model?.SupportsUltraFast == true || ultraFast ? Visibility.Visible : Visibility.Collapsed;
+        FastChoice.Visibility = model?.SupportsFast == true || fast ? Visibility.Visible : Visibility.Collapsed;
+        UltraFastChoice.IsEnabled = canChoose && (model?.SupportsUltraFast == true || ultraFast);
+        FastChoice.IsEnabled = canChoose && (model?.SupportsFast == true || fast);
+        UltraFastChoice.ToolTip = ultraFast && model?.SupportsUltraFast != true && !locked
+            ? "Ultrafast is unavailable for this model/account. Turn it off or choose a supported model."
+            : $"Ultrafast: {(ultraFast ? "On" : "Off")}";
+        FastChoice.ToolTip = fast && model?.SupportsFast != true && !locked
+            ? "Fast is unavailable for this model/account. Turn it off or choose a supported model."
+            : $"Fast: {(fast ? "On" : "Off")}";
         AccessChoice.IsEnabled = canChoose && _accessAvailable;
         KeepAwakeChoice.IsEnabled = !locked;
         EffortChoice.ToolTip = (EffortChoice.SelectedItem as CodexReasoningEffortOption)?.Description;
-        RefreshButton.IsEnabled = canChoose;
+        RetryChoicesButton.IsEnabled = canChoose;
+        RetryChoicesButton.Visibility = canChoose && (!_preferencesAvailable || !_accessAvailable ||
+            ModelChoice.Items.Count == 0 || EffortChoice.Items.Count == 0) ? Visibility.Visible : Visibility.Collapsed;
+        SettingsButton.IsEnabled = !IsSubmitting && !_closingContext && !_changingContextGatherer && !_receivingContextGathererDraft && !IsDictating;
         PromptBox.IsReadOnly = locked;
-        MessageImages.IsEnabled = !IsSubmitting && !_receivingContextGathererDraft && !_pastingImage;
+        MessageImages.IsEnabled = !IsSubmitting && !_receivingContextGathererDraft && !_pastingImage && !IsDictating;
         MessageImages.Tag = !locked;
         ContextBox.IsReadOnly = locked || !_preferencesAvailable;
-        SaveContextButton.IsEnabled = !locked && _preferencesAvailable && HasUnsavedContext;
+        SaveContextButton.IsEnabled = !locked && !IsDictating && _preferencesAvailable && HasUnsavedContext;
         ContextStatus.Text = HasUnsavedContext ? "Unsaved context" :
             string.IsNullOrWhiteSpace(ContextBox.Text) ? "" : "Saved for this project";
         CloseButton.IsEnabled = !IsSubmitting && !_savingContext && !_checkingStatus && !_closingContext && !_pastingImage && !_loadingAccess &&
-            !_changingContextGatherer && !_receivingContextGathererDraft;
-        StartButton.IsEnabled = !locked && !_loadingModels && !_loadingAccess && _accessAvailable && _preferencesAvailable && _recoveryAvailable &&
+            !_changingContextGatherer && !_receivingContextGathererDraft && !_changingDictation && !_closingDictation;
+        StartButton.IsEnabled = !locked && !IsDictating && !_loadingModels && !_loadingAccess && _accessAvailable && _preferencesAvailable && _recoveryAvailable &&
             ModelChoice.SelectedItem is CodexModelOption && EffortChoice.SelectedItem is CodexReasoningEffortOption &&
             AccessChoice.SelectedItem is AgentAccessOption &&
+            (!ultraFast || model?.SupportsUltraFast == true) && (!fast || model?.SupportsFast == true) &&
+            !(ultraFast && fast) &&
             (!string.IsNullOrWhiteSpace(PromptBox.Text) || _messageImages.Count > 0);
         WaitButton.IsEnabled = StartButton.IsEnabled;
-        WaitButton.Content = _savingWaiting ? "Saving…" : "_Wait";
+        WaitButton.Content = _savingWaiting ? "Saving…" : "_Wait & next";
         StartButton.Content = IsSubmitting && !_savingWaiting ? "Starting…" : "_Start Agent";
         var showingSubmission = PendingAttemptId is not null || _composerDraft is not null;
         Title = showingSubmission ? "Agent submission" : "Start Agent";
@@ -255,24 +328,53 @@ public partial class CodexStartAgentWindow : Window, IDashboardReplacementWindow
         StartButton.Visibility = showingSubmission ? Visibility.Collapsed : Visibility.Visible;
         WaitButton.Visibility = StartButton.Visibility;
         CheckStatusButton.Visibility = PendingAttemptId is not null || !_recoveryAvailable ? Visibility.Visible : Visibility.Collapsed;
-        CheckStatusButton.IsEnabled = !_checkingStatus && !IsSubmitting;
+        CheckStatusButton.IsEnabled = !_checkingStatus && !IsSubmitting && !IsDictating;
         ReviewButton.Visibility = _pendingReceipt?.RequiresReview == true ? Visibility.Visible : Visibility.Collapsed;
-        ReviewButton.IsEnabled = !_checkingStatus && !IsSubmitting;
+        ReviewButton.IsEnabled = !_checkingStatus && !IsSubmitting && !IsDictating;
         NewChatButton.Visibility = PendingAttemptId is not null || _composerDraft is not null
             ? Visibility.Visible : Visibility.Collapsed;
         NewChatButton.IsEnabled = !IsSubmitting && !_checkingStatus && !_savingContext && !_pastingImage &&
-            !_loadingAccess && !_loadingModels && !_closingContext && !_changingContextGatherer && !_receivingContextGathererDraft;
+            !_loadingAccess && !_loadingModels && !_closingContext && !_changingContextGatherer && !_receivingContextGathererDraft && !IsDictating;
         UpdateContextGathererControls();
+        UpdateDictationControls();
     }
 
-    private async void Refresh_Click(object sender, RoutedEventArgs e)
+    private void Settings_Click(object sender, RoutedEventArgs e) => SettingsPopup.IsOpen = !SettingsPopup.IsOpen;
+
+    private void SettingsPopup_Opened(object? sender, EventArgs e)
     {
+        if (AccessChoice.IsEnabled) AccessChoice.Focus();
+        else SettingsPopup.Child.MoveFocus(new TraversalRequest(FocusNavigationDirection.First));
+    }
+
+    private void CloseSettings_Click(object sender, RoutedEventArgs e) => CloseAgentSettings();
+
+    private void CloseAgentSettings()
+    {
+        SettingsPopup.IsOpen = false;
+        SettingsButton.Focus();
+    }
+
+    private void SettingsPopup_PreviewKeyDown(object sender, KeyEventArgs e)
+    {
+        if (e.Key != Key.Escape) return;
+        if (AccessChoice.IsDropDownOpen) AccessChoice.IsDropDownOpen = false;
+        else CloseAgentSettings();
+        e.Handled = true;
+    }
+
+    private async void RetryChoices_Click(object sender, RoutedEventArgs e)
+    {
+        if (!CanChooseAgentSettings) return;
+        CloseAgentSettings();
         if (!_preferencesAvailable)
         {
             try
             {
                 _preferences = _store.Load(_projectId);
                 ContextBox.Text = _preferences.Context;
+                UltraFastChoice.IsChecked = _preferences.UltraFastEnabled;
+                FastChoice.IsChecked = _preferences.FastEnabled;
                 _preferencesAvailable = true;
             }
             catch (Exception ex)
@@ -329,7 +431,7 @@ public partial class CodexStartAgentWindow : Window, IDashboardReplacementWindow
         try
         {
             await StopContextGathererAsync();
-            // Save only the remembered model and access choices here. Context changes require Save context.
+            // Save remembered model, access, and speed choices. Context changes require Save context.
             _preferences = await Task.Run(() => _store.Save(candidate));
             var receipt = await _client.StartAsync(request, _lifetime.Token);
             if (!_closed) ApplyReceipt(receipt);
@@ -354,6 +456,7 @@ public partial class CodexStartAgentWindow : Window, IDashboardReplacementWindow
     {
         request = null!;
         preferences = null!;
+        if (IsDictating) return false;
         if (_preferences is null ||
             ModelChoice.SelectedItem is not CodexModelOption model ||
             EffortChoice.SelectedItem is not CodexReasoningEffortOption effort ||
@@ -366,15 +469,28 @@ public partial class CodexStartAgentWindow : Window, IDashboardReplacementWindow
             return false;
         }
         if (!ValidateContext()) return false;
+        if (UltraFastChoice.IsChecked == true && !model.SupportsUltraFast ||
+            FastChoice.IsChecked == true && !model.SupportsFast ||
+            UltraFastChoice.IsChecked == true && FastChoice.IsChecked == true)
+        {
+            ShowStatus("Choose one available speed setting, or turn both off. Your message is kept.", error: true);
+            return false;
+        }
         // Capture the entire draft before awaiting; every start path uses this same frozen request.
         request = new CodexAgentChatRequest(_projectId, _projectName, _folder, PromptBox.Text,
             ContextBox.Text, model.Id, effort.Id)
         {
             Images = DraftImages,
             AccessMode = access.Mode,
-            KeepAwake = DraftKeepAwake
+            KeepAwake = DraftKeepAwake,
+            UltraFastEnabled = DraftUltraFastEnabled,
+            FastEnabled = DraftFastEnabled
         };
-        preferences = _preferences with { ModelId = model.Id, ReasoningEffort = effort.Id, AccessMode = access.Mode };
+        preferences = _preferences with
+        {
+            ModelId = model.Id, ReasoningEffort = effort.Id, AccessMode = access.Mode,
+            UltraFastEnabled = request.UltraFastEnabled, FastEnabled = request.FastEnabled
+        };
         return true;
     }
 
@@ -384,6 +500,8 @@ public partial class CodexStartAgentWindow : Window, IDashboardReplacementWindow
             throw new InvalidOperationException("The saved submission belongs to another project. Its receipt was preserved.");
         ThreadId = receipt.ThreadId;
         KeepAwakeChoice.IsChecked = receipt.Request.KeepAwake;
+        UltraFastChoice.IsChecked = receipt.Request.UltraFastEnabled;
+        FastChoice.IsChecked = receipt.Request.FastEnabled;
         if (receipt.IsAccepted)
         {
             if (_composerDraft is null) SentSuccessfully = true;
@@ -416,7 +534,8 @@ public partial class CodexStartAgentWindow : Window, IDashboardReplacementWindow
                     // This is the frozen submission choice, not a newly discovered catalog entry.
                     var effort = new CodexReasoningEffortOption(receipt.Request.ReasoningEffort, "Submitted thinking level");
                     var model = new CodexModelOption(receipt.Request.ModelId, receipt.Request.ModelId,
-                        effort.Id, new[] { effort });
+                        effort.Id, new[] { effort }, SupportsUltraFast: receipt.Request.UltraFastEnabled,
+                        FastServiceTier: receipt.Request.FastEnabled ? "priority" : null);
                     ModelChoice.ItemsSource = new[] { model };
                     ModelChoice.SelectedItem = model;
                     SetEfforts(model, effort.Id);
@@ -443,11 +562,11 @@ public partial class CodexStartAgentWindow : Window, IDashboardReplacementWindow
 
     private sealed record ComposerDraft(string Text, IReadOnlyList<CodexAgentChatImage> Images, bool KeepAwake,
         System.Collections.IEnumerable? Models, CodexModelOption? Model, CodexReasoningEffortOption? Effort,
-        AgentAccessOption? Access);
+        AgentAccessOption? Access, bool UltraFastEnabled, bool FastEnabled);
 
     private async Task InspectSubmissionAsync(string attemptId)
     {
-        if (_closed || !RefreshButton.IsEnabled || _closingContext) return;
+        if (_closed || !CanChooseAgentSettings || _closingContext) return;
         _checkingStatus = true;
         UpdateControls();
         try
@@ -464,7 +583,8 @@ public partial class CodexStartAgentWindow : Window, IDashboardReplacementWindow
                 throw new InvalidOperationException("The saved submission belongs to another project. Its receipt was preserved.");
             _composerDraft = new(PromptBox.Text, DraftImages, KeepAwakeChoice.IsChecked == true,
                 ModelChoice.ItemsSource, ModelChoice.SelectedItem as CodexModelOption,
-                EffortChoice.SelectedItem as CodexReasoningEffortOption, AccessChoice.SelectedItem as AgentAccessOption);
+                EffortChoice.SelectedItem as CodexReasoningEffortOption, AccessChoice.SelectedItem as AgentAccessOption,
+                UltraFastChoice.IsChecked == true, FastChoice.IsChecked == true);
             _previousAttemptId = receipt.AttemptId;
             PromptBox.Clear();
             ModelChoice.ItemsSource = null;
@@ -499,6 +619,8 @@ public partial class CodexStartAgentWindow : Window, IDashboardReplacementWindow
         PromptBox.Text = draft?.Text ?? "";
         RestoreMessageImages(draft?.Images ?? []);
         KeepAwakeChoice.IsChecked = draft?.KeepAwake == true;
+        UltraFastChoice.IsChecked = draft?.UltraFastEnabled ?? _preferences?.UltraFastEnabled ?? false;
+        FastChoice.IsChecked = draft?.FastEnabled ?? _preferences?.FastEnabled ?? false;
         if (draft is not null)
         {
             _restoringModels = true;
@@ -636,9 +758,10 @@ public partial class CodexStartAgentWindow : Window, IDashboardReplacementWindow
     {
         if (ContextBox.Text.Length <= CodexAgentPromptStore.MaximumContextCharacters) return true;
         ContextExpander.IsExpanded = true;
+        SettingsPopup.IsOpen = true;
         ShowStatus($"Project context is too long ({ContextBox.Text.Length:N0} characters). Shorten it to " +
             $"{CodexAgentPromptStore.MaximumContextCharacters:N0} characters or fewer. Your full text is kept.", error: true);
-        ContextBox.Focus();
+        _ = Dispatcher.BeginInvoke(new Action(() => ContextBox.Focus()));
         return false;
     }
 
@@ -653,11 +776,32 @@ public partial class CodexStartAgentWindow : Window, IDashboardReplacementWindow
     private async void Window_Closing(object? sender, CancelEventArgs e)
     {
         if (IsSubmitting || _savingContext || _checkingStatus || _closingContext || _pastingImage || _loadingAccess ||
-            _changingContextGatherer || _receivingContextGathererDraft)
+            _changingContextGatherer || _receivingContextGathererDraft || _changingDictation || _closingDictation)
         {
             e.Cancel = true;
             return;
         }
+        if (_dictationSession is not null)
+        {
+            e.Cancel = true;
+            _replacementClosePending = true;
+            _closingDictation = true;
+            var stopped = false;
+            try { stopped = await StopDictationAsync(); }
+            finally
+            {
+                _closingDictation = false;
+                if (!stopped) _replacementClosePending = false;
+                UpdateControls();
+            }
+            if (stopped) _ = Dispatcher.BeginInvoke(new Action(() =>
+            {
+                try { Close(); }
+                finally { _replacementClosePending = false; }
+            }));
+            return;
+        }
+        if (_dashboardResumeClose) return;
         if (!HasUnsavedContext) return;
         e.Cancel = true;
         _replacementClosePending = true;
@@ -691,6 +835,11 @@ public partial class CodexStartAgentWindow : Window, IDashboardReplacementWindow
     {
         if (e.Key == Key.Escape)
         {
+            if (SettingsPopup.IsOpen)
+            {
+                SettingsPopup_PreviewKeyDown(sender, e);
+                return;
+            }
             if (!IsSubmitting && !_savingContext) Close();
             e.Handled = true;
         }

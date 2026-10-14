@@ -27,6 +27,7 @@ public partial class MainWindow
             var editor = new ApiLaunchProfileWindow(service.Name, service.Profile, directory,
                 draft => SaveApiLaunchProfileAsync(project, service, originalProfile, directory, stopRevision, draft))
             { Owner = this };
+            RegisterServiceEditorResume(editor, project, service);
             editor.ShowDialog();
         }
         catch (Exception)

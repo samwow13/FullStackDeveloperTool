@@ -28,12 +28,97 @@ internal static class QueueOwnerClient
     // legacy response fields and read-only exact-turn history reconciliation.
     // Version 13 binds queue lifetime to the dashboard and confirms stop/clear
     // before closing, without discarding notes or execution receipts.
-    internal const int ProtocolVersion = 13;
+    // Version 14 transfers dashboard ownership without interrupting the active
+    // turn, and blocks new dispatch until the replacement confirms startup.
+    internal const int ProtocolVersion = 14;
     private const string OlderOwnerMessage =
         "An older queue owner is still running. When its task is inactive, exit it from the Full Stack Launcher queue tray icon, then reopen Notes & queue. Existing work was not stopped.";
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
     private static readonly SemaphoreSlim CompatibilityGate = new(1, 1);
     private static readonly long DashboardStartedAtUtcTicks = GetCurrentProcessStartedAtUtcTicks();
+
+    internal static QueueOwnerDashboardHandoff CreateDashboardHandoff(int? replacementProcessId, long? replacementStartedAtUtcTicks)
+    {
+        if (replacementProcessId is null or <= 4 || replacementStartedAtUtcTicks is null or <= 0 ||
+            replacementProcessId == Environment.ProcessId)
+            throw new IOException("Launcher replacement identity is missing. Existing dashboard and queue work were preserved.");
+        return new(replacementProcessId.Value, replacementStartedAtUtcTicks.Value);
+    }
+
+    internal static async Task CompleteDashboardHandoffAsync(CancellationToken cancellationToken = default)
+    {
+        var store = new ProjectTaskStore();
+        var reply = await TrySendAsync(store.StorePath, new QueueOwnerRequest(ProtocolVersion, "handoff-complete", null, null,
+            DashboardProcessId: Environment.ProcessId, DashboardProcessStartedAtUtcTicks: DashboardStartedAtUtcTicks), cancellationToken);
+        if (reply == null && !IsOwnerMutexHeld(store.StorePath)) return;
+        RequireHandoffReply(reply, "handoff-complete", "handoff-not-pending");
+    }
+
+    private static void RequireHandoffReply(QueueOwnerReply? reply, params string[] acceptedStates)
+    {
+        if (reply != null && IsProtocolMismatch(reply)) throw new IOException(OlderOwnerMessage);
+        if (reply?.Success != true || reply.State is not { } state || !acceptedStates.Contains(state, StringComparer.Ordinal))
+            throw new IOException(reply?.Message ??
+                "The queue owner did not confirm dashboard transfer. Existing work and queue records were preserved; keep Launcher open and retry replacement.");
+    }
+
+    internal sealed class QueueOwnerDashboardHandoff(int replacementProcessId, long replacementStartedAtUtcTicks)
+    {
+        private readonly string _storePath = new ProjectTaskStore().StorePath;
+        private readonly string _id = Guid.NewGuid().ToString("N");
+        private bool _mayHavePrepared;
+        private bool _ownerMissing;
+        internal bool SourceOwnershipConfirmed { get; private set; }
+
+        internal async Task PrepareAsync(CancellationToken cancellationToken)
+        {
+            using var replacement = FullStackLauncher.Services.DashboardReplacementPeer.Pin(replacementProcessId, replacementStartedAtUtcTicks);
+            // A lost startup acknowledgement may have left this exact dashboard
+            // as the pending target. Complete that idempotent ownership change
+            // before beginning another one; never retry dispatch or queue work.
+            await CompleteDashboardHandoffAsync(cancellationToken);
+            SourceOwnershipConfirmed = true;
+            _mayHavePrepared = true;
+            var reply = await TrySendAsync(_storePath, Request("handoff-prepare"), cancellationToken);
+            if (reply == null && !IsOwnerMutexHeld(_storePath))
+            {
+                _ownerMissing = true;
+                _mayHavePrepared = false;
+                return;
+            }
+            if (reply != null && IsProtocolMismatch(reply)) _mayHavePrepared = false;
+            RequireHandoffReply(reply, "handoff-prepared", "handoff-transferred");
+        }
+
+        internal async Task TransferAsync(CancellationToken cancellationToken)
+        {
+            using var replacement = FullStackLauncher.Services.DashboardReplacementPeer.Pin(replacementProcessId, replacementStartedAtUtcTicks);
+            if (_ownerMissing)
+            {
+                if (IsOwnerMutexHeld(_storePath))
+                {
+                    SourceOwnershipConfirmed = false;
+                    throw new IOException("A queue owner appeared during Launcher replacement. Existing work was preserved; retry replacement to verify its identity.");
+                }
+                return;
+            }
+            RequireHandoffReply(await TrySendAsync(_storePath, Request("handoff-transfer"), cancellationToken), "handoff-transferred");
+        }
+
+        internal async Task RollbackAsync(CancellationToken cancellationToken = default)
+        {
+            if (!_mayHavePrepared || _ownerMissing) return;
+            var reply = await TrySendAsync(_storePath, Request("handoff-rollback"), cancellationToken, connectTimeoutMs: 2000);
+            if (reply == null && !IsOwnerMutexHeld(_storePath)) { _mayHavePrepared = false; return; }
+            RequireHandoffReply(reply, "handoff-rolled-back");
+            _mayHavePrepared = false;
+        }
+
+        private QueueOwnerRequest Request(string command) => new(ProtocolVersion, command, null, null,
+            DashboardProcessId: Environment.ProcessId, DashboardProcessStartedAtUtcTicks: DashboardStartedAtUtcTicks,
+            HandoffId: _id, ReplacementDashboardProcessId: replacementProcessId,
+            ReplacementDashboardProcessStartedAtUtcTicks: replacementStartedAtUtcTicks);
+    }
 
     internal static string IdentityFor(string storePath) => Convert.ToHexString(
         SHA256.HashData(Encoding.UTF8.GetBytes(Path.GetFullPath(storePath).ToUpperInvariant()))).ToLowerInvariant();
@@ -288,7 +373,9 @@ internal static class QueueOwnerClient
 internal sealed record QueueOwnerRequest(int Version, string Command, string? ProjectId, bool? Paused,
     string? AttemptId = null, bool ConfirmedNoActiveTask = false,
     string? ItemId = null, bool ConfirmedRetry = false,
-    int? DashboardProcessId = null, long? DashboardProcessStartedAtUtcTicks = null);
+    int? DashboardProcessId = null, long? DashboardProcessStartedAtUtcTicks = null,
+    string? HandoffId = null, int? ReplacementDashboardProcessId = null,
+    long? ReplacementDashboardProcessStartedAtUtcTicks = null);
 internal sealed record QueueOwnerReply(bool Success, string Message, string? State = null,
     bool HasActiveWork = false, bool CanStopCurrent = false, string? ActiveProjectId = null,
     string? ActiveAttemptId = null);

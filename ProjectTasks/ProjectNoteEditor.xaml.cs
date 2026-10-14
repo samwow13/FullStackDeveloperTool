@@ -14,6 +14,23 @@ public partial class ProjectNoteEditor : UserControl
 
     public void FocusPrompt() => NotePrompt.Focus();
 
+    internal void CaptureResumeState()
+    {
+        if (DataContext is ProjectTasksViewModel model)
+            model.CaptureNoteEditorResumeState(new(model.ProjectId, model.SelectedNote?.Id,
+                NotePrompt.SelectionStart, NotePrompt.SelectionLength, NotePrompt.VerticalOffset));
+    }
+
+    internal void RestoreResumeState()
+    {
+        if (DataContext is not ProjectTasksViewModel model || model.NoteEditorResumeState is not { } state ||
+            state.ProjectId != model.ProjectId || state.NoteId != model.SelectedNote?.Id) return;
+        var start = Math.Clamp(state.SelectionStart, 0, NotePrompt.Text.Length);
+        NotePrompt.Select(start, Math.Clamp(state.SelectionLength, 0, NotePrompt.Text.Length - start));
+        if (double.IsFinite(state.VerticalOffset) && state.VerticalOffset >= 0)
+            NotePrompt.ScrollToVerticalOffset(state.VerticalOffset);
+    }
+
     private void NoteEditor_PreviewKeyDown(object sender, KeyEventArgs e)
     {
         if (e.Key != Key.V || Keyboard.Modifiers != ModifierKeys.Control) return;

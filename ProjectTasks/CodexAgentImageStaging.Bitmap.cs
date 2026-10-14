@@ -8,7 +8,7 @@ namespace FullStackLauncher.ProjectTasks;
 internal static partial class CodexAgentImageStaging
 {
     /// <summary>Encode frozen clipboard or desktop pixels using the existing attachment budget.</summary>
-    internal static CodexAgentChatImage EncodeBitmap(BitmapSource source, string caption)
+    internal static CodexAgentChatImage EncodeBitmap(BitmapSource source, string caption, CodexAgentCaptureContext? captureContext = null)
     {
         ArgumentNullException.ThrowIfNull(source);
         if (source.PixelWidth < 1 || source.PixelHeight < 1 ||
@@ -36,9 +36,16 @@ internal static partial class CodexAgentImageStaging
         }
         if (output.Length == 0 || output.Length > CodexAgentChatImage.MaximumBytes)
             throw new ArgumentException("The image exceeds the 8 MB attachment limit. Select a smaller area.");
+        var context = captureContext is null ? null : captureContext with
+        {
+            SentImageWidth = source.PixelWidth,
+            SentImageHeight = source.PixelHeight
+        };
+        context?.Validate();
         return new CodexAgentChatImage
         {
-            Caption = caption, MimeType = mimeType, DataBase64 = Convert.ToBase64String(output.ToArray())
+            Caption = caption, MimeType = mimeType, DataBase64 = Convert.ToBase64String(output.ToArray()),
+            CaptureContext = context
         };
     }
 

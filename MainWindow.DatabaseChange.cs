@@ -27,6 +27,8 @@ public partial class MainWindow
                 (configuration, key, value) => SaveDatabaseAndRestartAsync(service, configuration, key, value, editor!),
                 service.ObserveDatabaseConfiguration)
                 { Owner = this };
+            var project = Projects.FirstOrDefault(item => item.Services.Contains(service.Profile));
+            if (project is not null) RegisterServiceEditorResume(editor, project, service);
             editor.ShowDialog();
         }
         catch (ApiSecretStoreException ex) { Notice = ex.Message; }

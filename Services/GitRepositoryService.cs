@@ -75,13 +75,13 @@ public static partial class GitRepositoryService
         {
             var comparison = new GitRemoteComparison
             {
-                Remote = remote, Branch = branch,
+                Remote = remote, LocalBranch = branch,
                 UntrackedFiles = snapshot.Changes.Count(change => change.IndexStatus == "?" && change.WorkTreeStatus == "?")
             };
             if (snapshot.IsDetached || snapshot.Branch != branch)
-                return comparison with { UnavailableReason = "Select a current local branch to compare with its remote." };
+                return comparison with { UnavailableReason = "Select a current local branch to compare with the release branch." };
             if (snapshot.IsUnborn)
-                return comparison with { UnavailableReason = "Create the first commit to compare this branch with its remote." };
+                return comparison with { UnavailableReason = "Create the first commit to compare this branch with the release branch." };
             if (snapshot.Changes.Any(change => change.IsConflict))
                 return comparison with { UnavailableReason = "Resolve the merge conflicts before comparing line totals." };
             await ValidateBranchAsync(root, branch, token).ConfigureAwait(false);
@@ -89,30 +89,33 @@ public static partial class GitRepositoryService
             var pushUrl = await RequireSingleRemoteAsync(root, remote, true, token).ConfigureAwait(false);
             if (!string.Equals(fetchUrl, pushUrl, StringComparison.Ordinal))
                 return comparison with { UnavailableReason = "This remote has different fetch and push targets; their line totals cannot be compared here." };
-            var remoteBranch = snapshot.Branches.FirstOrDefault(item => item.IsRemote && item.Name == remote + "/" + branch);
-            var ahead = 0;
-            var behind = 0;
+            var releaseBranch = await ReadReleaseBranchAsync(root, remote, token).ConfigureAwait(false);
+            if (releaseBranch is null)
+                return comparison with { UnavailableReason = "Choose the release branch in Git Config to compare local changes with release." };
+            comparison = comparison with { Branch = releaseBranch };
+            var remoteBranch = snapshot.Branches.FirstOrDefault(item => item.IsRemote && item.Name == remote + "/" + releaseBranch);
             if (remoteBranch is null)
-                comparison = comparison with { UnavailableReason = "No cached remote branch. Fetch to check for it, or push to publish this branch." };
-            else
-            {
-                var counts = await GitAsync(root, ["rev-list", "--left-right", "--count", snapshot.HeadCommit + "..." + remoteBranch.CommitId, "--"], token).ConfigureAwait(false);
-                EnsureSuccess(counts);
-                var numbers = counts.Output.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries);
-                if (numbers.Length != 2 || !int.TryParse(numbers[0], out ahead) || ahead < 0 || !int.TryParse(numbers[1], out behind) || behind < 0)
-                    throw new InvalidOperationException("Git returned invalid ahead/behind counts.");
-            }
-            var baseline = remoteBranch?.CommitId ?? snapshot.HeadCommit;
+                return comparison with { UnavailableReason = $"No cached release branch {remote}/{releaseBranch}. Fetch to update it, or review the release branch in Git Config." };
+            var counts = await GitAsync(root, ["rev-list", "--left-right", "--count", snapshot.HeadCommit + "..." + remoteBranch.CommitId, "--"], token).ConfigureAwait(false);
+            EnsureSuccess(counts);
+            var numbers = counts.Output.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries);
+            if (numbers.Length != 2 || !int.TryParse(numbers[0], out var ahead) || ahead < 0 || !int.TryParse(numbers[1], out var behind) || behind < 0)
+                throw new InvalidOperationException("Git returned invalid ahead/behind counts.");
+            // Compare complete content against the release tip, not commits since the push
+            // destination or merge base. Release changes merged locally then cancel out;
+            // identical released content also reaches zero after squash/rebase integration.
             var diff = await GitAsync(root,
-                ["diff", "--numstat", "-z", "--no-ext-diff", "--no-textconv", "--no-color", "--find-renames", "--ignore-submodules=none", baseline, "--"], token).ConfigureAwait(false);
+                ["diff", "--numstat", "-z", "--no-ext-diff", "--no-textconv", "--no-color", "--find-renames", "--ignore-submodules=none", remoteBranch.CommitId, "--"], token).ConfigureAwait(false);
             EnsureSuccess(diff);
             var totals = ParseNumStat(diff.Output);
+            if (await ReadReleaseBranchAsync(root, remote, token).ConfigureAwait(false) != releaseBranch)
+                throw new InvalidOperationException("The release branch changed while reading its comparison. Refresh to obtain current totals.");
             var final = await ReadCoreAsync(root, token).ConfigureAwait(false);
             if (final.StateFingerprint != snapshot.StateFingerprint)
                 throw new InvalidOperationException("The repository changed while reading its comparison. Refresh to obtain current totals.");
             return comparison with
             {
-                Available = remoteBranch is not null, IsLocalComparison = remoteBranch is null,
+                Available = true,
                 Ahead = ahead, Behind = behind, ChangedFiles = totals.Files,
                 AddedLines = totals.Added, DeletedLines = totals.Deleted, BinaryFiles = totals.Binary
             };
@@ -475,6 +478,10 @@ public static partial class GitRepositoryService
             if (authenticationMode.ExitCode is not (0 or 1)) ThrowCommandFailure(authenticationMode);
             var authenticationTarget = await GitAsync(root, ["config", "--local", "--get-all", $"remote.{name}.launcherAuthenticationTarget"], token).ConfigureAwait(false);
             if (authenticationTarget.ExitCode is not (0 or 1)) ThrowCommandFailure(authenticationTarget);
+            var releaseBranch = await GitAsync(root, ["config", "--local", "--get-all", $"remote.{name}.launcherReleaseBranch"], token).ConfigureAwait(false);
+            if (releaseBranch.ExitCode is not (0 or 1)) ThrowCommandFailure(releaseBranch);
+            var releaseTarget = await GitAsync(root, ["config", "--local", "--get-all", $"remote.{name}.launcherReleaseTarget"], token).ConfigureAwait(false);
+            if (releaseTarget.ExitCode is not (0 or 1)) ThrowCommandFailure(releaseTarget);
             GitHostingProvider? provider = providerResult.Output.TrimEnd('\r', '\n') switch
             {
                 "GitHub" => GitHostingProvider.GitHub,
@@ -488,7 +495,8 @@ public static partial class GitRepositoryService
             if (!canCopy || providerTarget.Output.TrimEnd('\r', '\n') != RemoteTargetFingerprint(ValidateRemoteUrl(fetchUrls[0]))) provider = null;
             remoteIdentity.Append(name).Append('\0').Append(fetchResult.Output).Append('\0').Append(pushResult.Output).Append('\0')
                 .Append(providerResult.Output).Append('\0').Append(providerTarget.Output).Append('\0').Append(postPushResult.Output).Append('\0')
-                .Append(authenticationMode.Output).Append('\0').Append(authenticationTarget.Output).Append('\0');
+                .Append(authenticationMode.Output).Append('\0').Append(authenticationTarget.Output).Append('\0')
+                .Append(releaseBranch.Output).Append('\0').Append(releaseTarget.Output).Append('\0');
             remotes.Add(new GitRemoteInfo
             {
                 Name = name,

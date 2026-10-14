@@ -310,8 +310,8 @@ public partial class GitWorkspaceWindow : Window, INotifyPropertyChanged, IDashb
             CheckGitReadFailures();
             if (snapshot.IsRepository && SelectedRemote == null && _configOpen && !_setupOpen && !HasSyncRecovery)
                 OpenSetup(Remotes.Count > 0 ? SetupStep.Connections : SetupStep.Choice);
-            if (!_cacheRefreshFailed) SetStatus($"Git status {state.ReadAt.LocalDateTime:T} · " + (_comparison is { IsLocalComparison: true }
-                ? "line totals use the last local commit." : "remote comparison uses last fetched history."));
+            if (!_cacheRefreshFailed) SetStatus($"Git status {state.ReadAt.LocalDateTime:T} · " + (_comparison is { Available: true }
+                ? "release comparison uses last fetched history." : "release comparison needs a saved target and fetched history."));
         }
         catch (Exception ex)
         {
@@ -501,12 +501,8 @@ public partial class GitWorkspaceWindow : Window, INotifyPropertyChanged, IDashb
     }
 
     private Task<bool> SaveAgentConnectionSelectionAsync(string root, GitRemoteInfo remote) =>
-        ExecuteAsync("Select active Git connection", async token =>
-        {
-            await AgentGitChangeStore.SelectConnectionAsync(root, remote.Name, AgentGitChangeStore.ConnectionId(remote), token);
-            await _gitService.RefreshLedgerAsync(root, token);
-            return $"{remote.Name} is now the active connection for agent change summaries in this checkout.";
-        }, refresh: false, useResultAsStatus: true);
+        ExecuteAsync("Select active Git connection", token => GitRepositoryService.SelectActiveConnectionAsync(root, remote, token),
+            completed: _ => _preferredRemote = remote.Name, useResultAsStatus: true);
 
     private void UpdateRemoteSelection()
     {

@@ -20,15 +20,74 @@ public partial class ChangeDatabaseWindow : Window, IDashboardReplacementWindow
     private ApiDatabaseConfiguration? _snapshot;
     private ApiDatabaseConnectionSetting? _selectedConnection;
     private string _baselineValue = "";
-    private string _baselineDatabaseName = "";
     private bool _ready;
     private bool _busy;
     private bool _suppressEditor;
-    private bool _suppressSelection;
-    private bool _databaseNameNeedsApply;
     private bool _completed;
     private bool _retryRequired;
     private bool _configurationSaved;
+    private Action? _clearDashboardResume;
+    private ChangeDatabaseEditorResume? _restoredDatabaseResume;
+    private bool _dashboardResumePending;
+    private bool _dashboardResumeClose;
+    private bool _resumeReviewRequired;
+    private bool _hasRestoredDatabaseDraft;
+    private string? _reviewedSnapshotFingerprint;
+    private string? _restoredConnectionKey;
+
+    internal void ConfigureDashboardResume(ChangeDatabaseEditorResume? state, Action clearDashboardResume)
+    {
+        _clearDashboardResume = clearDashboardResume;
+        _restoredDatabaseResume = state;
+        _dashboardResumePending = state is not null;
+    }
+
+    internal ChangeDatabaseEditorResume CaptureDashboardResume() => new(
+        _selectedConnection?.Key ?? _restoredConnectionKey, EditorValue, _baselineValue,
+        _resumeReviewRequired ? _reviewedSnapshotFingerprint : _snapshot?.GetDashboardResumeFingerprint() ?? _reviewedSnapshotFingerprint,
+        _retryRequired, _configurationSaved, _resumeReviewRequired);
+
+    internal void MarkDashboardResumeCheckpointed()
+    {
+        _dashboardResumePending = true;
+        _dashboardResumeClose = true;
+    }
+
+    private void ClearDashboardResume()
+    {
+        if (!_dashboardResumePending) return;
+        _clearDashboardResume?.Invoke();
+        _dashboardResumePending = false;
+    }
+
+    private void ApplyRestoredDatabaseResume()
+    {
+        if (_restoredDatabaseResume is not { } state) return;
+        _restoredDatabaseResume = null;
+        _hasRestoredDatabaseDraft = true;
+        _restoredConnectionKey = state.ConnectionKey;
+        var selected = state.ConnectionKey is null ? null : _snapshot?.Connections.FirstOrDefault(connection =>
+            connection.Key.Equals(state.ConnectionKey, StringComparison.OrdinalIgnoreCase));
+        _selectedConnection = selected;
+        _baselineValue = state.BaselineValue;
+        _reviewedSnapshotFingerprint = state.SnapshotFingerprint;
+        _retryRequired = state.RetryRequired;
+        _configurationSaved = state.ConfigurationSaved;
+        _resumeReviewRequired = state.ReviewRequired || _snapshot is null || selected is null ||
+            state.SnapshotFingerprint is null || _snapshot.GetDashboardResumeFingerprint() != state.SnapshotFingerprint;
+        _suppressEditor = true;
+        ConnectionStringBox.Text = state.Value;
+        _suppressEditor = false;
+        ConnectionSourceText.Text = selected is null ? "" : $"Setting: {selected.Key} · Source: {selected.Source} · Local profile";
+        if (_resumeReviewRequired)
+        {
+            var failure = _snapshot is null ? StatusText.Text + " " : "";
+            SetStatus(failure + "Saved connection draft restored, but Local configuration changed or could not be rechecked. Saving is blocked. Copy the draft, cancel, then reopen Change DB to review current configuration before reapplying it.", true);
+        }
+        else SetStatus(_retryRequired
+            ? "Saved connection draft restored. Configuration was saved earlier; choose Save & restart explicitly to retry its unverified restart."
+            : "Connection draft restored. Review, then choose Save & restart when ready.");
+    }
 
     public ChangeDatabaseWindow(ServiceProfile profile, string directory,
         Func<ApiDatabaseConfiguration, string, string, Task<bool>> saveAndRestart,
@@ -47,20 +106,12 @@ public partial class ChangeDatabaseWindow : Window, IDashboardReplacementWindow
         UpdateControls();
     }
 
-    private string EditorValue => RevealCheckBox.IsChecked == true
-        ? RevealedConnectionBox.Text : ConnectionPasswordBox.Password;
+    private string EditorValue => ConnectionStringBox.Text;
 
-    private bool HasChanges => _selectedConnection is not null &&
-        (!string.Equals(EditorValue, _baselineValue, StringComparison.Ordinal) ||
-         !string.Equals(DatabaseNameBox.Text, _baselineDatabaseName, StringComparison.Ordinal));
+    private bool HasChanges => (_selectedConnection is not null || _hasRestoredDatabaseDraft) &&
+        !string.Equals(EditorValue, _baselineValue, StringComparison.Ordinal);
 
     private async void Window_Loaded(object sender, RoutedEventArgs e) => await LoadConfigurationAsync();
-
-    private async void Reload_Click(object sender, RoutedEventArgs e)
-    {
-        if (_busy || !ConfirmDiscard("reload Local configuration")) return;
-        await LoadConfigurationAsync();
-    }
 
     private async Task LoadConfigurationAsync()
     {
@@ -71,13 +122,11 @@ public partial class ChangeDatabaseWindow : Window, IDashboardReplacementWindow
             var loaded = await Task.Run(() => ApiDatabaseConfiguration.Load(
                 _profile, _directory, "Local", importLegacyForReview: true));
             _snapshot = loaded;
+            _reviewedSnapshotFingerprint = loaded.GetDashboardResumeFingerprint();
             _configurationDiscovered?.Invoke(loaded);
             SourceFolderText.Text = $"Folder: {loaded.WorkingDirectory}";
             SourceProjectText.Text = $"Project: {loaded.ProjectFilePath}";
             LegacyDisclosureText.Visibility = loaded.HasStagedLegacyValues ? Visibility.Visible : Visibility.Collapsed;
-            _suppressSelection = true;
-            // Only key names become picker items or accessibility content.
-            ConnectionKeyBox.ItemsSource = loaded.Connections.Select(connection => connection.Key).ToArray();
             var selected = loaded.Connections.FirstOrDefault(connection =>
                 connection.Key.Equals("DefaultConnectionString", StringComparison.OrdinalIgnoreCase))
                 ?? loaded.Connections.FirstOrDefault(connection =>
@@ -85,15 +134,13 @@ public partial class ChangeDatabaseWindow : Window, IDashboardReplacementWindow
                 ?? loaded.Connections.FirstOrDefault(connection =>
                     connection.Key.Equals("ConnectionStrings:DefaultConnection", StringComparison.OrdinalIgnoreCase))
                 ?? loaded.Connections.FirstOrDefault();
-            ConnectionKeyBox.SelectedItem = selected?.Key;
-            _suppressSelection = false;
             SetConnection(selected);
             _retryRequired = false;
             SetStatus(selected is null
                 ? "No database connection string was found. Check this API's Local configuration."
                 : loaded.HasStagedLegacyValues
                     ? "Local values loaded for review. Save creates an encrypted launcher copy and restarts the API."
-                    : "Local connection loaded. Change the database name or connection string, then save and restart.");
+                    : "Local connection loaded. Edit the connection string, then save and restart.");
         }
         catch (ApiSecretStoreException ex)
         {
@@ -111,143 +158,39 @@ public partial class ChangeDatabaseWindow : Window, IDashboardReplacementWindow
         }
         finally
         {
-            _suppressSelection = false;
+            ApplyRestoredDatabaseResume();
             SetBusy(false);
         }
-        if (_selectedConnection is not null)
-        {
-            if (DatabaseNameBox.IsEnabled) DatabaseNameBox.Focus();
-            else ConnectionPasswordBox.Focus();
-        }
+        if (_selectedConnection is not null) ConnectionStringBox.Focus();
         else CancelButton.Focus();
-    }
-
-    private void ConnectionKey_SelectionChanged(object sender, SelectionChangedEventArgs e)
-    {
-        if (!_ready || _suppressSelection || _busy) return;
-        var selectedKey = ConnectionKeyBox.SelectedItem as string;
-        var selected = _snapshot?.Connections.FirstOrDefault(connection =>
-            string.Equals(connection.Key, selectedKey, StringComparison.OrdinalIgnoreCase));
-        if (ReferenceEquals(selected, _selectedConnection)) return;
-        if (!ConfirmDiscard("switch connection keys"))
-        {
-            _suppressSelection = true;
-            ConnectionKeyBox.SelectedItem = _selectedConnection?.Key;
-            _suppressSelection = false;
-            return;
-        }
-        SetConnection(selected);
-        SetStatus("Connection loaded. Changes remain in this window until you save and restart.");
     }
 
     private void SetConnection(ApiDatabaseConnectionSetting? connection)
     {
         _selectedConnection = connection;
         _baselineValue = connection?.Value ?? "";
-        _baselineDatabaseName = connection?.DatabaseDisplayName ?? "";
         _suppressEditor = true;
-        RevealCheckBox.IsChecked = false;
-        RevealedConnectionBox.Clear();
-        RevealedConnectionBox.Visibility = Visibility.Collapsed;
-        ConnectionPasswordBox.Visibility = Visibility.Visible;
-        ConnectionValueLabel.Target = ConnectionPasswordBox;
-        ConnectionPasswordBox.Password = _baselineValue;
-        DatabaseNameBox.Text = _baselineDatabaseName;
-        _databaseNameNeedsApply = false;
+        ConnectionStringBox.Text = _baselineValue;
         _suppressEditor = false;
         ConnectionSourceText.Text = connection is not null
-            ? $"Source: {connection.Source} · Local profile" : "No connection string available.";
+            ? $"Setting: {connection.Key} · Source: {connection.Source} · Local profile" : "";
         UpdateControls();
     }
 
-    private void Connection_PasswordChanged(object sender, RoutedEventArgs e) => ConnectionValueChanged();
-    private void Connection_TextChanged(object sender, TextChangedEventArgs e) => ConnectionValueChanged();
-
-    private void ConnectionValueChanged()
+    private void Connection_TextChanged(object sender, TextChangedEventArgs e)
     {
         if (!_ready || _suppressEditor) return;
-        _suppressEditor = true;
-        DatabaseNameBox.Text = ApiDatabaseConfiguration.ReadDatabaseDisplayName(EditorValue) ?? "";
-        _databaseNameNeedsApply = false;
-        _suppressEditor = false;
-        UpdateControls();
-    }
-
-    private void DatabaseName_TextChanged(object sender, TextChangedEventArgs e)
-    {
-        if (!_ready || _suppressEditor || _selectedConnection is null) return;
-        _databaseNameNeedsApply = true;
-        try
-        {
-            var value = ApiDatabaseConfiguration.WithDatabaseName(EditorValue, DatabaseNameBox.Text);
-            ReplaceEditorValue(value);
-            _databaseNameNeedsApply = false;
-        }
-        catch (Exception)
-        {
-            // Keep incomplete name drafts intact; report validation only on Save.
-        }
-        UpdateControls();
-    }
-
-    private void ReplaceEditorValue(string value)
-    {
-        _suppressEditor = true;
-        if (RevealCheckBox.IsChecked == true) RevealedConnectionBox.Text = value;
-        else ConnectionPasswordBox.Password = value;
-        _suppressEditor = false;
-    }
-
-    private void Reveal_Changed(object sender, RoutedEventArgs e)
-    {
-        if (!_ready || _suppressEditor) return;
-        _suppressEditor = true;
-        if (RevealCheckBox.IsChecked == true)
-        {
-            RevealedConnectionBox.Text = ConnectionPasswordBox.Password;
-            ConnectionPasswordBox.Clear();
-            ConnectionPasswordBox.Visibility = Visibility.Collapsed;
-            RevealedConnectionBox.Visibility = Visibility.Visible;
-            ConnectionValueLabel.Target = RevealedConnectionBox;
-            RevealedConnectionBox.Focus();
-        }
-        else
-        {
-            ConnectionPasswordBox.Password = RevealedConnectionBox.Text;
-            RevealedConnectionBox.Clear();
-            RevealedConnectionBox.Visibility = Visibility.Collapsed;
-            ConnectionPasswordBox.Visibility = Visibility.Visible;
-            ConnectionValueLabel.Target = ConnectionPasswordBox;
-            ConnectionPasswordBox.Focus();
-        }
-        _suppressEditor = false;
         UpdateControls();
     }
 
     private async void Save_Click(object sender, RoutedEventArgs e)
     {
-        if (_busy || _snapshot is null || _selectedConnection is null || (!HasChanges && !_retryRequired)) return;
+        if (_busy || _resumeReviewRequired || _completed || _snapshot is null || _selectedConnection is null || (!HasChanges && !_retryRequired)) return;
         var value = EditorValue;
-        if (_databaseNameNeedsApply)
-        {
-            try
-            {
-                value = ApiDatabaseConfiguration.WithDatabaseName(value, DatabaseNameBox.Text);
-                ReplaceEditorValue(value);
-                _databaseNameNeedsApply = false;
-            }
-            catch (Exception)
-            {
-                SetStatus("Enter a valid database name for this connection string. Your draft was kept.", true);
-                DatabaseNameBox.Focus();
-                return;
-            }
-        }
         if (string.IsNullOrWhiteSpace(value))
         {
             SetStatus("Enter a database connection string. Your draft was kept.", true);
-            if (RevealCheckBox.IsChecked == true) RevealedConnectionBox.Focus();
-            else ConnectionPasswordBox.Focus();
+            ConnectionStringBox.Focus();
             return;
         }
 
@@ -282,7 +225,7 @@ public partial class ChangeDatabaseWindow : Window, IDashboardReplacementWindow
         _retryRequired = true;
         // Saved values become the draft baseline; retry availability is tracked separately.
         _baselineValue = EditorValue;
-        _baselineDatabaseName = DatabaseNameBox.Text;
+        _reviewedSnapshotFingerprint = _snapshot?.GetDashboardResumeFingerprint();
         UpdateControls();
     }
 
@@ -308,18 +251,11 @@ public partial class ChangeDatabaseWindow : Window, IDashboardReplacementWindow
     private void UpdateControls()
     {
         if (!_ready) return;
-        var editable = !_busy && _snapshot is not null && _selectedConnection is not null;
+        var editable = !_busy && (_hasRestoredDatabaseDraft || _snapshot is not null && _selectedConnection is not null);
         EditorPanel.IsEnabled = editable;
-        var canEditDatabaseName = _databaseNameNeedsApply || ApiDatabaseConfiguration.ReadDatabaseName(EditorValue) is not null;
-        DatabaseNameBox.IsEnabled = editable && canEditDatabaseName;
-        DatabaseNameHint.Text = canEditDatabaseName
-            ? "Changing this name keeps the host, credentials and other connection options."
-            : ApiDatabaseConfiguration.ReadDatabaseDisplayName(EditorValue) is not null
-                ? "SQLite database root detected. File names cannot be changed with this database-name editor."
-                : "A safe database name could not be read. Update the connection string.";
         CancelButton.IsEnabled = !_busy;
-        ReloadButton.IsEnabled = !_busy;
-        SaveButton.IsEnabled = editable && (HasChanges || _retryRequired);
+        SaveButton.IsEnabled = editable && !_resumeReviewRequired && !_completed && _snapshot is not null &&
+            _selectedConnection is not null && (HasChanges || _retryRequired);
     }
 
     private bool ConfirmDiscard(string action) => !HasChanges || MessageBox.Show(this,
@@ -333,8 +269,6 @@ public partial class ChangeDatabaseWindow : Window, IDashboardReplacementWindow
     private void Window_PreviewKeyDown(object sender, KeyEventArgs e)
     {
         if (e.Key != Key.Escape) return;
-        // Let the connection picker close its open list before Escape closes the modal.
-        if (ConnectionKeyBox.IsDropDownOpen) return;
         e.Handled = true;
         if (!_busy) Close();
     }
@@ -346,18 +280,24 @@ public partial class ChangeDatabaseWindow : Window, IDashboardReplacementWindow
             e.Cancel = true;
             return;
         }
-        if (!_completed && !ConfirmDiscard("close the window"))
+        if (!_dashboardResumeClose && !_completed && !ConfirmDiscard("close the window"))
         {
             e.Cancel = true;
             return;
         }
+        if (!_dashboardResumeClose)
+        {
+            try { ClearDashboardResume(); }
+            catch (Exception)
+            {
+                e.Cancel = true;
+                SetStatus("The old database draft checkpoint could not be cleared. The editor remains open; retry closing after checking local storage access.", true);
+                return;
+            }
+        }
         _suppressEditor = true;
-        ConnectionPasswordBox.Clear();
-        RevealedConnectionBox.Clear();
-        DatabaseNameBox.Clear();
+        ConnectionStringBox.Clear();
         _baselineValue = "";
-        _baselineDatabaseName = "";
-        ConnectionKeyBox.ItemsSource = null;
         _selectedConnection = null;
         _snapshot = null;
     }

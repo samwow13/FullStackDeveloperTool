@@ -39,6 +39,8 @@ internal sealed class AgentBridgeRequest
     public int? WaitSeconds { get; set; }
     public long? SinceSequence { get; set; }
     public long? HandoffDeadlineUnixMilliseconds { get; set; }
+    public int? ReplacementProcessId { get; set; }
+    public long? ReplacementProcessStartedAtUtcTicks { get; set; }
 }
 
 internal sealed record AgentBridgeResponse(bool Ok, object? Data = null, string? Error = null)

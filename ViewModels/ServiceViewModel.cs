@@ -247,7 +247,6 @@ public sealed partial class ServiceViewModel(ServiceRunner runner) : ObservableO
             NotifyIfChanged(HasCardDetail, nameof(HasCardDetail));
             NotifyIfChanged(ShowServiceTypeLabel, nameof(ShowServiceTypeLabel));
             NotifyIfChanged(CanConfigureApi, nameof(CanConfigureApi));
-            NotifyIfChanged(CanSwitchConfiguration, nameof(CanSwitchConfiguration));
             NotifyIfChanged(CanChangeDatabase, nameof(CanChangeDatabase));
         }
         finally
@@ -257,8 +256,7 @@ public sealed partial class ServiceViewModel(ServiceRunner runner) : ObservableO
         }
     }
     public bool CanConfigureApi => !AreCommandsBlocked && !IsEditing && HasApiConfiguration && !IsBusy && !IsStopping;
-    public bool CanSwitchConfiguration => CanConfigureApi && !HasConflict;
-    public bool CanChangeDatabase => CanSwitchConfiguration && CanRestart && !ProductionWarning;
+    public bool CanChangeDatabase => CanConfigureApi && !HasConflict && CanRestart && !ProductionWarning;
     public string SelectedConfiguration => Profile.ApiConfiguration?.Environment ?? "Local";
     public bool ProductionWarning => SelectedConfiguration == "Prod" || Runner.AppliedConfigurationEnvironment == "Prod";
     public string ConfigurationColor => ProductionWarning ? "#FFACA9" : "#A6B4C9";
@@ -279,11 +277,10 @@ public sealed partial class ServiceViewModel(ServiceRunner runner) : ObservableO
             if (_snapshot.State == ServiceState.Busy)
                 return $"{SelectedConfiguration.ToUpperInvariant()} SELECTED · service maintenance in progress";
             if (_snapshot.ProcessIds.Count > 0)
-                return $"ENVIRONMENT UNVERIFIED · {SelectedConfiguration} selected; restart through API settings";
+                return $"ENVIRONMENT UNVERIFIED · {SelectedConfiguration} selected; restart the API";
             return $"{SelectedConfiguration.ToUpperInvariant()} SELECTED · API stopped";
         }
     }
-    public string LocalButtonLabel => "Use Local & restart";
     public bool IsBusy { get => _isBusy; set { if (_isBusy == value) return; _isBusy = value; Update(); } }
     public bool IsStopping { get => _isStopping; set { if (_isStopping == value) return; _isStopping = value; Update(); } }
     public string Status => IsStopping ? "STOPPING" : _snapshot.State == ServiceState.Installing ? "INSTALLING"
@@ -503,7 +500,6 @@ public sealed partial class ServiceViewModel(ServiceRunner runner) : ObservableO
         NotifyIfChanged(ShowFunctionsMenu, nameof(ShowFunctionsMenu));
         NotifyDatabaseCard();
         NotifyIfChanged(CanConfigureApi, nameof(CanConfigureApi));
-        NotifyIfChanged(CanSwitchConfiguration, nameof(CanSwitchConfiguration));
         NotifyIfChanged(CanChangeDatabase, nameof(CanChangeDatabase));
         NotifyIfChanged(SelectedConfiguration, nameof(SelectedConfiguration));
         NotifyIfChanged(ProductionWarning, nameof(ProductionWarning));

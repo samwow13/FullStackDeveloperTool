@@ -14,9 +14,10 @@ public partial class GitWorkspaceWindow
 
     // Cached local state chooses the first window. A cold read uses the compact
     // loading host, keeping cancellation and close guards visible while it runs.
-    public async Task ShowGitDialogAsync(Window owner)
+    public async Task ShowGitDialogAsync(Window owner, bool openConnections = false)
     {
         Owner = owner;
+        _configOpen = openConnections;
         try
         {
             var initialLoad = InitializeGitDialogAsync();
