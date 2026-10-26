@@ -36,6 +36,9 @@ internal sealed class AgentBridgeRequest
     public string[]? Bullets { get; set; }
     public int? Limit { get; set; }
     public int? Offset { get; set; }
+    public string? SnapshotId { get; set; }
+    public string? ConsoleMode { get; set; }
+    public bool? IncludeSensitiveOutput { get; set; }
     public int? WaitSeconds { get; set; }
     public long? SinceSequence { get; set; }
     public long? HandoffDeadlineUnixMilliseconds { get; set; }

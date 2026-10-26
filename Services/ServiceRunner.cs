@@ -140,6 +140,8 @@ public sealed partial class ServiceRunner : IDisposable
     }
 
     public Task RefreshAsync() => WithGateAsync(() => RefreshCoreAsync());
+    internal Task RefreshForAgentAsync() => WithGateAsync(async () =>
+        await RefreshCoreAsync(await InspectAsync(fresh: true)));
     public Task RefreshForProfileEditAsync() => WithGateAsync(async () =>
         await RefreshCoreAsync(await InspectAsync(fresh: true)));
     public Task StartAsync()
@@ -893,7 +895,7 @@ public sealed partial class ServiceRunner : IDisposable
 
     private sealed record Inspection(ProcessInventory Inventory, IReadOnlyList<InspectedProcess> All,
         IReadOnlyList<InspectedProcess> Owned, IReadOnlyList<ListeningPort> ReportedListeners,
-        FlutterRuntimeStatus.NativeEvidence FlutterApps);
+        FlutterRuntimeStatus.NativeEvidence FlutterApps, DateTime ObservedUtc);
 
     // The inventory cache may already be complete. Dispatch the whole inspection, including
     // native identity/job checks and ownership traversal, instead of resuming that work on WPF.
@@ -989,7 +991,7 @@ public sealed partial class ServiceRunner : IDisposable
             ? FlutterRuntimeStatus.InspectNativeApps(WorkingDirectory, all) : FlutterRuntimeStatus.NativeEvidence.Empty;
         Volatile.Write(ref _flutterAppProcessIdentities, _intentionalStop || inventory.InspectionError is not null
             ? [] : flutterApps.Apps.Select(app => app.Identity).ToArray());
-        return new Inspection(inventory, all, owned, reportedListeners, flutterApps);
+        return new Inspection(inventory, all, owned, reportedListeners, flutterApps, DateTime.UtcNow);
     });
 
     private async Task RefreshCoreAsync(Inspection? inspection = null)
@@ -1063,7 +1065,15 @@ public sealed partial class ServiceRunner : IDisposable
         {
             var prefix = ids.Length == 0 ? "Service is stopped; " : "";
             var detail = $"{prefix}port {endpoint.Port} is occupied by another process (PID {string.Join(", ", foreign)}). Use Force stop or Resolve conflict & restart to review it.";
-            Publish(ServiceState.Conflict, detail, ids);
+            var reported = inspection.ReportedListeners.Where(p => p.Port == endpoint.Port && !ours.Contains(p.ProcessId))
+                .Select(p => p.ProcessId).Distinct().Order().ToArray();
+            var observedProcesses = inspection.Inventory.Processes.Select(p => p.Id).ToHashSet();
+            var activeListeners = foreign.ToHashSet();
+            var evidence = new ServiceConflictEvidence(endpoint.Port, inspection.ObservedUtc,
+                reported.Select(id => new ServiceBlockerEvidence(id,
+                    !activeListeners.Contains(id) ? "confirmed_exited" :
+                    observedProcesses.Contains(id) ? "observed" : "unknown_or_inaccessible")).ToArray());
+            Publish(ServiceState.Conflict, detail, ids, conflictEvidence: evidence);
             return;
         }
         if (ids.Length == 0)
@@ -1550,11 +1560,12 @@ public sealed partial class ServiceRunner : IDisposable
     }
 
     private void Publish(ServiceState state, string detail, IReadOnlyList<int> ids, string? url = null,
-        ServiceLogKind? runningLogKind = null)
+        ServiceLogKind? runningLogKind = null, ServiceConflictEvidence? conflictEvidence = null)
     {
         if (state == ServiceState.Error) detail = CommandFailureDetail(detail);
         var previous = Snapshot;
-        Volatile.Write(ref _snapshot, new(state, detail, ids.ToArray(), url, _hasManagedProcess));
+        Volatile.Write(ref _snapshot, new(state, detail, ids.ToArray(), url, _hasManagedProcess,
+            DateTime.UtcNow, conflictEvidence));
         var swaggerChanged = ResetSwaggerUiStatus(state);
         // A new stop/restart clears earlier diagnostics, including an identical error from
         // the previous attempt. Emit that current failure once in the fresh console buffer.

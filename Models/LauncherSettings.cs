@@ -140,7 +140,14 @@ public sealed class ApiConfigurationSelection
 public enum ServiceState { Stopped, Starting, Running, Busy, Conflict, Error, Checking, Completed, Installing }
 
 public sealed record ServiceSnapshot(ServiceState State, string Detail, IReadOnlyList<int> ProcessIds,
-    string? ActiveUrl = null, bool IsManaged = false);
+    string? ActiveUrl = null, bool IsManaged = false,
+    DateTime? PublishedUtc = null, ServiceConflictEvidence? ConflictEvidence = null);
+
+// This is a point-in-time observation, not authority to terminate a process.
+public sealed record ServiceConflictEvidence(int Port, DateTime ObservedUtc,
+    IReadOnlyList<ServiceBlockerEvidence> Blockers);
+
+public sealed record ServiceBlockerEvidence(int ProcessId, string Observation);
 
 public enum ServiceLogKind { Output, Command, Information, Success, Warning, Error }
 

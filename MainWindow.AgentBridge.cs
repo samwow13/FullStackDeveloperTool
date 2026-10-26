@@ -102,6 +102,15 @@ public partial class MainWindow
     {
         if (_closing || _closed || _closeRequested)
             return AgentBridgeResponse.Failure("Launcher dashboard is closing. Reconnect after it opens again.");
+        if (request.Action == "capabilities")
+            return AgentBridgeResponse.Success(new
+            {
+                schemaVersion = AgentBridgeCapabilities.SchemaVersion,
+                bridgeRevision = AgentBridgeCapabilities.BridgeRevision,
+                applicationVersion = AgentBridgeCapabilities.ApplicationVersion,
+                instanceId = _agentCoordination.InstanceId,
+                supportedActions = AgentBridgeCapabilities.Actions
+            });
         if (request.Action == "dashboard_handoff_capabilities")
         {
             // Read-only negotiation, before activity subscriptions or close work.
@@ -140,6 +149,7 @@ public partial class MainWindow
                 }),
                 "services" => AgentBridgeResponse.Success(ListAgentServices(request.ProjectId)),
                 "git_connections" => AgentBridgeResponse.Success(await ListAgentGitConnectionsAsync(request, cancellationToken)),
+                "git_status" => AgentBridgeResponse.Success(await ReadAgentGitStatusAsync(request, cancellationToken)),
                 "record_git_changes" => AgentBridgeResponse.Success(await RecordAgentGitChangesAsync(request, cancellationToken)),
                 "project_notes" => AgentBridgeResponse.Success(await ListAgentProjectNotesAsync(request, cancellationToken)),
                 "save_follow_up_note" => AgentBridgeResponse.Success(await SaveAgentFollowUpNoteAsync(request, cancellationToken)),
@@ -148,6 +158,7 @@ public partial class MainWindow
                 "ack_reply_inbox" => AgentBridgeResponse.Success(await AcknowledgeAgentReplyInboxAsync(request, cancellationToken)),
                 "service_status" => AgentBridgeResponse.Success(await AgentServiceStatusAsync(request)),
                 "recent_activity" => AgentBridgeResponse.Success(AgentRecentActivity(request)),
+                "service_console" => AgentBridgeResponse.Success(AgentServiceConsole(request)),
                 "reservation_status" => AgentBridgeResponse.Success(_agentCoordination.ReservationStatus(RequireProject(request.ProjectId).Id)),
                 "register_project" => AgentBridgeResponse.Success(await RegisterAgentProjectAsync(request, cancellationToken)),
                 "declare_service_use" => AgentBridgeResponse.Success(DeclareAgentServiceUse(request)),
@@ -248,9 +259,27 @@ public partial class MainWindow
         {
             projectId = project.Id, projectName = project.Name,
             serviceId = service.Profile.Id, serviceName = service.Name,
+            workingDirectory = service.Runner.WorkingDirectory,
             kind = service.Profile.Kind, isConsole = service.Profile.IsConsole,
             state = snapshot.State.ToString(),
             detail = SensitiveDataProtection.Redact(snapshot.Detail),
+            statusPublishedUtc = snapshot.PublishedUtc,
+            diagnostics = snapshot.State is ServiceState.Error or ServiceState.Conflict ? new
+            {
+                kind = snapshot.State == ServiceState.Conflict ? "port_conflict" : "service_error",
+                message = SensitiveDataProtection.Redact(snapshot.Detail),
+                conflict = snapshot.ConflictEvidence is { } conflict ? new
+                {
+                    port = conflict.Port,
+                    observedUtc = conflict.ObservedUtc,
+                    blockers = conflict.Blockers.Select(blocker => new
+                    {
+                        processId = blocker.ProcessId,
+                        observation = blocker.Observation
+                    }).ToArray(),
+                    scope = "Point-in-time TCP and process observations, not process identity or authority to stop. Unknown may mean inaccessible, exited, or a race."
+                } : null
+            } : null,
             processIds = snapshot.ProcessIds,
             isManaged = snapshot.IsManaged,
             activeUrl = service.Profile.IsConsole ? null : AgentLoopbackOrigin(snapshot.ActiveUrl),
@@ -273,7 +302,7 @@ public partial class MainWindow
     {
         var project = RequireProject(request.ProjectId);
         var service = RequireService(project, request.ServiceId);
-        await service.Runner.RefreshAsync();
+        await service.Runner.RefreshForAgentAsync();
         service.Update();
         return new { instanceId = _agentCoordination.InstanceId, checkedUtc = DateTime.UtcNow,
             service = AgentServiceData(project, service) };
